@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { sampleClientMsgs, sampleServerMsgs } from './fixtures.js';
-import { clientMsgSchema, isServerMsg, parseClientMsg } from './protocol.js';
+import { ERROR_CODES, clientMsgSchema, isServerMsg, parseClientMsg } from './protocol.js';
 
 describe('parseClientMsg', () => {
   it('accepts every client message type', () => {
@@ -53,5 +53,14 @@ describe('isServerMsg', () => {
 
   it('rejects other values', () => {
     for (const v of [null, 1, 'x', {}, { t: 'hello' }, { t: 5 }]) expect(isServerMsg(v)).toBe(false);
+  });
+});
+
+describe('ERROR_CODES', () => {
+  it('lists every code once, including the phase 5 and 6 ones', () => {
+    expect(new Set(ERROR_CODES).size).toBe(ERROR_CODES.length);
+    for (const c of ['UNSUPPORTED_FILTER', 'UNSUPPORTED_AGG', 'NOT_IMPLEMENTED', 'INVALID_TRANSITION', 'UNKNOWN_ORDER', 'SLOW_CONSUMER']) {
+      expect(ERROR_CODES).toContain(c);
+    }
   });
 });

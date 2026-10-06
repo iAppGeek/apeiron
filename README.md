@@ -26,10 +26,15 @@ Requirements: Node >= 24, pnpm 10, Docker.
 pnpm install
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
 cp .env.example .env                      # optional local overrides
-docker compose --profile core up -d       # mongo + nats
+docker compose --profile core up -d       # mongo + nats + antikythera (WS/HTTP on 127.0.0.1:4000, /health)
 docker compose --profile core --profile seed up gaia   # seed 1M orders (idempotent; second run is a no-op)
 pnpm --filter @apeiron/gaia stats          # sample statistics of the generated dataset
+pnpm --filter @apeiron/antikythera bench   # engine benchmarks on 1M generator rows (cold and warm)
 ```
+
+## Memory
+
+The `antikythera` container has `mem_limit: 3g` in `infra/docker-compose.yml` (matching the remote box budget, and keeping a runaway process from swapping the Docker VM). It needs about 0.9GB at the load peak and about 0.7-0.8GB once loaded.
 
 ## Licence
 
