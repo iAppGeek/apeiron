@@ -1,0 +1,13 @@
+node_modules
+dist
+.turbo
+.env*
+!.env.example
+*.tfstate*
+.terraform/
+loadtest/results/
+playwright-report/
+test-results/
+coverage
+*.log
+.DS_Store
