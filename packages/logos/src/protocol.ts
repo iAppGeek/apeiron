@@ -54,8 +54,34 @@ export type ServerMsg =
       server: { cpu: number; rssMb: number; elLagMs: number };
     }
   | { t: 'ack'; reqId: number }
-  | { t: 'error'; reqId?: number; code: string; message: string }
+  | { t: 'error'; reqId?: number; code: ErrorCode; message: string }
   | { t: 'pong'; ts: number; serverTs: number };
+
+/** Every `error.code` the server sends (Appendix C). Clients can switch on this type. */
+export const ERROR_CODES = [
+  // Request content
+  'UNSUPPORTED_FILTER',
+  'UNSUPPORTED_AGG',
+  'UNSUPPORTED_PIVOT',
+  'UNSUPPORTED_GROUP',
+  'UNSUPPORTED_COLUMN',
+  'UNKNOWN_COLUMN',
+  'UNKNOWN_TRADER',
+  // Message format and order
+  'BAD_REQUEST',
+  'BAD_FRAME',
+  'BAD_MESSAGE',
+  'HELLO_REQUIRED',
+  // Server state
+  'NOT_READY',
+  'NOT_IMPLEMENTED',
+  'INTERNAL',
+  // Phases 5 and 6
+  'INVALID_TRANSITION',
+  'UNKNOWN_ORDER',
+  'SLOW_CONSUMER',
+] as const;
+export type ErrorCode = (typeof ERROR_CODES)[number];
 
 export type Message = ClientMsg | ServerMsg;
 

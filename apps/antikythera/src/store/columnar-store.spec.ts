@@ -103,6 +103,34 @@ describe('ColumnarStore', () => {
     expect(store.rowAt(0).account).toBe('ACC-0');
   });
 
+  it('keeps earlier rows of the same batch when a dictionary widens mid-batch', () => {
+    const store = new ColumnarStore({ capacity: 400 });
+    const batch: Order[] = Array.from({ length: 300 }, (_, i) => ({
+      ...(orders[0] as Order),
+      orderId: `W${String(i).padStart(4, '0')}`,
+      venue: `V${i}` as Order['venue'],
+    }));
+    store.appendBatch(batch);
+    for (let i = 0; i < 300; i++) expect(store.rowAt(i).venue).toBe(`V${i}`);
+  });
+
+  it('widens across batches and combined with growth', () => {
+    const store = new ColumnarStore({ capacity: 4 });
+    const mk = (from: number, to: number): Order[] =>
+      Array.from({ length: to - from }, (_, i) => ({
+        ...(orders[0] as Order),
+        orderId: `X${String(from + i).padStart(5, '0')}`,
+        venue: `V${from + i}` as Order['venue'],
+      }));
+    store.appendBatch(mk(0, 200));
+    store.appendBatch(mk(200, 700));
+    store.appendBatch(mk(700, 1500));
+    expect(store.enumColumn('venue').codes).toBeInstanceOf(Uint16Array);
+    expect(store.capacity).toBeGreaterThanOrEqual(1500);
+    for (let i = 0; i < 1500; i++) expect(store.rowAt(i).venue).toBe(`V${i}`);
+    expect(store.rowAt(1499).orderId).toBe('X01499');
+  });
+
   it('materialises a range and reports memory', () => {
     const store = loaded();
     const idx = Uint32Array.from([5, 1, 3]);

@@ -24,6 +24,8 @@ const envSchema = z.object({
   STORE_CAPACITY: posInt('1500000'),
   VIEW_CACHE_MAX_VIEWS: posInt('64'),
   VIEW_CACHE_MAX_MB: posInt('384'),
+  /** Rows per batch when streaming the repository into the store. */
+  LOAD_BATCH_SIZE: posInt('200'),
   /** Largest `endRow - startRow` a client may request. */
   MAX_BLOCK_ROWS: posInt('5000'),
 });
@@ -44,6 +46,7 @@ export type AntikytheraConfig = {
   viewCacheMaxViews: number;
   viewCacheMaxBytes: number;
   maxBlockRows: number;
+  loadBatchSize: number;
 };
 
 export function loadConfig(env: Record<string, string | undefined>): AntikytheraConfig {
@@ -69,5 +72,6 @@ export function loadConfig(env: Record<string, string | undefined>): Antikythera
     viewCacheMaxViews: e.VIEW_CACHE_MAX_VIEWS,
     viewCacheMaxBytes: e.VIEW_CACHE_MAX_MB * 1024 * 1024,
     maxBlockRows: e.MAX_BLOCK_ROWS,
+    loadBatchSize: e.LOAD_BATCH_SIZE,
   };
 }

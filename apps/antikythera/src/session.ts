@@ -6,6 +6,7 @@ import {
   parseClientMsg,
   type ClientMsg,
   type Codec,
+  type ErrorCode,
   type ServerMsg,
   type TraderInfo,
 } from '@apeiron/logos';
@@ -185,7 +186,7 @@ export class ClientSession {
     this.send({ t: 'filterValues', reqId: msg.reqId, values: result.value });
   }
 
-  private sendError(reqId: number | undefined, code: string, message: string): void {
+  private sendError(reqId: number | undefined, code: ErrorCode, message: string): void {
     this.send(reqId === undefined ? { t: 'error', code, message } : { t: 'error', reqId, code, message });
   }
 

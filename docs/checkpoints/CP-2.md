@@ -590,3 +590,297 @@ Dictionary sizes: traderId 5, traderName 5, account 15, currencyPair 20, baseCcy
 9. **Trader scope is whatever `hello` says** (no auth, as planned).
 10. The entry point `index.ts`, the type-only `transport.ts` and the two report scripts have no spec of their own (an accepted pattern from CP-1; their logic is covered through `server.spec.ts`).
 
+
+---
+
+## CP-2 fixes
+
+Review: [`CP-2-review.md`](CP-2-review.md) (APPROVE WITH FIXES). The contract decisions it made are in `docs/PLAN.md` (Appendix B date operators, `inRange` and `count`; Appendix C error codes; Appendix D "Phase 5 requirements from CP-2"). The `cp-2` tag stays on the reviewed commit `ab2eda6`.
+
+- **F1 (widening bug).** `ColumnarStore.widen()` now copies the written extent (`base + i`, including earlier rows of the same batch) instead of `this.count`. Regression tests: 300 distinct venues in one batch; widening across three batches; widening combined with `ensureCapacity` growth from capacity 4 to 1,500 rows.
+- **F2 (day-granular dates).** `dateCondition` implements the Appendix B table (`lessThan < D0`, `lessThanOrEqual < D0+1d`, `greaterThan >= D0+1d`, `greaterThanOrEqual >= D0`, `inRange [D0, D1+1d)`, equals/notEqual as before). The reference implementation was rewritten to the same table independently (day numbers), and the date unit tests were replaced; the property tests pass against it. Number `inRange` stays inclusive.
+- **F3 (`count`).** `count` is the group's row count (equals `childCount`), never null, nulls included. Reference and tests updated.
+- **F4a (memory limit).** `mem_limit: 3g` on the compose `antikythera` service (`docker inspect` shows 3221225472 bytes); noted in the README. The container reaches healthy under the limit.
+- **F4b (load RSS peak).** The cause is the Mongo driver's per-batch buffers, not V8 heap (heap before GC is only about 400MB). Smaller batches fix it and load faster. The loader and the Mongo cursor batch size are now `LOAD_BATCH_SIZE`, default **200** (was 10,000). Figures below.
+- **F5 (error codes).** `ERROR_CODES` and the `ErrorCode` union (the full Appendix C list, including `INVALID_TRANSITION`, `UNKNOWN_ORDER`, `SLOW_CONSUMER`) are exported from logos; `ServerMsg` error frames are typed with it, `EngineErrorCode` is a subset of it, and the session's `sendError` takes it. This section and the header above cross-reference the review.
+
+### F4b before and after
+
+Each row is one container start under `mem_limit: 3g` against the compose mongo (1M rows), one run per variant, nothing else changed. RSS figures are from the `store loaded` log line (`streamedRssMb` = RSS when the Mongo stream ended; `peakRssMb` = process peak).
+
+| Variant | loadMs | rankMs | streamed RSS MB | peak RSS MB |
+|---|---|---|---|---|
+| **Before: batch 10,000** | 15,759 | 1,415 | 1,705 | 1,808 |
+| batch 2,000 | 13,194 | 851 | 1,475 | 1,604 |
+| batch 1,000 | 13,260 | 872 | 1,218 | 1,350 |
+| batch 500 | 11,283 | 818 | 1,179 | 1,308 |
+| batch 100 | 9,513 | 698 | 738 | 867 |
+| batch 50 | 10,235 | 715 | 741 | 869 |
+| **After: batch 200 (adopted)** | **9,383-9,521** | **694-722** | **748** | **876** |
+| 10,000 + `MALLOC_ARENA_MAX=2` | 16,762 | 1,796 | 1,698 | 1,789 |
+| 10,000 + `MALLOC_TRIM_THRESHOLD_=131072` | 16,744 | 1,161 | 1,778 | 1,891 |
+
+Result: peak RSS **1,808MB to 876MB** (about 52% lower) and load time **15.8s to 9.5s** (40% faster), so the 20% slowdown limit was not an issue. The malloc environment variables did nothing and were dropped. Steady RSS after settling: `/health` 584MB, `docker stats` 547MiB of the 3GiB limit (708MB before the change). Event-loop lag during load fell as well: p99 **1.8ms** (was 144-183ms), max 634ms (the `clientOrderId` rank build). Heap retained is unchanged at 226MB.
+
+Final `store loaded` line (container, `mem_limit: 3g`, batch 200):
+```
+{"level":30,"time":1791324914640,"pid":1,"hostname":"f27e369da259","rows":1000000,"loadMs":9521,"rankMs":694,"streamedRssMb":748,"peakRssMb":876.5,"heapMb":401,"rssMb":876.4,"heapAfterGcMb":225.8,"rssAfterGcMb":727.9,"arrayBuffersMb":415.5,"typedArrayMb":257,"lag":{"p50":0.2,"p99":1.8,"max":634.3,"samples":851},"msg":"store loaded"}
+```
+
+### Verification output (after the fixes)
+
+All four ran through turbo with `--force`; exit status 0 for each.
+
+#### lint
+```
+
+   • turbo 2.11.7
+   • Packages in scope: @apeiron/antikythera, @apeiron/eslint-config, @apeiron/gaia, @apeiron/logos, @apeiron/mnemosyne, @apeiron/tsconfig
+   • Running lint in 6 packages
+   • Remote caching disabled
+
+@apeiron/logos:lint: cache bypass, force executing 483de01e6e2191c7
+@apeiron/logos:build: cache bypass, force executing aecfd116c98af1a4
+@apeiron/logos:build: 
+@apeiron/logos:build: > @apeiron/logos@0.0.0 build /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:build: > tsc -p tsconfig.build.json
+@apeiron/logos:build: 
+@apeiron/logos:lint: 
+@apeiron/logos:lint: > @apeiron/logos@0.0.0 lint /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:lint: > eslint .
+@apeiron/logos:lint: 
+@apeiron/mnemosyne:lint: cache bypass, force executing 391c531f2d5bf178
+@apeiron/mnemosyne:build: cache bypass, force executing d2a637411a63f736
+@apeiron/mnemosyne:lint: 
+@apeiron/mnemosyne:lint: > @apeiron/mnemosyne@0.0.0 lint /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:lint: > eslint .
+@apeiron/mnemosyne:lint: 
+@apeiron/mnemosyne:build: 
+@apeiron/mnemosyne:build: > @apeiron/mnemosyne@0.0.0 build /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:build: > tsc -p tsconfig.build.json
+@apeiron/mnemosyne:build: 
+@apeiron/gaia:lint: cache bypass, force executing 266a5b5789c7f87b
+@apeiron/antikythera:lint: cache bypass, force executing ba01f05371e98c22
+@apeiron/gaia:lint: 
+@apeiron/gaia:lint: > @apeiron/gaia@0.0.0 lint /Users/anthonyladas/Development/apeiron/apps/gaia
+@apeiron/gaia:lint: > eslint .
+@apeiron/gaia:lint: 
+@apeiron/antikythera:lint: 
+@apeiron/antikythera:lint: > @apeiron/antikythera@0.0.0 lint /Users/anthonyladas/Development/apeiron/apps/antikythera
+@apeiron/antikythera:lint: > eslint .
+@apeiron/antikythera:lint: 
+
+ Tasks:    6 successful, 6 total
+Cached:    0 cached, 6 total
+  Time:    1.882s
+```
+
+#### typecheck
+```
+
+   • turbo 2.11.7
+   • Packages in scope: @apeiron/antikythera, @apeiron/eslint-config, @apeiron/gaia, @apeiron/logos, @apeiron/mnemosyne, @apeiron/tsconfig
+   • Running typecheck in 6 packages
+   • Remote caching disabled
+
+@apeiron/logos:typecheck: cache bypass, force executing 7c8e482c30eda6a8
+@apeiron/logos:build: cache bypass, force executing aecfd116c98af1a4
+@apeiron/logos:build: 
+@apeiron/logos:build: > @apeiron/logos@0.0.0 build /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:build: > tsc -p tsconfig.build.json
+@apeiron/logos:build: 
+@apeiron/logos:typecheck: 
+@apeiron/logos:typecheck: > @apeiron/logos@0.0.0 typecheck /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:typecheck: > tsc -p tsconfig.json
+@apeiron/logos:typecheck: 
+@apeiron/mnemosyne:build: cache bypass, force executing d2a637411a63f736
+@apeiron/mnemosyne:typecheck: cache bypass, force executing be35ba25ea759f58
+@apeiron/mnemosyne:build: 
+@apeiron/mnemosyne:build: > @apeiron/mnemosyne@0.0.0 build /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:build: > tsc -p tsconfig.build.json
+@apeiron/mnemosyne:build: 
+@apeiron/mnemosyne:typecheck: 
+@apeiron/mnemosyne:typecheck: > @apeiron/mnemosyne@0.0.0 typecheck /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:typecheck: > tsc -p tsconfig.json
+@apeiron/mnemosyne:typecheck: 
+@apeiron/gaia:typecheck: cache bypass, force executing e00e7112cae4bccb
+@apeiron/antikythera:typecheck: cache bypass, force executing f813088b56dd9c50
+@apeiron/gaia:typecheck: 
+@apeiron/gaia:typecheck: > @apeiron/gaia@0.0.0 typecheck /Users/anthonyladas/Development/apeiron/apps/gaia
+@apeiron/gaia:typecheck: > tsc -p tsconfig.json
+@apeiron/gaia:typecheck: 
+@apeiron/antikythera:typecheck: 
+@apeiron/antikythera:typecheck: > @apeiron/antikythera@0.0.0 typecheck /Users/anthonyladas/Development/apeiron/apps/antikythera
+@apeiron/antikythera:typecheck: > tsc -p tsconfig.json
+@apeiron/antikythera:typecheck: 
+
+ Tasks:    6 successful, 6 total
+Cached:    0 cached, 6 total
+  Time:    2.199s
+```
+
+#### test
+```
+
+   • turbo 2.11.7
+   • Packages in scope: @apeiron/antikythera, @apeiron/eslint-config, @apeiron/gaia, @apeiron/logos, @apeiron/mnemosyne, @apeiron/tsconfig
+   • Running test in 6 packages
+   • Remote caching disabled
+
+@apeiron/logos:test: cache bypass, force executing bb1fb2c9b4dfc4ff
+@apeiron/logos:build: cache bypass, force executing aecfd116c98af1a4
+@apeiron/logos:test: 
+@apeiron/logos:test: > @apeiron/logos@0.0.0 test /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:test: > vitest run
+@apeiron/logos:test: 
+@apeiron/logos:build: 
+@apeiron/logos:build: > @apeiron/logos@0.0.0 build /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:build: > tsc -p tsconfig.build.json
+@apeiron/logos:build: 
+@apeiron/logos:test: 
+@apeiron/logos:test:  RUN  v5.0.3 /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:test: 
+@apeiron/logos:test:  ✓ src/order.spec.ts (4 tests) 3ms
+@apeiron/logos:test:  ✓ src/fixtures.spec.ts (1 test) 8ms
+@apeiron/logos:test:  ✓ src/index.spec.ts (1 test) 2ms
+@apeiron/logos:test:  ✓ src/filter-model.spec.ts (23 tests) 7ms
+@apeiron/logos:test:  ✓ src/protocol.spec.ts (7 tests) 9ms
+@apeiron/logos:test:  ✓ src/codec.spec.ts (12 tests) 12ms
+@apeiron/logos:test:  ✓ src/columns.spec.ts (9 tests) 222ms
+@apeiron/mnemosyne:build: cache bypass, force executing d2a637411a63f736
+@apeiron/mnemosyne:test: cache bypass, force executing bbc13499ae454551
+@apeiron/logos:test:  ✓ src/prng.spec.ts (9 tests) 300ms
+@apeiron/mnemosyne:build: 
+@apeiron/mnemosyne:build: > @apeiron/mnemosyne@0.0.0 build /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:build: > tsc -p tsconfig.build.json
+@apeiron/mnemosyne:build: 
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test: > @apeiron/mnemosyne@0.0.0 test /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:test: > vitest run
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test:  RUN  v5.0.3 /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test:  ✓ src/order-repository.spec.ts (1 test) 1ms
+@apeiron/mnemosyne:test:  ✓ src/index.spec.ts (1 test) 1ms
+@apeiron/antikythera:test: cache bypass, force executing 021d487958676f4d
+@apeiron/gaia:test: cache bypass, force executing 9009513bb24c6ebe
+@apeiron/antikythera:test: 
+@apeiron/antikythera:test: > @apeiron/antikythera@0.0.0 test /Users/anthonyladas/Development/apeiron/apps/antikythera
+@apeiron/antikythera:test: > vitest run
+@apeiron/antikythera:test: 
+@apeiron/gaia:test: 
+@apeiron/gaia:test: > @apeiron/gaia@0.0.0 test /Users/anthonyladas/Development/apeiron/apps/gaia
+@apeiron/gaia:test: > vitest run
+@apeiron/gaia:test: 
+@apeiron/mnemosyne:test:  ✓ src/in-memory-order-repository.spec.ts (13 tests) 314ms
+@apeiron/antikythera:test: 
+@apeiron/gaia:test: 
+@apeiron/antikythera:test:  RUN  v5.0.3 /Users/anthonyladas/Development/apeiron/apps/antikythera
+@apeiron/antikythera:test: 
+@apeiron/gaia:test:  RUN  v5.0.3 /Users/anthonyladas/Development/apeiron/apps/gaia
+@apeiron/gaia:test: 
+@apeiron/gaia:test:  ✓ src/stats-params.spec.ts (3 tests) 3ms
+@apeiron/gaia:test:  ✓ src/config.spec.ts (4 tests) 5ms
+@apeiron/antikythera:test:  ✓ src/memory.spec.ts (3 tests) 6ms
+@apeiron/antikythera:test:  ✓ src/store/dictionary.spec.ts (4 tests) 13ms
+@apeiron/antikythera:test:  ✓ src/query/request.spec.ts (20 tests) 10ms
+@apeiron/antikythera:test:  ✓ src/query/filter.spec.ts (42 tests) 8ms
+@apeiron/antikythera:test:  ✓ src/query/group.spec.ts (11 tests) 9ms
+@apeiron/gaia:test:  ✓ src/stats.spec.ts (6 tests) 73ms
+@apeiron/gaia:test:  ✓ src/cli.spec.ts (5 tests) 72ms
+@apeiron/antikythera:test:  ✓ src/store/columnar-store.spec.ts (15 tests) 79ms
+@apeiron/antikythera:test:  ✓ src/query/view.spec.ts (6 tests) 5ms
+@apeiron/antikythera:test:  ✓ src/query/engine.spec.ts (24 tests) 12ms
+@apeiron/antikythera:test:  ✓ src/testing/dataset.spec.ts (2 tests) 115ms
+@apeiron/antikythera:test:  ✓ src/session.spec.ts (20 tests) 17ms
+@apeiron/antikythera:test:  ✓ src/ws-transport.spec.ts (5 tests) 4ms
+@apeiron/antikythera:test:  ✓ src/config.spec.ts (3 tests) 7ms
+@apeiron/gaia:test:  ✓ src/seed.spec.ts (7 tests) 191ms
+@apeiron/gaia:test: 
+@apeiron/gaia:test:  Test Files  5 passed (5)
+@apeiron/gaia:test:       Tests  25 passed (25)
+@apeiron/gaia:test:    Start at  23:14:49
+@apeiron/gaia:test:    Duration  549ms (import 36%, transform 32%, tests 31%, worker 1%)
+@apeiron/gaia:test: 
+@apeiron/antikythera:test:  ✓ src/query/errors.spec.ts (1 test) 2ms
+@apeiron/antikythera:test:  ✓ src/testing/request-gen.spec.ts (2 tests) 82ms
+@apeiron/antikythera:test:  ✓ src/testing/reference.spec.ts (4 tests) 3ms
+@apeiron/antikythera:test:  ✓ src/query/view-cache.spec.ts (6 tests) 2ms
+@apeiron/antikythera:test:  ✓ src/query/sort.spec.ts (13 tests) 233ms
+@apeiron/antikythera:test:  ✓ src/lag.spec.ts (2 tests) 441ms
+@apeiron/antikythera:test:  ✓ src/loader.spec.ts (5 tests) 388ms
+@apeiron/antikythera:test:  ✓ src/server.spec.ts (9 tests) 843ms
+@apeiron/mnemosyne:test:  ✓ src/mongo-order-repository.spec.ts (14 tests) 1798ms
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test:  Test Files  4 passed (4)
+@apeiron/mnemosyne:test:       Tests  29 passed (29)
+@apeiron/mnemosyne:test:    Start at  23:14:48
+@apeiron/mnemosyne:test:    Duration  2.05s (tests 84%, import 11%, transform 5%)
+@apeiron/mnemosyne:test: 
+@apeiron/antikythera:test:  ✓ src/query/engine.property.spec.ts (3 tests) 2703ms
+@apeiron/antikythera:test:    ✓ engine vs naive reference (property tests) (3)
+@apeiron/antikythera:test:      ✓ matches on dataset seed 1 with a tiny view cache 1252ms
+@apeiron/antikythera:test:      ✓ matches on dataset seed 2 with a roomy view cache 1096ms
+@apeiron/antikythera:test:      ✓ matches on dataset seed 3, where ids are not ascending in row order 352ms
+@apeiron/antikythera:test: 
+@apeiron/antikythera:test:  Test Files  21 passed (21)
+@apeiron/antikythera:test:       Tests  200 passed (200)
+@apeiron/antikythera:test:    Start at  23:14:49
+@apeiron/antikythera:test:    Duration  3.14s (tests 57%, transform 25%, import 18%, worker 1%)
+@apeiron/antikythera:test: 
+@apeiron/antikythera:test:   Transform  transforming modules took 2.20s · 25% of tracked time, re-done on every run
+@apeiron/antikythera:test:              persist transforms across runs with fsModuleCache: true
+@apeiron/antikythera:test:              learn more: https://vitest.dev/guide/improving-performance#caching-between-reruns
+@apeiron/antikythera:test: 
+@apeiron/logos:test:  ✓ src/generator.spec.ts (15 tests) 5333ms
+@apeiron/logos:test:    ✓ generated data shape (8)
+@apeiron/logos:test:      ✓ keeps historical createdAt ascending, on weekdays, within the last 182 days 1105ms
+@apeiron/logos:test:      ✓ keeps every order internally consistent 3461ms
+@apeiron/logos:test:    ✓ finalMids (2)
+@apeiron/logos:test:      ✓ matches the marketMid of every LIVE and PENDING_START order 358ms
+@apeiron/logos:test: 
+@apeiron/logos:test:  Test Files  9 passed (9)
+@apeiron/logos:test:       Tests  81 passed (81)
+@apeiron/logos:test:    Start at  23:14:48
+@apeiron/logos:test:    Duration  5.70s (tests 88%, import 7%, transform 5%)
+@apeiron/logos:test: 
+
+ Tasks:    6 successful, 6 total
+Cached:    0 cached, 6 total
+  Time:    6.045s
+```
+
+#### build
+```
+
+   • turbo 2.11.7
+   • Packages in scope: @apeiron/antikythera, @apeiron/eslint-config, @apeiron/gaia, @apeiron/logos, @apeiron/mnemosyne, @apeiron/tsconfig
+   • Running build in 6 packages
+   • Remote caching disabled
+
+@apeiron/logos:build: cache bypass, force executing aecfd116c98af1a4
+@apeiron/logos:build: 
+@apeiron/logos:build: > @apeiron/logos@0.0.0 build /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:build: > tsc -p tsconfig.build.json
+@apeiron/logos:build: 
+@apeiron/mnemosyne:build: cache bypass, force executing d2a637411a63f736
+@apeiron/mnemosyne:build: 
+@apeiron/mnemosyne:build: > @apeiron/mnemosyne@0.0.0 build /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:build: > tsc -p tsconfig.build.json
+@apeiron/mnemosyne:build: 
+@apeiron/gaia:build: cache bypass, force executing 85fa4429bc49bb62
+@apeiron/antikythera:build: cache bypass, force executing 096dcb1d6a221789
+@apeiron/gaia:build: 
+@apeiron/gaia:build: > @apeiron/gaia@0.0.0 build /Users/anthonyladas/Development/apeiron/apps/gaia
+@apeiron/gaia:build: > tsc -p tsconfig.build.json
+@apeiron/gaia:build: 
+@apeiron/antikythera:build: 
+@apeiron/antikythera:build: > @apeiron/antikythera@0.0.0 build /Users/anthonyladas/Development/apeiron/apps/antikythera
+@apeiron/antikythera:build: > tsc -p tsconfig.build.json
+@apeiron/antikythera:build: 
+
+ Tasks:    4 successful, 4 total
+Cached:    0 cached, 4 total
+  Time:    1.902s
+```

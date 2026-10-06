@@ -62,7 +62,7 @@ describe('number filters', () => {
   it('notBlank matches only non-null', () => expect(rowsOf(data, n('notBlank'))).toEqual([0, 1, 3, 4, 5]));
 });
 
-describe('date filters (epoch ms, UTC)', () => {
+describe('date filters (UTC-day granular)', () => {
   const data: Partial<Order>[] = [
     { completedAt: D(2026, 3, 1, 0, 0, 0) },
     { completedAt: D(2026, 3, 1, 13, 30, 0) },
@@ -75,24 +75,34 @@ describe('date filters (epoch ms, UTC)', () => {
     completedAt: { filterType: 'date', type, dateFrom, dateTo } as FilterModel[string],
   });
 
-  it('equals compares at UTC-day granularity', () => {
+  it('equals matches any time on the day', () => {
     expect(rowsOf(data, d('equals', '2026-03-01 09:00:00'))).toEqual([0, 1, 2]);
   });
   it('notEqual is day-granular and excludes null', () => {
     expect(rowsOf(data, d('notEqual', '2026-03-01 00:00:00'))).toEqual([3, 5]);
   });
-  it('lessThan compares the exact instant', () => {
-    expect(rowsOf(data, d('lessThan', '2026-03-01 13:30:00'))).toEqual([0, 5]);
+  it('lessThan is before the start of the day, whatever the time given', () => {
+    expect(rowsOf(data, d('lessThan', '2026-03-01 13:30:00'))).toEqual([5]);
   });
-  it('lessThanOrEqual', () => {
-    expect(rowsOf(data, d('lessThanOrEqual', '2026-03-01 13:30:00'))).toEqual([0, 1, 5]);
+  it('lessThanOrEqual includes the whole day', () => {
+    expect(rowsOf(data, d('lessThanOrEqual', '2026-03-01 13:30:00'))).toEqual([0, 1, 2, 5]);
   });
-  it('greaterThan', () => expect(rowsOf(data, d('greaterThan', '2026-03-01 13:30:00'))).toEqual([2, 3]));
-  it('greaterThanOrEqual', () => {
-    expect(rowsOf(data, d('greaterThanOrEqual', '2026-03-01 13:30:00'))).toEqual([1, 2, 3]);
+  it('greaterThan starts the day after', () => {
+    expect(rowsOf(data, d('greaterThan', '2026-03-01 13:30:00'))).toEqual([3]);
   });
-  it('inRange is inclusive at both ends', () => {
-    expect(rowsOf(data, d('inRange', '2026-03-01 00:00:00', '2026-03-01 13:30:00'))).toEqual([0, 1]);
+  it('greaterThanOrEqual starts at the beginning of the day', () => {
+    expect(rowsOf(data, d('greaterThanOrEqual', '2026-03-01 13:30:00'))).toEqual([0, 1, 2, 3]);
+  });
+  it('inRange includes both days in full', () => {
+    expect(rowsOf(data, d('inRange', '2026-03-01 18:00:00', '2026-03-01 01:00:00'))).toEqual([0, 1, 2]);
+    expect(rowsOf(data, d('inRange', '2026-02-28 00:00:00', '2026-03-02 00:00:00'))).toEqual([0, 1, 2, 3, 5]);
+    expect(rowsOf(data, d('inRange', '2026-03-02 00:00:00', '2026-03-01 00:00:00'))).toEqual([]);
+  });
+  it('null only matches blank', () => {
+    for (const type of ['equals', 'lessThan', 'lessThanOrEqual', 'greaterThan', 'greaterThanOrEqual']) {
+      expect(rowsOf(data, d(type, '2026-03-01 00:00:00'))).not.toContain(4);
+    }
+    expect(rowsOf(data, d('inRange', '2020-01-01 00:00:00', '2030-01-01 00:00:00'))).not.toContain(4);
   });
   it('blank / notBlank', () => {
     expect(rowsOf(data, d('blank'))).toEqual([4]);

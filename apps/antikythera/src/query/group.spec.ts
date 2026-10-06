@@ -36,12 +36,12 @@ describe('buildGroupLevel', () => {
     );
     expect(level.aggs[0]).toEqual([25, 80]);
     expect(level.aggs[1]).toEqual([4, 4]); // BUY has one non-null (4); SELL has 2 and 6
-    expect(level.aggs[2]).toEqual([1, 2]);
+    expect(level.aggs[2]).toEqual([2, 3]); // count is the row count, nulls included
     // SELL wavg weights 100 and 300 only (the 900 row is null): (2*100 + 6*300) / 400 = 5
     expect(level.aggs[3]).toEqual([4, 5]);
   });
 
-  it('gives null when every value is null, for every aggregate', () => {
+  it('gives null when every value is null for every aggregate except count, which is the row count', () => {
     const level = buildGroupLevel(
       makeStore(data),
       all(5),
@@ -49,7 +49,8 @@ describe('buildGroupLevel', () => {
       [vc('completedAt', 'count'), vc('completedAt', 'avg'), vc('completedAt', 'sum'), vc('completedAt', 'wavg')],
       [],
     );
-    for (const a of level.aggs) expect(a).toEqual([null, null]);
+    expect(level.aggs[0]).toEqual([2, 3]);
+    for (const a of level.aggs.slice(1)) expect(a).toEqual([null, null]);
   });
 
   it('counts non-numeric columns', () => {

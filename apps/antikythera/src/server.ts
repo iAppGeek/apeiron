@@ -16,6 +16,8 @@ export type ServerOptions = {
   viewCacheMaxViews?: number;
   viewCacheMaxBytes?: number;
   maxBlockRows?: number;
+  /** Rows per batch when streaming the repository (default 200). */
+  loadBatchSize?: number;
   /** Largest frame a client may send, in bytes. */
   maxPayload?: number;
   /** A getRows that builds its view in at least this long gets its event-loop lag logged. */
@@ -110,6 +112,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
     try {
       const result = await loadStore(options.repo, store, {
         monitor: lag,
+        batchSize: options.loadBatchSize,
         log: (message, fields) => app.log.info(fields, message),
       });
       engine = new QueryEngine(store, {

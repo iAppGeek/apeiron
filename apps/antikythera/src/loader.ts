@@ -32,6 +32,9 @@ export type LoadOptions = {
 /** Free-text string columns other than `orderId` (which sorts by row order). */
 const RANKED_FIELDS: readonly OrderField[] = ['parentOrderId', 'clientOrderId', 'strategyParams'];
 
+/** Small batches keep the Mongo driver's buffers (and so the load's RSS peak) low and load faster than 10k-row batches. */
+export const DEFAULT_LOAD_BATCH_SIZE = 200;
+
 const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /**
@@ -52,7 +55,7 @@ export async function loadStore(
   try {
     const { lag } = await withLagReport(monitor, async () => {
       let lastLog = start;
-      for await (const batch of repo.loadAll(options.batchSize ?? 10_000)) {
+      for await (const batch of repo.loadAll(options.batchSize ?? DEFAULT_LOAD_BATCH_SIZE)) {
         store.appendBatch(batch);
         const now = performance.now();
         if (now - lastLog > 5_000) {

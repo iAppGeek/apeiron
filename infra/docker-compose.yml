@@ -50,6 +50,9 @@ services:
       PORT: "4000"
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_OPTIONS: --max-old-space-size=3072
+      LOAD_BATCH_SIZE: ${LOAD_BATCH_SIZE:-200}
+    # Caps the container so memory behaviour is defined (and matches the remote box budget).
+    mem_limit: 3g
     ports:
       - "127.0.0.1:4000:4000"
     depends_on:

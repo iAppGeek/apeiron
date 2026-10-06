@@ -82,7 +82,7 @@ function bucketize(store: ColumnarStore, rows: Uint32Array, field: OrderField): 
   throw new Error(`Column ${field} cannot be grouped`);
 }
 
-/** Per-bucket aggregate for one value column. Rows are visited in ascending row order. */
+/** Per-bucket aggregate for one value column; `count` is the row count, the others skip nulls. Rows are visited in ascending row order. */
 function aggregate(
   store: ColumnarStore,
   rows: Uint32Array,
@@ -91,6 +91,15 @@ function aggregate(
   vc: ValueCol,
 ): (number | null)[] {
   const m = rows.length;
+  if (vc.agg === 'count') {
+    // `count` is the group's row count (equal to childCount), never null.
+    const counts = new Array<number | null>(nb).fill(0);
+    for (let p = 0; p < m; p++) {
+      const b = bucketOf[p] as number;
+      counts[b] = (counts[b] as number) + 1;
+    }
+    return counts;
+  }
   const col = store.column(vc.field);
   const sum = new Float64Array(nb);
   const cnt = new Float64Array(nb);
@@ -136,9 +145,6 @@ function aggregate(
         break;
       case 'avg':
         out[b] = (sum[b] as number) / c;
-        break;
-      case 'count':
-        out[b] = c;
         break;
       case 'wavg':
         out[b] = (wsum[b] as number) > 0 ? (sum[b] as number) / (wsum[b] as number) : null;

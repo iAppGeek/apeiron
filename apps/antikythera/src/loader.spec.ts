@@ -1,7 +1,7 @@
 import type { Order } from '@apeiron/logos';
 import { InMemoryOrderRepository } from '@apeiron/mnemosyne';
 import { describe, expect, it, vi } from 'vitest';
-import { loadStore } from './loader.js';
+import { DEFAULT_LOAD_BATCH_SIZE, loadStore } from './loader.js';
 import { ColumnarStore } from './store/columnar-store.js';
 import { makeOrders } from './testing/orders.js';
 
@@ -28,6 +28,14 @@ describe('loadStore', () => {
     expect(report.afterGc?.heapMb).toBeGreaterThan(0);
     expect(report.lag.samples).toBeGreaterThan(0);
     expect(report.store.typedUsedBytes).toBeGreaterThan(0);
+  });
+
+  it('streams in 200-row batches by default', async () => {
+    const repo = await repoWith(makeOrders([{ orderQty: 1 }]));
+    const spy = vi.spyOn(repo, 'loadAll');
+    await loadStore(repo, new ColumnarStore({ capacity: 4 }));
+    expect(spy).toHaveBeenCalledWith(DEFAULT_LOAD_BATCH_SIZE);
+    expect(DEFAULT_LOAD_BATCH_SIZE).toBe(200);
   });
 
   it('loads an empty repository', async () => {

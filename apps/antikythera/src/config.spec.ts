@@ -15,6 +15,7 @@ describe('loadConfig', () => {
       loadPreset: 'medium',
       storeCapacity: 1_500_000,
       natsUrl: undefined,
+      loadBatchSize: 200,
     });
     expect(c.viewCacheMaxBytes).toBe(384 * 1024 * 1024);
   });

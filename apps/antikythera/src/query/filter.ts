@@ -65,27 +65,50 @@ function numberCondition(data: Float64Array, f: NumberFilter): Predicate {
 }
 
 /**
- * Date filters compare epoch ms. `equals` and `notEqual` work at UTC-day granularity (any time on the
- * day of `dateFrom`); every other operator compares the exact instant, and `inRange` is inclusive.
+ * Date filters are UTC-day granular (Appendix B). With `D0 = dayStart(dateFrom)` and `D1 = dayStart(dateTo)`:
+ * equals `[D0, D0+1d)`, lessThan `< D0`, lessThanOrEqual `< D0+1d`, greaterThan `>= D0+1d`,
+ * greaterThanOrEqual `>= D0`, inRange `[D0, D1+1d)`. Null only matches blank.
  */
 function dateCondition(data: Float64Array, f: DateFilter): Predicate {
   const from = typeof f.dateFrom === 'string' ? parseFilterDate(f.dateFrom) : Number.NaN;
   const to = typeof f.dateTo === 'string' ? parseFilterDate(f.dateTo) : Number.NaN;
-  if (f.type === 'equals' || f.type === 'notEqual') {
-    const dayStart = Math.floor(from / DAY_MS) * DAY_MS;
-    const dayEnd = dayStart + DAY_MS;
-    if (f.type === 'equals') {
+  const d0 = Math.floor(from / DAY_MS) * DAY_MS;
+  const d1 = Math.floor(to / DAY_MS) * DAY_MS;
+  switch (f.type) {
+    case 'equals':
       return (i) => {
         const v = data[i] as number;
-        return v >= dayStart && v < dayEnd;
+        return v >= d0 && v < d0 + DAY_MS;
       };
-    }
-    return (i) => {
-      const v = data[i] as number;
-      return v === v && (v < dayStart || v >= dayEnd);
-    };
+    case 'notEqual':
+      return (i) => {
+        const v = data[i] as number;
+        return v === v && (v < d0 || v >= d0 + DAY_MS);
+      };
+    case 'lessThan':
+      return (i) => (data[i] as number) < d0;
+    case 'lessThanOrEqual':
+      return (i) => (data[i] as number) < d0 + DAY_MS;
+    case 'greaterThan':
+      return (i) => (data[i] as number) >= d0 + DAY_MS;
+    case 'greaterThanOrEqual':
+      return (i) => (data[i] as number) >= d0;
+    case 'inRange':
+      return (i) => {
+        const v = data[i] as number;
+        return v >= d0 && v < d1 + DAY_MS;
+      };
+    case 'blank':
+      return (i) => {
+        const v = data[i] as number;
+        return v !== v;
+      };
+    case 'notBlank':
+      return (i) => {
+        const v = data[i] as number;
+        return v === v;
+      };
   }
-  return numericPredicate(data, { type: f.type, a: from, b: to });
 }
 
 function textCondition(data: string[], f: TextFilter): Predicate {

@@ -71,11 +71,29 @@ function simpleMatch(value: unknown, f: SimpleFilter): boolean {
   if (f.filterType === 'number') {
     return numericMatch(v, { type: f.type, a: f.filter ?? NaN, b: f.filterTo ?? NaN });
   }
-  const from = f.dateFrom === null || f.dateFrom === undefined ? NaN : dateMs(f.dateFrom);
-  const to = f.dateTo === null || f.dateTo === undefined ? NaN : dateMs(f.dateTo);
-  if (f.type === 'equals') return v !== null && Math.floor(v / DAY_MS) === Math.floor(from / DAY_MS);
-  if (f.type === 'notEqual') return v !== null && Math.floor(v / DAY_MS) !== Math.floor(from / DAY_MS);
-  return numericMatch(v, { type: f.type, a: from, b: to });
+  if (f.type === 'blank') return v === null;
+  if (f.type === 'notBlank') return v !== null;
+  if (v === null) return false;
+  const day = (ms: number): number => Math.floor(ms / DAY_MS);
+  const d0 = day(f.dateFrom === null || f.dateFrom === undefined ? NaN : dateMs(f.dateFrom));
+  const d1 = day(f.dateTo === null || f.dateTo === undefined ? NaN : dateMs(f.dateTo));
+  const d = day(v);
+  switch (f.type) {
+    case 'equals':
+      return d === d0;
+    case 'notEqual':
+      return d !== d0;
+    case 'lessThan':
+      return d < d0;
+    case 'lessThanOrEqual':
+      return d <= d0;
+    case 'greaterThan':
+      return d > d0;
+    case 'greaterThanOrEqual':
+      return d >= d0;
+    default:
+      return d >= d0 && d <= d1;
+  }
 }
 
 function columnMatch(value: unknown, f: ColumnFilter): boolean {
@@ -119,6 +137,7 @@ function groupKeyOf(order: Order, field: OrderField, meta: ColumnMeta): string {
 type RefAgg = { id: string; field: OrderField; agg: string };
 
 function aggregateOf(rows: Order[], a: RefAgg): number | null {
+  if (a.agg === 'count') return rows.length;
   const present = rows.filter((r) => r[a.field] !== null);
   if (present.length === 0) return null;
   const sum = present.reduce((acc, r) => acc + (r[a.field] as number), 0);
@@ -127,8 +146,6 @@ function aggregateOf(rows: Order[], a: RefAgg): number | null {
       return sum;
     case 'avg':
       return sum / present.length;
-    case 'count':
-      return present.length;
     default: {
       const wx = present.reduce((acc, r) => acc + r.notionalUsd * (r[a.field] as number), 0);
       const w = present.reduce((acc, r) => acc + r.notionalUsd, 0);

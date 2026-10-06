@@ -181,7 +181,7 @@ export class ColumnarStore {
       } else if (col.kind === 'enum') {
         for (let i = 0; i < orders.length; i++) {
           const code = col.dict.getOrAdd((orders[i] as Order)[field] as string);
-          if (code > 255 && col.codes instanceof Uint8Array) this.widen(col);
+          if (code > 255 && col.codes instanceof Uint8Array) this.widen(col, base + i);
           col.codes[base + i] = code;
         }
       } else {
@@ -262,9 +262,10 @@ export class ColumnarStore {
     };
   }
 
-  private widen(col: EnumColumn): void {
+  /** Switches an enum column to 16-bit codes, keeping the `written` rows stored so far (including this batch's). */
+  private widen(col: EnumColumn, written: number): void {
     const wide = newCodes(this.cap, true);
-    wide.set(col.codes.subarray(0, this.count));
+    wide.set(col.codes.subarray(0, written));
     col.codes = wide;
   }
 
