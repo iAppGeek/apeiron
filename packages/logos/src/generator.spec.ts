@@ -210,3 +210,33 @@ describe('finalMids', () => {
     expect(a[eurusd]).not.toBe(1.08);
   });
 });
+
+describe('order ids and the order factory', () => {
+  it('formats and parses ALG ids', async () => {
+    const { formatOrderId, parseOrderSeq } = await import('./generator.js');
+    expect(formatOrderId(42)).toBe('ALG00000042');
+    expect(parseOrderSeq('ALG00000042')).toBe(42);
+    expect(parseOrderSeq('PAR00000042')).toBeNull();
+    expect(parseOrderSeq('ALG42')).toBeNull();
+  });
+
+  it('builds a complete order that continues the id sequence', async () => {
+    const { OrderFactory, mulberry32 } = await import('./index.js');
+    const factory = new OrderFactory(mulberry32(7));
+    factory.seq = 1_000_041;
+    const order = factory.create({
+      status: 'LIVE',
+      createdAt: 1_000,
+      startTime: 1_000,
+      durationMins: 5,
+      fillFraction: 0,
+      completedAt: null,
+      now: 1_000,
+      current: true,
+    });
+    expect(order.orderId).toBe('ALG01000042');
+    expect(Object.keys(order)).toHaveLength(50);
+    expect(order.filledQty).toBe(0);
+    expect(order.avgFillPrice).toBeNull();
+  });
+});
