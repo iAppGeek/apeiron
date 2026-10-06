@@ -315,7 +315,7 @@ Atlas M0 (512MB storage) can't hold 1M × 50 columns, and DocumentDB isn't fully
 - **Storage:** in the columnar store, a null number or date is `NaN` in its `Float64Array`. It converts back to `null` at the boundary when rows are materialised. On the wire and in the DB it is always `null`.
 - **Sort:** null sorts as the *smallest* value, so it comes first in `asc` and last in `desc`. This matches AG Grid's own client-side behaviour.
 - **Filter:** `blank` matches null and `notBlank` matches non-null. Every other number or date operator never matches null.
-- **Aggregation:** null rows are skipped, along with their weight in weighted averages. If every value is null, the aggregate is null.
+- **Aggregation:** null rows are skipped, along with their weight in weighted averages. If every value is null, the aggregate is null. **The exception is `count`, which is always the number of rows in the group (equal to `childCount`) and is never null (CP-2).**
 
 **Groupable columns:** traderName, account, currencyPair, baseCcy, quoteCcy, tenor, side, algoType, status, orderType, timeInForce, urgency, venue, valueDate.
 
@@ -356,7 +356,15 @@ Pivot is not supported; reject the request if `pivotMode` is set.
 **Filter model** (AG shapes to support, applied with AND across columns):
 - text: `{filterType:'text', type: contains|notContains|equals|notEqual|startsWith|endsWith|blank|notBlank, filter}`. Matching is case-insensitive.
 - number: `{filterType:'number', type: equals|notEqual|lessThan|lessThanOrEqual|greaterThan|greaterThanOrEqual|inRange|blank|notBlank, filter, filterTo}`.
-- date: `{filterType:'date', type: same set as number, dateFrom:'YYYY-MM-DD HH:mm:ss', dateTo}`. Compare at day granularity for `equals`.
+- date: `{filterType:'date', type: same set as number, dateFrom:'YYYY-MM-DD HH:mm:ss', dateTo}`. **Every date operator is UTC-day granular (CP-2 decision).** Let `D0 = dayStart(dateFrom)` and `D1 = dayStart(dateTo)`:
+  - `equals`: `[D0, D0+1d)`
+  - `notEqual`: outside that range
+  - `lessThan`: `< D0`
+  - `lessThanOrEqual`: `< D0+1d`
+  - `greaterThan`: `≥ D0+1d`
+  - `greaterThanOrEqual`: `≥ D0`
+  - `inRange`: `[D0, D1+1d)`, which includes both days
+- **`inRange` is inclusive for numbers and dates (CP-2).** The client sets `filterParams.inRangeInclusive: true` on number and date filters so the UI wording matches.
 - set: `{filterType:'set', values: string[]}`. Compare against dictionary codes, not strings.
 - combined: `{filterType, operator:'AND'|'OR', conditions:[…]}`.
 - Unknown shapes return `error{code:'UNSUPPORTED_FILTER'}`.
@@ -393,6 +401,11 @@ type ServerMsg =
 ```
 - **Codec negotiation:** the first frame (`hello`) is always JSON text. Every later frame uses the negotiated codec: text frames for JSON, binary frames for msgpack.
 - **Validation:** `ClientMsg` is validated with zod; `ServerMsg` is not, for speed.
+- **Error codes (CP-2, complete list):**
+  - Request content: `UNSUPPORTED_FILTER`, `UNSUPPORTED_AGG`, `UNSUPPORTED_PIVOT`, `UNSUPPORTED_GROUP`, `UNSUPPORTED_COLUMN`, `UNKNOWN_COLUMN`, `UNKNOWN_TRADER`
+  - Message format and order: `BAD_REQUEST`, `BAD_FRAME`, `BAD_MESSAGE`, `HELLO_REQUIRED`
+  - Server state: `NOT_READY`, `NOT_IMPLEMENTED`, `INTERNAL`
+  - Phases 5 and 6 add: `INVALID_TRANSITION` (a command not allowed in the order's state), `UNKNOWN_ORDER`, `SLOW_CONSUMER` (sent just before closing a client that is too far behind)
 - **NATS subjects:** `prices.<PAIR>` with `{pair, bid, ask, ts}`; `orders.events` with `{type: 'NEW'|'UPDATE', order: Partial<Order> & {orderId}, ts}`; `orders.commands` with `{orderId, action, requestedBy, ts}`; `control.load` with `{preset}`.
 - **JetStream:** streams `ORDERS` (`orders.*`, limits retention, 24h) and `PRICES` (`prices.*`, max 1 message per subject).
   - Durable consumer `blotter-server` with filter subject `orders.events`; the server also consumes `prices.*`.
@@ -432,6 +445,13 @@ type ServerMsg =
 - Then `lastUpdateTime = now`.
 
 **Write-behind.** Dirty order IDs accumulate; every `WRITE_BEHIND_MS`, `upsertMany` is called. Price-only field changes are **not** persisted. Only lifecycle and fill changes are.
+
+**Phase 5 requirements from CP-2.** Today the engine drops every cached view on any store change. That is correct for phase 3 but must not survive into phase 5.
+1. **Updates in place.** Add `ColumnarStore.updateRow(row, partial) → { changed: OrderField[], prev: Partial<Order> }`, which writes in place and feeds the ChangeSet. Appends add rows. Neither may bump a global "invalidate everything" version.
+2. **Apply changes, don't clear.** `QueryEngine` applies each flush tick's ChangeSet to the cached views, as described in "Applying a tick to a view" above. `clear()` is only for benchmarks and tests. Set-filter value caches are invalidated only when a dictionary gains a value.
+3. **String sort ranks stay off the hot path.** After an append, mark the ranks stale. The incremental merge compares the changed rows' strings directly. A full rebuild of a view sorted by a string column uses the comparator path while the ranks are stale. A chunked, yielding background task rebuilds the ranks, at most once per 30s.
+4. **Order IDs stay ascending.** Hermes issues new `orderId`s above the current maximum (`ALG` + next sequence), so `store.idsAscending` stays true and radix sorts keep the free `orderId` tiebreak. If an append ever breaks this, the server logs a warning.
+5. **Enum dictionaries can grow live.** A new enum value (for example a new venue) invalidates only that dictionary's rank and views that sort or filter on that column.
 
 ## Appendix E: Data generation and mock behaviour
 **PRNG:** `mulberry32(SEED)`. The generator is a pure function `(seed, n, now) → Order[]` streamed in batches.
