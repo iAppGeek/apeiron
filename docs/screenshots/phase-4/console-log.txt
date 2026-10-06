@@ -1,0 +1,59 @@
+Total messages: 7 (Errors: 7, Warnings: 0)
+Returning 56 messages for level "warning"
+
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] ************************************************ AG Grid Enterprise License ************************************************ @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] ************************************************** License Key Not Found *************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] * All AG Grid Enterprise features are unlocked for trial.                                                                  * @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] * If you want to hide the watermark please email info@ag-grid.com for a trial license key.                                 * @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] ************************************************ AG Grid Enterprise License ************************************************ @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] ************************************************** License Key Not Found *************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] * All AG Grid Enterprise features are unlocked for trial.                                                                  * @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] * If you want to hide the watermark please email info@ag-grid.com for a trial license key.                                 * @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] ************************************************ AG Grid Enterprise License ************************************************ @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] ************************************************** License Key Not Found *************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] * All AG Grid Enterprise features are unlocked for trial.                                                                  * @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] * If you want to hide the watermark please email info@ag-grid.com for a trial license key.                                 * @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] ************************************************ AG Grid Enterprise License ************************************************ @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] ************************************************** License Key Not Found *************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] * All AG Grid Enterprise features are unlocked for trial.                                                                  * @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] * If you want to hide the watermark please email info@ag-grid.com for a trial license key.                                 * @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://127.0.0.1:5173/@vite/client:356
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-DCwJoUZw.js:80
+[ERROR] ************************************************ AG Grid Enterprise License ************************************************ @ http://localhost:8080/assets/index-DCwJoUZw.js:80
+[ERROR] ************************************************** License Key Not Found *************************************************** @ http://localhost:8080/assets/index-DCwJoUZw.js:80
+[ERROR] * All AG Grid Enterprise features are unlocked for trial.                                                                  * @ http://localhost:8080/assets/index-DCwJoUZw.js:80
+[ERROR] * If you want to hide the watermark please email info@ag-grid.com for a trial license key.                                 * @ http://localhost:8080/assets/index-DCwJoUZw.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-DCwJoUZw.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-DCwJoUZw.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-EmODEbVf.js:80
+[ERROR] ************************************************ AG Grid Enterprise License ************************************************ @ http://localhost:8080/assets/index-EmODEbVf.js:80
+[ERROR] ************************************************** License Key Not Found *************************************************** @ http://localhost:8080/assets/index-EmODEbVf.js:80
+[ERROR] * All AG Grid Enterprise features are unlocked for trial.                                                                  * @ http://localhost:8080/assets/index-EmODEbVf.js:80
+[ERROR] * If you want to hide the watermark please email info@ag-grid.com for a trial license key.                                 * @ http://localhost:8080/assets/index-EmODEbVf.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-EmODEbVf.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-EmODEbVf.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] ************************************************ AG Grid Enterprise License ************************************************ @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] ************************************************** License Key Not Found *************************************************** @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] * All AG Grid Enterprise features are unlocked for trial.                                                                  * @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] * If you want to hide the watermark please email info@ag-grid.com for a trial license key.                                 * @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] ************************************************ AG Grid Enterprise License ************************************************ @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] ************************************************** License Key Not Found *************************************************** @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] * All AG Grid Enterprise features are unlocked for trial.                                                                  * @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] * If you want to hide the watermark please email info@ag-grid.com for a trial license key.                                 * @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-CFyiBXRE.js:80
+[ERROR] **************************************************************************************************************************** @ http://localhost:8080/assets/index-CFyiBXRE.js:80
