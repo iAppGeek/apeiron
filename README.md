@@ -27,7 +27,8 @@ pnpm install
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
 cp .env.example .env                      # optional local overrides
 docker compose --profile core up -d       # mongo + nats
-docker compose --profile seed up gaia     # seed 1M orders (idempotent)
+docker compose --profile core --profile seed up gaia   # seed 1M orders (idempotent; second run is a no-op)
+pnpm --filter @apeiron/gaia stats          # sample statistics of the generated dataset
 ```
 
 ## Licence
