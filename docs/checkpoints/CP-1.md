@@ -56,7 +56,8 @@ PR for review: phase-2-data (Phase 1 was merged earlier as PR #1). Tag: `cp-1`.
 14. **`SsrmRequest`, `Row`, `TraderInfo`** are not defined in Appendix C; I defined them (`protocol.ts`, `order.ts`). `SsrmRequest` is the supported subset of AG Grid's request, with `filterModel` as `Record<string, unknown> | null`.
 15. **Package build model.** Packages compile with `tsc` to `dist/` and are consumed via their `exports` (so `typecheck`, `lint`, `test` depend on `^build` in turbo).
 16. **mongodb-memory-server** downloads a `mongod` 8.2.6 binary (76.6 MB, from fastdl.mongodb.org) on first test run (cached in `~/.cache/mongodb-binaries`; cached in CI). Its pnpm postinstall script is left unapproved on purpose so install does not download it.
-17. No `vitest bench` or benchmarks yet (Phase 3). `pnpm dev` has no tasks until later phases.
+17. `@apeiron/logos` vitest `testTimeout` is 60 s: the 100k-row consistency test exceeded the 5 s default on the GitHub runner (about 5 s locally). CI on PR #2 is green (mongodb-memory-server works on ubuntu-latest).
+18. No `vitest bench` or benchmarks yet (Phase 3). `pnpm dev` has no tasks until later phases. `apps/gaia/src/index.ts` and `stats-cli.ts` are 1-3 line entry points with no spec (the logic they call is in `cli.ts`, `stats.ts` and `stats-params.ts`, all tested).
 
 ## Verification output
 
