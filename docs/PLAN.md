@@ -338,6 +338,17 @@ Pivot is not supported; reject the request if `pivotMode` is set.
 - Otherwise return **leaf rows**: full 50-field rows filtered by `groupKeys` equality on each group column.
 - Always return `rowCount` equal to the exact total at that level.
 
+**Group keys (pre-phase-3).** Group keys on the wire are strings. The group row's field value equals its key.
+- Enum and string columns use the raw value.
+- `valueDate` (type `date`) uses `YYYY-MM-DD` (UTC).
+- A null group value has the key `"(blank)"`.
+
+**Aggregate names on the wire.** Valid `valueCols[].aggFunc` values are `sum`, `avg`, `count` and `wavg`.
+- `wavg` always weights by `notionalUsd`. The client registers it as a custom `aggFuncs` entry so AG Grid accepts the name.
+- Any other name gets `error{code:'UNSUPPORTED_AGG'}`.
+
+**Default ordering.** An empty `sortModel` means `createdAt desc`. Every sort ends with an `orderId` tiebreaker in the same direction as the last sort key, so the order is stable and block fetches never overlap or skip rows.
+
 **Row IDs** (`getRowId`, the same rule on server and client):
 - Leaf rows: `orderId`.
 - Group rows: `"G:" + [...parentKeys, key].join("|")`.
