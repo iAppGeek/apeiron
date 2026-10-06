@@ -16,6 +16,8 @@ export type OrderRepository = {
   count(): Promise<number>;
   /** True when at least one order is stored. */
   isSeeded(): Promise<boolean>;
+  /** Removes every stored order. Idempotent on an empty repository. */
+  clear(): Promise<void>;
 };
 
 export const DEFAULT_BATCH_SIZE = 10_000;

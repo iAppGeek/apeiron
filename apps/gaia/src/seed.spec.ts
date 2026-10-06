@@ -36,6 +36,18 @@ describe('runSeed', () => {
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining('Already seeded'));
   });
 
+  it('SEED_RESET clears existing data and reseeds from scratch', async () => {
+    const { repo, log } = setup();
+    await runSeed({ repo, rows: 500, seed: 1, now: NOW, log });
+    const clear = vi.spyOn(repo, 'clear');
+    const later = NOW + 30 * 86_400_000;
+    const result = await runSeed({ repo, rows: 500, seed: 1, now: later, reset: true, log });
+    expect(clear).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ skipped: false, existingRows: 0, rowsWritten: 500 });
+    expect(await repo.count()).toBe(500);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('SEED_RESET'));
+  });
+
   it('completes a partial dataset by re-upserting', async () => {
     const { repo, log } = setup();
     await repo.upsertMany([...generateOrders(5, 1000, NOW)].slice(0, 300));

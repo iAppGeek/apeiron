@@ -43,7 +43,7 @@ describe('MongoOrderRepository specifics', () => {
     }
   });
 
-  it('uses orderId as the document _id and clear() empties the collection', async () => {
+  it('uses orderId as the document _id and clear() keeps the indexes', async () => {
     const repo = await connect();
     try {
       const { generateOrders } = await import('@apeiron/logos');
@@ -54,6 +54,7 @@ describe('MongoOrderRepository specifics', () => {
       expect(doc?._id).toBe(order.orderId);
       await repo.clear();
       expect(await repo.count()).toBe(0);
+      expect(await repo.database.collection('orders').indexes()).toHaveLength(3);
     } finally {
       await repo.database.dropDatabase();
       await repo.close();

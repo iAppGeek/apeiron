@@ -26,6 +26,10 @@ const envSchema = z.object({
       return ms;
     }),
   BATCH_SIZE: intWithUnderscores('10000'),
+  SEED_RESET: z
+    .enum(['true', 'false', ''])
+    .optional()
+    .transform((s): boolean => s === 'true'),
 });
 
 export type GaiaConfig = {
@@ -36,6 +40,8 @@ export type GaiaConfig = {
   /** Epoch ms, or undefined to use the current time. */
   now: number | undefined;
   batchSize: number;
+  /** Drop all orders before seeding (fresh 6-month window). */
+  reset: boolean;
 };
 
 export function loadConfig(env: Record<string, string | undefined>): GaiaConfig {
@@ -52,5 +58,6 @@ export function loadConfig(env: Record<string, string | undefined>): GaiaConfig 
     seed: e.SEED,
     now: e.SEED_NOW,
     batchSize: e.BATCH_SIZE,
+    reset: e.SEED_RESET,
   };
 }

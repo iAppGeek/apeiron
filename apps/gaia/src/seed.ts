@@ -9,6 +9,8 @@ export type SeedParams = {
   batchSize?: number;
   /** Concurrent bulk writes. */
   maxInFlight?: number;
+  /** Clear the repository first, then seed from scratch. */
+  reset?: boolean;
   log: (message: string) => void;
   clock?: () => number;
   /** Log a progress line every this many rows. */
@@ -37,6 +39,10 @@ export async function runSeed(params: SeedParams): Promise<SeedResult> {
   const clock = params.clock ?? ((): number => performance.now());
   const progressEvery = params.progressEvery ?? 100_000;
 
+  if (params.reset === true) {
+    log('SEED_RESET: clearing existing orders');
+    await repo.clear();
+  }
   const existingRows = await repo.count();
   if (existingRows >= rows) {
     log(`Already seeded: ${fmt(existingRows)} rows present (target ${fmt(rows)}). Nothing to do.`);

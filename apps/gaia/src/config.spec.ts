@@ -10,6 +10,7 @@ describe('loadConfig', () => {
       seed: 42,
       now: undefined,
       batchSize: 10_000,
+      reset: false,
     });
   });
 
@@ -21,8 +22,9 @@ describe('loadConfig', () => {
       SEED: '7',
       SEED_NOW: '2026-10-06T12:00:00Z',
       BATCH_SIZE: '500',
+      SEED_RESET: 'true',
     });
-    expect(cfg).toMatchObject({ mongoDb: 'x', rows: 2000, seed: 7, now: Date.UTC(2026, 9, 6, 12), batchSize: 500 });
+    expect(cfg).toMatchObject({ mongoDb: 'x', rows: 2000, seed: 7, now: Date.UTC(2026, 9, 6, 12), batchSize: 500, reset: true });
   });
 
   it('treats an empty SEED_NOW as unset', () => {
@@ -35,5 +37,6 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ MONGO_URL: 'mongodb://h', SEED_ROWS: '-5' })).toThrow(/SEED_ROWS/);
     expect(() => loadConfig({ MONGO_URL: 'mongodb://h', SEED_ROWS: 'abc' })).toThrow(/SEED_ROWS/);
     expect(() => loadConfig({ MONGO_URL: 'mongodb://h', SEED_NOW: 'yesterday' })).toThrow(/SEED_NOW/);
+    expect(() => loadConfig({ MONGO_URL: 'mongodb://h', SEED_RESET: 'yes' })).toThrow(/SEED_RESET/);
   });
 });

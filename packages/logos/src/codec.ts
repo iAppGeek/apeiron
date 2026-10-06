@@ -1,4 +1,4 @@
-import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
+import { Decoder, Encoder } from '@msgpack/msgpack';
 import type { CodecName, Message } from './protocol.js';
 
 export type WireData = string | Uint8Array | ArrayBuffer;
@@ -27,13 +27,18 @@ export const jsonCodec: Codec = {
   },
 };
 
+// Reused instances avoid per-call allocation (about 20% faster encode per the library docs). Both are
+// synchronous and never re-entered, so sharing them across calls is safe.
+const msgpackEncoder = new Encoder();
+const msgpackDecoder = new Decoder();
+
 export const msgpackCodec: Codec = {
   name: 'msgpack',
   binary: true,
-  encode: (msg: Message): Uint8Array => msgpackEncode(msg),
+  encode: (msg: Message): Uint8Array => msgpackEncoder.encode(msg),
   decode: (data: WireData): unknown => {
     if (typeof data === 'string') throw new Error('msgpack codec cannot decode a text frame');
-    return msgpackDecode(data);
+    return msgpackDecoder.decode(data);
   },
 };
 

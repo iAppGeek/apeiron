@@ -36,6 +36,7 @@ export function sampleClientMsgs(): ClientMsg[] {
     },
     { t: 'setFilterValues', reqId: 8, colId: 'venue' },
     { t: 'command', reqId: 9, orderId: 'ALG00000001', action: 'CANCEL' },
+    { t: 'control', reqId: 10, preset: 'stress' },
     { t: 'ping', ts: 1_700_000_000_123 },
   ];
 }
@@ -60,13 +61,17 @@ export function sampleServerMsgs(): ServerMsg[] {
       groupUpdates: [{ route: ['EURUSD'], rows: [{ childCount: 3, notionalUsd: 123.45 }] }],
       adds: [{ route: [], addIndex: 0, rows: [b] }],
       dirtyRoutes: [[], ['EURUSD', 'BUY']],
-      rowCount: 1_000_001,
+      rowCounts: [
+        { route: [], rowCount: 1_000_001 },
+        { route: ['EURUSD'], rowCount: 251_000 },
+      ],
       newAbove: 2,
     },
     {
       t: 'summary',
       byStatus: { PENDING_START: 200, LIVE: 400, PAUSED: 3, FILLED: 900_000, CANCELLED: 99_397 },
       liveNotionalUsd: 2.5e9,
+      totalRows: 1_000_000,
       server: { cpu: 12.5, rssMb: 640, elLagMs: 1.5 },
     },
     { t: 'ack', reqId: 9 },

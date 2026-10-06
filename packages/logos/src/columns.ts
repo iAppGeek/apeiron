@@ -1,4 +1,4 @@
-import type { OrderField } from './order.js';
+import { PAIR_BY_NAME, type CurrencyPair, type OrderField } from './order.js';
 
 export type ColumnType = 'string' | 'enum' | 'number' | 'datetime' | 'date';
 export type FilterKind = 'text' | 'set' | 'number' | 'date';
@@ -11,7 +11,12 @@ export type ColumnMeta = {
   filter: FilterKind;
   groupable: boolean;
   aggFunc?: AggFunc;
+  /** Fixed display decimals, for non-price numbers. */
   decimals?: number;
+  /** Price columns display with the row's pair decimals (see {@link priceDecimals}). */
+  pairDecimals?: boolean;
+  /** Null is a valid value (stored as NaN in typed arrays, null elsewhere). */
+  nullable?: boolean;
   width?: number;
   /** Price columns flash up/down on change. */
   priceColumn?: boolean;
@@ -42,6 +47,16 @@ const num = (field: OrderField, header: string, decimals: number, opts: Opts = {
   filter: 'number',
   groupable: false,
   decimals,
+  ...opts,
+});
+const price = (field: OrderField, header: string, opts: Opts = {}): ColumnMeta => ({
+  field,
+  header,
+  type: 'number',
+  filter: 'number',
+  groupable: false,
+  pairDecimals: true,
+  priceColumn: true,
   ...opts,
 });
 const dt = (field: OrderField, header: string, opts: Opts = {}): ColumnMeta => ({
@@ -86,22 +101,22 @@ export const COLUMNS: readonly ColumnMeta[] = [
   num('notionalUsd', 'Notional USD', 2, { aggFunc: 'sum', width: 150 }),
   num('filledNotionalUsd', 'Filled Notional USD', 2, { aggFunc: 'sum', width: 160 }),
   // Price (9)
-  num('limitPrice', 'Limit Price', 5, { priceColumn: true }),
-  num('arrivalPrice', 'Arrival Price', 5, { priceColumn: true }),
-  num('avgFillPrice', 'Avg Fill Price', 5, { priceColumn: true }),
-  num('marketBid', 'Bid', 5, { priceColumn: true }),
-  num('marketAsk', 'Ask', 5, { priceColumn: true }),
-  num('marketMid', 'Mid', 5, { priceColumn: true }),
-  num('lastFillPrice', 'Last Fill Price', 5, { priceColumn: true }),
-  num('distanceToLimitBps', 'Dist to Limit (bps)', 2),
+  price('limitPrice', 'Limit Price', { nullable: true }),
+  price('arrivalPrice', 'Arrival Price'),
+  price('avgFillPrice', 'Avg Fill Price', { nullable: true }),
+  price('marketBid', 'Bid'),
+  price('marketAsk', 'Ask'),
+  price('marketMid', 'Mid'),
+  price('lastFillPrice', 'Last Fill Price', { nullable: true }),
+  num('distanceToLimitBps', 'Dist to Limit (bps)', 2, { nullable: true }),
   num('spreadBps', 'Spread (bps)', 2),
   // Performance (6)
-  num('slippageBps', 'Slippage (bps)', 2, { aggFunc: 'wavg:notionalUsd' }),
+  num('slippageBps', 'Slippage (bps)', 2, { aggFunc: 'wavg:notionalUsd', nullable: true }),
   num('slippageUsd', 'Slippage USD', 2, { aggFunc: 'sum' }),
   num('unrealisedPnlUsd', 'Unrealised P&L USD', 2, { aggFunc: 'sum', width: 160 }),
   num('realisedPnlUsd', 'Realised P&L USD', 2, { aggFunc: 'sum', width: 150 }),
-  num('vwapBenchmark', 'VWAP Benchmark', 5, { priceColumn: true }),
-  num('perfVsVwapBps', 'Perf vs VWAP (bps)', 2, { aggFunc: 'wavg:notionalUsd', width: 150 }),
+  price('vwapBenchmark', 'VWAP Benchmark', { nullable: true }),
+  num('perfVsVwapBps', 'Perf vs VWAP (bps)', 2, { aggFunc: 'wavg:notionalUsd', width: 150, nullable: true }),
   // Execution (4)
   num('numFills', 'Fills', 0, { aggFunc: 'sum', width: 90 }),
   num('numChildOrders', 'Child Orders', 0, { width: 110 }),
@@ -112,9 +127,16 @@ export const COLUMNS: readonly ColumnMeta[] = [
   dt('startTime', 'Start'),
   dt('endTime', 'End'),
   dt('lastUpdateTime', 'Last Update'),
-  dt('completedAt', 'Completed'),
+  dt('completedAt', 'Completed', { nullable: true }),
   num('durationMins', 'Duration (min)', 0, { width: 120 }),
 ];
+
+/** Display decimals for price columns of a given pair (JPY pairs 3, SEK/NOK/MXN/ZAR/CNH/TRY 4, others 5). */
+export function priceDecimals(pair: CurrencyPair): number {
+  const info = PAIR_BY_NAME.get(pair);
+  if (info === undefined) throw new Error(`Unknown currency pair: ${pair}`);
+  return info.decimals;
+}
 
 export const COLUMN_BY_FIELD: ReadonlyMap<OrderField, ColumnMeta> = new Map(
   COLUMNS.map((c): [OrderField, ColumnMeta] => [c.field, c]),

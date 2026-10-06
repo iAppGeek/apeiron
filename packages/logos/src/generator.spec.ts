@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   currentOrderCounts,
+  finalMids,
   generateOrderBatches,
   generateOrders,
   historicalDays,
 } from './generator.js';
-import type { Order } from './order.js';
+import { PAIR_BY_NAME, PAIRS, type CurrencyPair, type Order } from './order.js';
 
 const NOW = Date.UTC(2026, 9, 6, 12, 0, 0);
 const DAY = 86_400_000;
+/** Explicit budget for the tests that walk 100k generated orders with per-field assertions. */
+const HEAVY_MS = 30_000;
 
 function first(n: number, total: number, seed = 42): Order[] {
   const out: Order[] = [];
@@ -79,7 +82,7 @@ describe('generated data shape', () => {
       expect(o.completedAt!).toBeLessThan(NOW);
       expect(o.endTime).toBeLessThanOrEqual(NOW);
     }
-  });
+  }, HEAVY_MS);
 
   it('places LIVE orders in progress and PENDING_START orders 1-120 minutes ahead', () => {
     for (const o of orders.filter((x) => x.status === 'LIVE')) {
@@ -138,7 +141,7 @@ describe('generated data shape', () => {
         expect(o.numChildOrders).toBeGreaterThanOrEqual(o.numFills);
       }
     }
-  });
+  }, HEAVY_MS);
 
   it('computes slippage with a positive value meaning adverse', () => {
     for (const o of orders.slice(0, 2000)) {
@@ -181,5 +184,29 @@ describe('historicalDays', () => {
     expect(days[days.length - 1]).toBeLessThan(Math.floor(NOW / DAY) * DAY);
     for (const d of days) expect([1, 2, 3, 4, 5]).toContain(new Date(d).getUTCDay());
     expect([...days].sort((a, b) => a - b)).toEqual(days);
+  });
+});
+
+describe('finalMids', () => {
+  const n = 100_000;
+
+  it('matches the marketMid of every LIVE and PENDING_START order', () => {
+    const mids = finalMids(42, n, NOW);
+    const round = (v: number, d: number): number => Math.round(v * 10 ** d) / 10 ** d;
+    const current = [...generateOrders(42, n, NOW)].filter((o) => o.status === 'LIVE' || o.status === 'PENDING_START');
+    expect(current).toHaveLength(60);
+    for (const o of current) {
+      const dec = PAIR_BY_NAME.get(o.currencyPair)?.decimals ?? 0;
+      expect(o.marketMid).toBe(round(mids[o.currencyPair], dec));
+    }
+  }, HEAVY_MS);
+
+  it('covers all pairs, is deterministic, and drifts away from the reference levels', () => {
+    const a = finalMids(42, 5000, NOW);
+    expect(Object.keys(a).sort()).toEqual(PAIRS.map((p) => p.pair).sort());
+    expect(finalMids(42, 5000, NOW)).toEqual(a);
+    expect(finalMids(43, 5000, NOW)).not.toEqual(a);
+    const eurusd: CurrencyPair = 'EURUSD';
+    expect(a[eurusd]).not.toBe(1.08);
   });
 });

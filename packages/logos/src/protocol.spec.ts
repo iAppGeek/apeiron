@@ -21,6 +21,8 @@ describe('parseClientMsg', () => {
       { t: 'getRows', reqId: 1, req: { startRow: 0, endRow: 10, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [{ colId: 'a', sort: 'up' }] } },
       { t: 'command', reqId: 1, orderId: 'A', action: 'DELETE' },
       { t: 'ping', ts: 'now' },
+      { t: 'control', reqId: 1, preset: 'turbo' },
+      { t: 'control', preset: 'medium' },
     ];
     for (const input of bad) {
       const result = parseClientMsg(input);

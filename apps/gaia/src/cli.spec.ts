@@ -34,6 +34,16 @@ describe('runSeedCli', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Already seeded'));
   });
 
+  it('re-seeds with SEED_RESET=true', async () => {
+    const { deps, repo } = makeDeps();
+    const env = { MONGO_URL: 'mongodb://h', SEED_ROWS: '300' };
+    await runSeedCli(env, deps);
+    const clear = vi.spyOn(repo, 'clear');
+    expect(await runSeedCli({ ...env, SEED_RESET: 'true' }, deps)).toBe(0);
+    expect(clear).toHaveBeenCalledOnce();
+    expect(await repo.count()).toBe(300);
+  });
+
   it('returns 1 on invalid configuration without connecting', async () => {
     const { deps, log } = makeDeps();
     expect(await runSeedCli({}, deps)).toBe(1);

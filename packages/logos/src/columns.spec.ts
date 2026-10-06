@@ -6,8 +6,10 @@ import {
   FREE_TEXT_FIELDS,
   GROUPABLE_FIELDS,
   computeColumnsVersion,
+  priceDecimals,
 } from './columns.js';
 import { generateOrders } from './generator.js';
+import type { Order, OrderField } from './order.js';
 
 const NOW = Date.UTC(2026, 9, 6, 12, 0, 0);
 
@@ -72,6 +74,48 @@ describe('columns', () => {
   it('flags price columns for up/down flash', () => {
     expect(COLUMN_BY_FIELD.get('marketMid')?.priceColumn).toBe(true);
     expect(COLUMN_BY_FIELD.get('orderQty')?.priceColumn).toBeUndefined();
+  });
+
+  it('marks nullable columns exactly as the number | null fields of Order', () => {
+    // Compile-time: this record must list every Order field, so adding a field forces a decision here.
+    const nullable: Record<OrderField, boolean> = {
+      orderId: false, parentOrderId: false, clientOrderId: false, traderId: false, traderName: false, account: false,
+      currencyPair: false, baseCcy: false, quoteCcy: false, tenor: false, valueDate: false,
+      side: false, algoType: false, status: false, orderType: false, timeInForce: false, urgency: false, venue: false,
+      strategyParams: false,
+      orderQty: false, filledQty: false, remainingQty: false, pctComplete: false, notionalUsd: false, filledNotionalUsd: false,
+      limitPrice: true, arrivalPrice: false, avgFillPrice: true, marketBid: false, marketAsk: false, marketMid: false,
+      lastFillPrice: true, distanceToLimitBps: true, spreadBps: false,
+      slippageBps: true, slippageUsd: false, unrealisedPnlUsd: false, realisedPnlUsd: false, vwapBenchmark: true,
+      perfVsVwapBps: true,
+      numFills: false, numChildOrders: false, participationRate: false, lastFillQty: false,
+      createdAt: false, startTime: false, endTime: false, lastUpdateTime: false, completedAt: true, durationMins: false,
+    };
+    const expected = (Object.keys(nullable) as OrderField[]).filter((f) => nullable[f]).sort();
+    expect(COLUMNS.filter((c) => c.nullable === true).map((c) => c.field).sort()).toEqual(expected);
+
+    // Fixture-driven: a field is observed as null in generated data only if it is flagged nullable.
+    const seenNull = new Set<string>();
+    for (const o of generateOrders(42, 100_000, NOW)) {
+      for (const [k, v] of Object.entries(o as Order)) if (v === null) seenNull.add(k);
+    }
+    expect([...seenNull].sort()).toEqual(expected);
+  });
+
+  it('flags pairDecimals on exactly the price columns, without fixed decimals', () => {
+    const price = COLUMNS.filter((c) => c.priceColumn === true).map((c) => c.field).sort();
+    expect(COLUMNS.filter((c) => c.pairDecimals === true).map((c) => c.field).sort()).toEqual(price);
+    expect(price).toEqual(
+      ['limitPrice', 'arrivalPrice', 'avgFillPrice', 'marketBid', 'marketAsk', 'marketMid', 'lastFillPrice', 'vwapBenchmark'].sort(),
+    );
+    for (const c of COLUMNS.filter((x) => x.pairDecimals === true)) expect(c.decimals).toBeUndefined();
+  });
+
+  it('priceDecimals follows the pair table', () => {
+    expect(priceDecimals('EURUSD')).toBe(5);
+    expect(priceDecimals('USDJPY')).toBe(3);
+    expect(priceDecimals('USDTRY')).toBe(4);
+    expect(() => priceDecimals('XXXYYY' as never)).toThrow(/Unknown/);
   });
 
   it('produces a stable version fingerprint that changes with the columns', () => {

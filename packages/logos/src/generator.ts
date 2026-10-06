@@ -385,13 +385,35 @@ function* currentOrders(rng: Rng, factory: OrderFactory, counts: CurrentCounts, 
  * Historical orders come first, ordered by createdAt, followed by the current LIVE and
  * PENDING_START orders, so order IDs increase monotonically through the stream.
  */
-export function* generateOrders(seed: number, n: number, now: number): Generator<Order> {
+export function generateOrders(seed: number, n: number, now: number): Generator<Order> {
+  return createStream(seed, n, now).orders;
+}
+
+type Stream = { orders: Generator<Order>; factory: OrderFactory };
+
+function createStream(seed: number, n: number, now: number): Stream {
   const rng = mulberry32(seed);
   const factory = new OrderFactory(rng);
   const counts = currentOrderCounts(n);
   const historicalCount = Math.max(0, n - counts.live - counts.pending);
-  yield* historicalOrders(rng, factory, historicalCount, now);
-  yield* currentOrders(rng, factory, counts, now);
+  function* all(): Generator<Order> {
+    yield* historicalOrders(rng, factory, historicalCount, now);
+    yield* currentOrders(rng, factory, counts, now);
+  }
+  return { orders: all(), factory };
+}
+
+/**
+ * The price-walk level of every pair at the end of generation (unrounded). Every LIVE and PENDING_START
+ * order's `marketMid` is `round(finalMids[pair], pairDecimals)`, so the price feed must start here, not
+ * at `PAIRS.mid`. Replays the whole stream, so it costs about as much as generating the data.
+ */
+export function finalMids(seed: number, n: number, now: number): Record<CurrencyPair, number> {
+  const { orders, factory } = createStream(seed, n, now);
+  for (const _order of orders) {
+    // draining the stream advances the walk to its final state
+  }
+  return Object.fromEntries(factory.mids) as Record<CurrencyPair, number>;
 }
 
 /** Streams the order set in batches (default 10,000) without materialising it. */

@@ -112,6 +112,17 @@ export function runOrderRepositoryContract(name: string, create: () => Promise<R
       expect((await collect(repo, 100)).flat()).toHaveLength(300);
     });
 
+    it('clear() removes everything, is idempotent, and the repository is reusable afterwards', async () => {
+      await repo.upsertMany(orders(50));
+      await repo.clear();
+      expect(await repo.count()).toBe(0);
+      expect(await repo.isSeeded()).toBe(false);
+      expect(await collect(repo)).toEqual([]);
+      await repo.clear();
+      await repo.upsertMany(orders(10));
+      expect(await repo.count()).toBe(10);
+    });
+
     it('stays correct across several upsert calls', async () => {
       const data = orders(90);
       await repo.upsertMany(data.slice(0, 30));

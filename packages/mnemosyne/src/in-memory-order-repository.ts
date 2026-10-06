@@ -21,6 +21,11 @@ export class InMemoryOrderRepository implements OrderRepository {
     return Promise.resolve(this.orders.size);
   }
 
+  clear(): Promise<void> {
+    this.orders.clear();
+    return Promise.resolve();
+  }
+
   isSeeded(): Promise<boolean> {
     return Promise.resolve(this.orders.size > 0);
   }

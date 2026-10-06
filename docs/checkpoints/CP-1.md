@@ -370,3 +370,243 @@ vitest 5.0.3 declares `engines.node ^22.12 || ^24 || >=26`, so it technically ex
 - **Parent orders are 1:1** (`parentOrderId = PAR` + sequence), so grouping by parent is not interesting.
 - The contract tests exercise 300-1200 rows; the 1M-row path is covered only by the real seeding run and the `loadAll` timing above.
 - `docker-compose.yml` profile sets are minimal: mongo is in `core` and `seed`; `monitoring`, `loadtest` and `edge` services come in later phases.
+
+---
+
+# CP-1 fixes (applied after the Opus review: APPROVE WITH FIXES)
+
+| Fix | What was done |
+|---|---|
+| F1 | TypeScript `~6.0.3` in every package (resolved 6.0.3); no code changes needed. |
+| F2 | Compose images pinned to `mongo:9.0` (running 9.0.2) and `nats:2.15-alpine` (running nats-server 2.15.0). mongodb-memory-server pinned to mongod 9.0.2 through `config.mongodbMemoryServer.version` in `packages/mnemosyne/package.json`; the CI cache key now hashes that file. The `mongodb` 7.7 driver and mongodb-memory-server 11.3 work against 9.0: all 29 mnemosyne tests pass on mongod 9.0.2, and a real 1M seed ran on the 9.0 container. No fallback to 8.0 was needed. The `mongo-data` volume (and `nats-data`) were dropped and re-seeded. |
+| F3 | mongo and nats ports bind to `127.0.0.1` only (`docker ps` confirms). `SEED_NOW`, `BATCH_SIZE`, `SEED_RESET` are passed through to `gaia` and added to `.env.example`. |
+| F4 | `clear()` is on the `OrderRepository` interface and in the contract suite (new test: clear, idempotent clear, reuse afterwards). Mongo `clear()` now drops the collection and recreates the indexes (faster than `deleteMany` at 1M rows); the in-memory fake clears its map. gaia `SEED_RESET=true` calls `clear()` and then seeds (tested in `config.spec`, `seed.spec`, `cli.spec`; verified on the compose stack below). |
+| F5 | `pairDecimals` and `nullable` on `ColumnMeta`. All 8 price columns use `pairDecimals` and have no fixed decimals; the 8 nullable fields are flagged. `priceDecimals(pair)` is exported. New specs: nullable columns equal the `number | null` fields of `Order` (a compile-time exhaustive record, plus a check against nulls observed in 100k generated rows), `pairDecimals` columns equal the `priceColumn` set. |
+| F6 | Added client `control` message (`reqId`, `preset: medium or stress`) with its zod schema and the `LoadPreset` type. `delta.rowCount` was replaced by `rowCounts: {route, rowCount}[]`. Added `summary.totalRows`. Fixtures updated, so the codec round-trip test covers 15 sample messages (6 client + 9 server) on both codecs. |
+| F7 | `finalMids(seed, n, now)` exported from `logos` (replays the stream and returns the unrounded walk level for each pair). Spec: every LIVE and PENDING_START `marketMid` equals `round(finalMids[pair], pairDecimals)`. |
+| F8 | The package-wide `testTimeout: 60_000` was removed from logos. The three heavy generator tests carry an explicit 30 s budget (`HEAVY_MS`); every other test runs under the 5 s default. |
+| F9 | The msgpack codec uses module-level `Encoder` and `Decoder` instances (`encoder.encode()`, which copies, not `encodeSharedRef`, so returned frames stay valid). The round-trip tests are unchanged and pass. |
+
+## Verification (raw, `pnpm turbo run lint typecheck test build --force`)
+
+```
+
+   • turbo 2.11.7
+   • Packages in scope: @apeiron/eslint-config, @apeiron/gaia, @apeiron/logos, @apeiron/mnemosyne, @apeiron/tsconfig
+   • Running lint, typecheck, test, build in 5 packages
+   • Remote caching disabled
+
+@apeiron/logos:lint: cache bypass, force executing d994c92bba05ae8a
+@apeiron/logos:typecheck: cache bypass, force executing a7e972a5bbee8aa2
+@apeiron/logos:test: cache bypass, force executing a972976ad3ec7c28
+@apeiron/logos:build: cache bypass, force executing f18b8c3a7b49716f
+@apeiron/logos:build: 
+@apeiron/logos:build: > @apeiron/logos@0.0.0 build /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:build: > tsc -p tsconfig.build.json
+@apeiron/logos:build: 
+@apeiron/logos:test: 
+@apeiron/logos:test: > @apeiron/logos@0.0.0 test /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:test: > vitest run
+@apeiron/logos:test: 
+@apeiron/logos:lint: 
+@apeiron/logos:lint: > @apeiron/logos@0.0.0 lint /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:lint: > eslint .
+@apeiron/logos:lint: 
+@apeiron/logos:typecheck: 
+@apeiron/logos:typecheck: > @apeiron/logos@0.0.0 typecheck /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:typecheck: > tsc -p tsconfig.json
+@apeiron/logos:typecheck: 
+@apeiron/logos:test: 
+@apeiron/logos:test:  RUN  v5.0.3 /Users/anthonyladas/Development/apeiron/packages/logos
+@apeiron/logos:test: 
+@apeiron/logos:test:  ✓ src/order.spec.ts (4 tests) 3ms
+@apeiron/logos:test:  ✓ src/fixtures.spec.ts (1 test) 9ms
+@apeiron/logos:test:  ✓ src/index.spec.ts (1 test) 2ms
+@apeiron/logos:test:  ✓ src/protocol.spec.ts (6 tests) 12ms
+@apeiron/logos:test:  ✓ src/codec.spec.ts (12 tests) 13ms
+@apeiron/logos:test:  ✓ src/columns.spec.ts (9 tests) 255ms
+@apeiron/logos:test:  ✓ src/prng.spec.ts (9 tests) 353ms
+@apeiron/logos:test:    ✓ mulberry32 (4)
+@apeiron/logos:test:      ✓ stays in [0, 1) with a roughly uniform mean 327ms
+@apeiron/mnemosyne:build: cache bypass, force executing df352c2362103fea
+@apeiron/mnemosyne:lint: cache bypass, force executing 0913632f374502bd
+@apeiron/mnemosyne:test: cache bypass, force executing ea0647548f7e65e5
+@apeiron/mnemosyne:typecheck: cache bypass, force executing 5061ea96c95d1a93
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test: > @apeiron/mnemosyne@0.0.0 test /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:test: > vitest run
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:typecheck: 
+@apeiron/mnemosyne:typecheck: > @apeiron/mnemosyne@0.0.0 typecheck /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:typecheck: > tsc -p tsconfig.json
+@apeiron/mnemosyne:typecheck: 
+@apeiron/mnemosyne:build: 
+@apeiron/mnemosyne:build: > @apeiron/mnemosyne@0.0.0 build /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:build: > tsc -p tsconfig.build.json
+@apeiron/mnemosyne:build: 
+@apeiron/mnemosyne:lint: 
+@apeiron/mnemosyne:lint: > @apeiron/mnemosyne@0.0.0 lint /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:lint: > eslint .
+@apeiron/mnemosyne:lint: 
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test:  RUN  v5.0.3 /Users/anthonyladas/Development/apeiron/packages/mnemosyne
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test:  ✓ src/order-repository.spec.ts (1 test) 2ms
+@apeiron/mnemosyne:test:  ✓ src/index.spec.ts (1 test) 2ms
+@apeiron/gaia:test: cache bypass, force executing 5a5f2b64008c4a9c
+@apeiron/gaia:build: cache bypass, force executing 25a0ad39fc416e5c
+@apeiron/gaia:lint: cache bypass, force executing 9e336f60dacb5434
+@apeiron/gaia:typecheck: cache bypass, force executing e60afe76c7273e13
+@apeiron/gaia:lint: 
+@apeiron/gaia:lint: > @apeiron/gaia@0.0.0 lint /Users/anthonyladas/Development/apeiron/apps/gaia
+@apeiron/gaia:lint: > eslint .
+@apeiron/gaia:lint: 
+@apeiron/gaia:build: 
+@apeiron/gaia:build: > @apeiron/gaia@0.0.0 build /Users/anthonyladas/Development/apeiron/apps/gaia
+@apeiron/gaia:build: > tsc -p tsconfig.build.json
+@apeiron/gaia:build: 
+@apeiron/gaia:test: 
+@apeiron/gaia:test: > @apeiron/gaia@0.0.0 test /Users/anthonyladas/Development/apeiron/apps/gaia
+@apeiron/gaia:test: > vitest run
+@apeiron/gaia:test: 
+@apeiron/gaia:typecheck: 
+@apeiron/gaia:typecheck: > @apeiron/gaia@0.0.0 typecheck /Users/anthonyladas/Development/apeiron/apps/gaia
+@apeiron/gaia:typecheck: > tsc -p tsconfig.json
+@apeiron/gaia:typecheck: 
+@apeiron/mnemosyne:test:  ✓ src/in-memory-order-repository.spec.ts (13 tests) 313ms
+@apeiron/gaia:test: 
+@apeiron/gaia:test:  RUN  v5.0.3 /Users/anthonyladas/Development/apeiron/apps/gaia
+@apeiron/gaia:test: 
+@apeiron/mnemosyne:test: stdout | src/mongo-order-repository.spec.ts
+@apeiron/mnemosyne:test: Downloading MongoDB "9.0.2": 0% (0mb / 164.3mb)
+@apeiron/mnemosyne:test: 
+@apeiron/gaia:test:  ✓ src/stats-params.spec.ts (3 tests) 3ms
+@apeiron/gaia:test:  ✓ src/config.spec.ts (4 tests) 6ms
+@apeiron/gaia:test:  ✓ src/cli.spec.ts (5 tests) 44ms
+@apeiron/gaia:test:  ✓ src/stats.spec.ts (6 tests) 86ms
+@apeiron/gaia:test:  ✓ src/seed.spec.ts (7 tests) 136ms
+@apeiron/gaia:test: 
+@apeiron/gaia:test:  Test Files  5 passed (5)
+@apeiron/gaia:test:       Tests  25 passed (25)
+@apeiron/gaia:test:    Start at  22:19:30
+@apeiron/gaia:test:    Duration  401ms (import 42%, tests 30%, transform 26%, worker 1%)
+@apeiron/gaia:test: 
+@apeiron/mnemosyne:test: stdout | src/mongo-order-repository.spec.ts
+@apeiron/mnemosyne:test: Downloading MongoDB "9.0.2": 73.6% (120.9mb / 164.3mb)
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test: stdout | src/mongo-order-repository.spec.ts
+@apeiron/mnemosyne:test: Downloading MongoDB "9.0.2": 100% (164.3mb / 164.3mb)
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test: stdout | src/mongo-order-repository.spec.ts
+@apeiron/mnemosyne:test: Downloading MongoDB "9.0.2": 100% (0mb / 0mb)
+@apeiron/mnemosyne:test: 
+@apeiron/logos:test:  ✓ src/generator.spec.ts (15 tests) 5399ms
+@apeiron/logos:test:    ✓ generated data shape (8)
+@apeiron/logos:test:      ✓ keeps historical createdAt ascending, on weekdays, within the last 182 days 1010ms
+@apeiron/logos:test:      ✓ keeps every order internally consistent 3552ms
+@apeiron/logos:test:    ✓ finalMids (2)
+@apeiron/logos:test:      ✓ matches the marketMid of every LIVE and PENDING_START order 380ms
+@apeiron/logos:test: 
+@apeiron/logos:test:  Test Files  8 passed (8)
+@apeiron/logos:test:       Tests  57 passed (57)
+@apeiron/logos:test:    Start at  22:19:28
+@apeiron/logos:test:    Duration  5.87s (tests 86%, import 8%, transform 5%)
+@apeiron/logos:test: 
+@apeiron/mnemosyne:test:  ✓ src/mongo-order-repository.spec.ts (14 tests) 8634ms
+@apeiron/mnemosyne:test: 
+@apeiron/mnemosyne:test:  Test Files  4 passed (4)
+@apeiron/mnemosyne:test:       Tests  29 passed (29)
+@apeiron/mnemosyne:test:    Start at  22:19:29
+@apeiron/mnemosyne:test:    Duration  9.03s (tests 92%, import 6%, transform 1%)
+@apeiron/mnemosyne:test: 
+
+ Tasks:    12 successful, 12 total
+Cached:    0 cached, 12 total
+  Time:    10.559s 
+
+```
+
+## Re-seed on the new image (mongo 9.0.2, volume dropped)
+
+First run:
+
+```
+ Container apeiron-mongo-1 Running 
+ Container apeiron-gaia-1 Creating 
+ Container apeiron-gaia-1 Created 
+Attaching to gaia-1
+ Container apeiron-mongo-1 Waiting 
+ Container apeiron-mongo-1 Healthy 
+ Container apeiron-gaia-1 Starting 
+ Container apeiron-gaia-1 Started 
+[gaia] Seeding 1,000,000 rows (seed=42, now=2026-10-06T21:19:58.793Z, batch=10,000)
+[gaia]   100,000 / 1,000,000 rows (55,982 rows/s)
+[gaia]   200,000 / 1,000,000 rows (68,973 rows/s)
+[gaia]   300,000 / 1,000,000 rows (74,472 rows/s)
+[gaia]   400,000 / 1,000,000 rows (76,843 rows/s)
+[gaia]   500,000 / 1,000,000 rows (77,391 rows/s)
+[gaia]   600,000 / 1,000,000 rows (76,168 rows/s)
+[gaia]   700,000 / 1,000,000 rows (77,636 rows/s)
+[gaia]   800,000 / 1,000,000 rows (79,133 rows/s)
+[gaia]   900,000 / 1,000,000 rows (79,940 rows/s)
+[gaia]   1,000,000 / 1,000,000 rows (81,752 rows/s)
+[gaia] Seeded 1,000,000 rows in 12.2s (81,751 rows/s)
+
+[Kgaia-1 exited with code 0
+```
+
+Second run (no-op):
+
+```
+ Container apeiron-mongo-1 Running 
+Attaching to gaia-1
+ Container apeiron-mongo-1 Waiting 
+ Container apeiron-mongo-1 Healthy 
+ Container apeiron-gaia-1 Starting 
+ Container apeiron-gaia-1 Started 
+[gaia] Already seeded: 1,000,000 rows present (target 1,000,000). Nothing to do.
+
+[Kgaia-1 exited with code 0
+```
+
+`SEED_RESET=true` run (clears the collection, re-seeds; the dataset "now" moves to the new run time):
+
+```
+ Container apeiron-mongo-1 Running 
+ Container apeiron-gaia-1 Recreate 
+ Container apeiron-gaia-1 Recreated 
+Attaching to gaia-1
+ Container apeiron-mongo-1 Waiting 
+ Container apeiron-mongo-1 Healthy 
+ Container apeiron-gaia-1 Starting 
+ Container apeiron-gaia-1 Started 
+[gaia] SEED_RESET: clearing existing orders
+[gaia] Seeding 1,000,000 rows (seed=42, now=2026-10-06T21:20:18.659Z, batch=10,000)
+[gaia]   100,000 / 1,000,000 rows (60,159 rows/s)
+[gaia]   200,000 / 1,000,000 rows (72,816 rows/s)
+[gaia]   300,000 / 1,000,000 rows (74,552 rows/s)
+[gaia]   400,000 / 1,000,000 rows (75,741 rows/s)
+[gaia]   500,000 / 1,000,000 rows (68,029 rows/s)
+[gaia]   600,000 / 1,000,000 rows (65,307 rows/s)
+[gaia]   700,000 / 1,000,000 rows (64,474 rows/s)
+[gaia]   800,000 / 1,000,000 rows (65,654 rows/s)
+[gaia]   900,000 / 1,000,000 rows (66,763 rows/s)
+[gaia]   1,000,000 / 1,000,000 rows (69,135 rows/s)
+[gaia] Seeded 1,000,000 rows in 14.5s (69,134 rows/s)
+
+[Kgaia-1 exited with code 0
+```
+
+After a final plain run (no-op): 1,000,000 docs in `blotter.orders`, indexes `_id_`, `traderId_createdAt`, `status`; FILLED 919,802, CANCELLED 79,598, LIVE 400, PENDING_START 200. The stack is left running with this data.
+
+New first-run timing: 12.2 s (81,751 rows/s), against 11.4 s on mongo 8.3. The reset run took 14.5 s including the drop.
+
+## Final versions
+
+Node 24 in images and CI (25.8.2 locally), pnpm 10.33.0, turbo 2.11.7, TypeScript 6.0.3, vitest 5.0.3, eslint 10.12.0, typescript-eslint 8.71.1, @eslint/js 10.0.1, mongodb driver 7.7.0, mongodb-memory-server 11.3.0 (mongod 9.0.2, 164 MB download on first run), @msgpack/msgpack 3.1.3, zod 4.6.5, @types/node 24.19.1. Images: `mongo:9.0` (9.0.2), `nats:2.15-alpine` (nats-server 2.15.0), `node:24-slim`.
+
+## Documented exceptions to "latest stable" (`pnpm outdated -r` lists exactly these two)
+
+- **TypeScript 7.0.2 is not used:** `typescript-eslint` 8.71.1 (the latest) declares the peer range `typescript >=4.8.4 <6.1.0`. Revisit when typescript-eslint supports 7.
+- **@types/node stays on `^24` (latest is 26.6.4):** it matches the Node 24 LTS runtime of the containers and CI, as the plan says; types for newer Node APIs would hide runtime errors there.
+- Not an exception but worth knowing: vitest 5.0.3 declares `engines.node ^22.12 || ^24 || >=26`, so the local Node 25.8 is outside its range. It works, and CI uses Node 24.

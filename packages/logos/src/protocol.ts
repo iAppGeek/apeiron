@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Order, OrderStatus, TraderInfo } from './order.js';
 
 export type CodecName = 'json' | 'msgpack';
+export type LoadPreset = 'medium' | 'stress';
 export type CommandAction = 'CANCEL' | 'PAUSE' | 'RESUME';
 
 /** Subset of AG Grid's `IServerSideGetRowsRequest` that the server supports. */
@@ -24,6 +25,7 @@ export type ClientMsg =
   | { t: 'getRows'; reqId: number; req: SsrmRequest }
   | { t: 'setFilterValues'; reqId: number; colId: string }
   | { t: 'command'; reqId: number; orderId: string; action: CommandAction }
+  | { t: 'control'; reqId: number; preset: LoadPreset }
   | { t: 'ping'; ts: number };
 
 export type ServerMsg =
@@ -38,13 +40,17 @@ export type ServerMsg =
       groupUpdates: { route: string[]; rows: Row[] }[];
       adds: { route: string[]; addIndex: number; rows: Order[] }[];
       dirtyRoutes: string[][];
-      rowCount: number;
+      /** Per route, only tracked routes whose count changed. */
+      rowCounts: { route: string[]; rowCount: number }[];
+      /** Root route only. */
       newAbove: number;
     }
   | {
       t: 'summary';
       byStatus: Record<OrderStatus, number>;
       liveNotionalUsd: number;
+      /** Scoped to the client's trader (and filter). */
+      totalRows: number;
       server: { cpu: number; rssMb: number; elLagMs: number };
     }
   | { t: 'ack'; reqId: number }
@@ -102,6 +108,7 @@ export const clientMsgSchema: z.ZodType<ClientMsg> = z.discriminatedUnion('t', [
     orderId: z.string().min(1),
     action: z.enum(['CANCEL', 'PAUSE', 'RESUME']),
   }),
+  z.object({ t: z.literal('control'), reqId: nonNegInt, preset: z.enum(['medium', 'stress']) }),
   z.object({ t: z.literal('ping'), ts: z.number() }),
 ]);
 

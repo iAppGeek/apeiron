@@ -1,5 +1,5 @@
 import type { Order } from '@apeiron/logos';
-import { MongoClient, type Collection, type Db } from 'mongodb';
+import { MongoClient, MongoServerError, type Collection, type Db } from 'mongodb';
 import { DEFAULT_BATCH_SIZE, type OrderRepository } from './order-repository.js';
 
 const COLLECTION = 'orders';
@@ -77,9 +77,14 @@ export class MongoOrderRepository implements OrderRepository {
     return (await this.orders.findOne({}, { projection: { _id: 1 } })) !== null;
   }
 
-  /** Drops the orders collection. Used by tests and by explicit re-seeding. */
+  /** Drops the collection (much faster than deleteMany at 1M rows) and recreates the indexes. */
   async clear(): Promise<void> {
-    await this.orders.deleteMany({});
+    try {
+      await this.orders.drop();
+    } catch (error) {
+      if (!(error instanceof MongoServerError) || error.codeName !== 'NamespaceNotFound') throw error;
+    }
+    await this.ensureIndexes();
   }
 
   get database(): Db {

@@ -4,10 +4,10 @@ name: apeiron
 # Paths are resolved against the repo root (project_directory in /compose.yaml).
 services:
   mongo:
-    image: mongo:8
+    image: mongo:9.0
     profiles: [core, seed]
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongo-data:/data/db
     healthcheck:
@@ -19,12 +19,12 @@ services:
     restart: unless-stopped
 
   nats:
-    image: nats:2-alpine
+    image: nats:2.15-alpine
     profiles: [core]
     command: ["-js", "-sd", "/data", "-m", "8222"]
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
     volumes:
       - nats-data:/data
     healthcheck:
@@ -48,6 +48,9 @@ services:
       MONGO_DB: ${MONGO_DB:-blotter}
       SEED_ROWS: ${SEED_ROWS:-1000000}
       SEED: ${SEED:-42}
+      SEED_NOW: ${SEED_NOW:-}
+      BATCH_SIZE: ${BATCH_SIZE:-10000}
+      SEED_RESET: ${SEED_RESET:-false}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
       mongo:

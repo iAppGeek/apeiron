@@ -29,6 +29,7 @@ export async function runSeedCli(
       seed: config.seed,
       now: config.now ?? deps.now(),
       batchSize: config.batchSize,
+      reset: config.reset,
       log: deps.log,
     });
     return 0;
