@@ -93,7 +93,7 @@ apeiron/
 3. For each client, look at the rows it currently holds. The server mirrors the grid's block cache LRU (`maxBlocksInCache`).
    - **Value-only change:** send a partial `update` for that row (route + id + changed fields).
    - **Structural change** (an insert, or a change that moves a row's sort position, filter membership or group): with the default `createdAt desc` sort and the top block loaded, send a precise `add` with `addIndex`. Otherwise mark the route dirty, and the client runs `refreshServerSide({route, purge:false})`, throttled to at most once per second.
-   - Always send updated `rowCount`, `newAbove` counts and the status summary strip.
+   - Always send updated per-route `rowCounts`, `newAbove` counts and the status summary strip.
 
 **Commands.** Cancel/Pause/Resume are validated with zod, published to `orders.commands`, and acknowledged. The resulting state change comes back as a normal order event.
 
@@ -103,7 +103,7 @@ apeiron/
 
 ## Protocol (packages/logos/protocol)
 - **Client → server:** `hello{traderId, codec}`, `getRows{reqId, request: IServerSideGetRowsRequest}`, `setFilterValues{reqId, colId}`, `command{reqId, orderId, action}`.
-- **Server → client:** `rows{reqId, rowData, rowCount}`, `delta{seq, serverTs, updates[], adds[], dirtyRoutes[], rowCount, newAbove}`, `summary{...}`, `ack`, `error`.
+- **Server → client:** `rows{reqId, rowData, rowCount}`, `delta{seq, serverTs, updates[], adds[], dirtyRoutes[], rowCounts[], newAbove}`, `summary{...}`, `ack`, `error`. Appendix C is authoritative.
 - **Codec interface:** `encode/decode`, with `json` and `msgpack` (`@msgpack/msgpack`) implementations, negotiated in `hello`.
 
 ## Web design (apps/pharos)
@@ -283,10 +283,17 @@ Atlas M0 (512MB storage) can't hold 1M × 50 columns, and DocumentDB isn't fully
 | `LOG_LEVEL` | — |
 | `REGISTRY` | — |
 | `TAG` | — |
+| `SEED_NOW` (gaia) | unset = wall clock; ISO timestamp pins the dataset for exact reproducibility |
+| `BATCH_SIZE` (gaia) | `10000` |
+| `SEED_RESET` (gaia) | `false`; `true` drops the orders collection and re-seeds, which refreshes the 6-month window to the current date |
 
 **Server process:** `NODE_OPTIONS=--max-old-space-size=3072`. Logging uses Fastify's built-in pino.
 
-**Versions:** latest stable at implementation time. Node 24, pnpm 10, Turborepo 2, TypeScript 5.x strict, React 19, Vite, `ag-grid-react` + `ag-grid-enterprise` (same version; register modules explicitly), Fastify 5 + `@fastify/websocket`, `mongodb` driver, `@nats-io/transport-node` + `@nats-io/jetstream` (nats.js v3), `@msgpack/msgpack`, `zod`, `prom-client`, `zustand`, Vitest, React Testing Library, Playwright, `mongodb-memory-server`.
+**Versions (CP-1 decision): always use the latest stable release.** Only stay behind when a peer-dependency range or a runtime incompatibility forces it. Record every such exception in the checkpoint report with the blocking constraint, and revisit it at each checkpoint.
+- **Runtime:** Node 24 LTS in containers (`node:24-slim`); `@types/node` stays on `^24` to match the runtime. pnpm 10, Turborepo 2.
+- **TypeScript 6.0.x**, strict. **7.x is blocked** because `typescript-eslint` 8.x's peer range is `<6.1.0`; move to 7 as soon as `typescript-eslint` supports it.
+- **Libraries:** React 19, Vite 8, `ag-grid-react` + `ag-grid-enterprise` 36 (same version; register modules explicitly), Fastify 5 + `@fastify/websocket` 11, `mongodb` driver 7, `@nats-io/transport-node` + `@nats-io/jetstream` (nats.js v3), `@msgpack/msgpack` 3, `zod` 4, `prom-client`, `zustand` 5, Vitest 5, React Testing Library 16, Playwright, `mongodb-memory-server` 11.
+- **Container images:** pin the minor version, never a floating major. Use `mongo:9.0` (current major release; fall back to `mongo:8.0` LTS only if the driver or mongodb-memory-server can't support 9.0) and `nats:2.15-alpine`. mongodb-memory-server is pinned to the same Mongo minor as the image.
 
 **AG Grid modules:** ServerSideRowModel, ServerSideRowModelApi, RowGrouping, SetFilter, TextFilter, NumberFilter, DateFilter, ContextMenu, CellStyle, HighlightChanges, StatusBar. No licence key, so the watermark is accepted.
 
@@ -298,9 +305,17 @@ Atlas M0 (512MB storage) can't hold 1M × 50 columns, and DocumentDB isn't fully
 - `filter`: `'text' | 'set' | 'number' | 'date'`
 - `groupable: boolean`
 - `aggFunc?`: `'sum' | 'avg' | 'wavg:notionalUsd' | 'count'`
-- `decimals?`
+- `decimals?` (fixed display decimals, for non-price numbers)
+- `pairDecimals?: boolean` (CP-1). Price columns display with the row's pair decimals: JPY pairs 3, SEK/NOK/MXN/ZAR/CNH/TRY 4, others 5. Look these up from `PAIR_BY_NAME`; price columns have no fixed `decimals`.
 - `width?`
 - `priceColumn?: boolean` (drives up/down flash)
+- `nullable?: boolean` (CP-1): true for `limitPrice`, `avgFillPrice`, `lastFillPrice`, `distanceToLimitBps`, `slippageBps`, `vwapBenchmark`, `perfVsVwapBps`, `completedAt`.
+
+**Null semantics (CP-1 decision), the same everywhere:**
+- **Storage:** in the columnar store, a null number or date is `NaN` in its `Float64Array`. It converts back to `null` at the boundary when rows are materialised. On the wire and in the DB it is always `null`.
+- **Sort:** null sorts as the *smallest* value, so it comes first in `asc` and last in `desc`. This matches AG Grid's own client-side behaviour.
+- **Filter:** `blank` matches null and `notBlank` matches non-null. Every other number or date operator never matches null.
+- **Aggregation:** null rows are skipped, along with their weight in weighted averages. If every value is null, the aggregate is null.
 
 **Groupable columns:** traderName, account, currencyPair, baseCcy, quoteCcy, tenor, side, algoType, status, orderType, timeInForce, urgency, venue, valueDate.
 
@@ -346,6 +361,7 @@ type ClientMsg =
   | { t: 'getRows'; reqId: number; req: SsrmRequest }
   | { t: 'setFilterValues'; reqId: number; colId: string }
   | { t: 'command'; reqId: number; orderId: string; action: 'CANCEL' | 'PAUSE' | 'RESUME' }
+  | { t: 'control'; reqId: number; preset: 'medium' | 'stress' }   // CP-1: UI dev menu → server → NATS control.load
   | { t: 'ping'; ts: number };
 type ServerMsg =
   | { t: 'welcome'; serverTime: number; traders: TraderInfo[]; columnsVersion: string }
@@ -355,8 +371,11 @@ type ServerMsg =
       updates: { route: string[]; rows: (Partial<Order> & { orderId: string })[] }[];
       groupUpdates: { route: string[]; rows: Row[] }[];
       adds: { route: string[]; addIndex: number; rows: Order[] }[];
-      dirtyRoutes: string[][]; rowCount: number; newAbove: number }
-  | { t: 'summary'; byStatus: Record<OrderStatus, number>; liveNotionalUsd: number; server: { cpu: number; rssMb: number; elLagMs: number } }
+      dirtyRoutes: string[][];
+      rowCounts: { route: string[]; rowCount: number }[];   // CP-1: was a single rowCount; per route, only tracked routes whose count changed
+      newAbove: number }                                      // root route only
+  | { t: 'summary'; byStatus: Record<OrderStatus, number>; liveNotionalUsd: number; totalRows: number;   // scoped to the client's trader (and filter)
+      server: { cpu: number; rssMb: number; elLagMs: number } }
   | { t: 'ack'; reqId: number }
   | { t: 'error'; reqId?: number; code: string; message: string }
   | { t: 'pong'; ts: number; serverTs: number };
@@ -364,7 +383,10 @@ type ServerMsg =
 - **Codec negotiation:** the first frame (`hello`) is always JSON text. Every later frame uses the negotiated codec: text frames for JSON, binary frames for msgpack.
 - **Validation:** `ClientMsg` is validated with zod; `ServerMsg` is not, for speed.
 - **NATS subjects:** `prices.<PAIR>` with `{pair, bid, ask, ts}`; `orders.events` with `{type: 'NEW'|'UPDATE', order: Partial<Order> & {orderId}, ts}`; `orders.commands` with `{orderId, action, requestedBy, ts}`; `control.load` with `{preset}`.
-- **JetStream:** streams `ORDERS` (`orders.*`, limits retention, 24h) and `PRICES` (`prices.*`, max 1 message per subject). Durable consumer `blotter-server`.
+- **JetStream:** streams `ORDERS` (`orders.*`, limits retention, 24h) and `PRICES` (`prices.*`, max 1 message per subject).
+  - Durable consumer `blotter-server` with filter subject `orders.events`; the server also consumes `prices.*`.
+  - Durable consumer `hermes-commands` with filter subject `orders.commands`.
+- **Why the per-route counts (CP-1):** with grouping, every route has its own count, so one top-level `rowCount` was ambiguous. `newAbove` applies to the root route, which is the only one where scroll anchoring matters.
 
 ## Appendix D: Live update algorithms (server)
 **ChangeSet.** Built per flush tick: `Map<rowIdx, { changed: Set<field>, prev: Partial<Order> }>`. `prev` holds the old values of the aggregate, sort, filter and group fields; that's what lets views update without rescanning.
@@ -419,6 +441,18 @@ type ServerMsg =
 - LIVE: on each step, with probability p, a fill arrives. Fill quantity is about orderQty / (durationMins·6). This updates filledQty, avgFill, numFills, lastFill*, and pctComplete. The order becomes FILLED when remainingQty reaches 0, or CANCELLED on random expiry (rare).
 - PAUSED orders get no fills.
 - Commands: CANCEL (LIVE/PAUSED/PENDING_START → CANCELLED), PAUSE (LIVE → PAUSED), RESUME (PAUSED → LIVE). Anything else publishes a rejection event, which the server turns into an `error`.
+
+**Price-feed start levels (CP-1).** The seeded mids drift during the generator's 6-month walk (EURUSD ends near 1.004, not 1.08). Hermes must therefore **start each pair's walk from the seeded current level**, not from `PAIRS.mid`; otherwise LIVE rows jump on the first tick.
+- Read the level from the DB at startup: the latest `marketMid` per pair among LIVE and PENDING_START orders.
+- Fall back to `PAIRS.mid` only for a pair with no current orders.
+- Logos should also export the generator's final mids (for example `finalMids(seed, n, now)`), so tests can assert this.
+
+**Stale current orders (CP-1).** The dataset is anchored to the seed time, so on a later day the current orders are stale. Hermes reconciles them once at startup, publishing the results as ordinary `orders.events`:
+- LIVE orders whose `endTime` is in the past become FILLED (or CANCELLED with probability 0.08).
+- PENDING_START orders whose `startTime` is in the past become LIVE.
+- It then tops LIVE back up to the preset's target with new orders.
+
+`SEED_RESET=true` re-seeds a fresh 6-month window anchored to today.
 
 **Rates:**
 | Preset | Updates/s (fills + status) | New orders/s | Price ticks |

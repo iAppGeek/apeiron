@@ -24,8 +24,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/mongodb-binaries
-          key: mongodb-binaries-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: mongodb-binaries-${{ runner.os }}-
+          key: mongodb-binaries-${{ runner.os }}-${{ hashFiles('packages/mnemosyne/package.json') }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
