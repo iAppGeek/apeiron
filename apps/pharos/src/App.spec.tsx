@@ -67,7 +67,7 @@ describe('App', () => {
       expect(hello).toHaveBeenLastCalledWith('T2', 'json');
     });
     await waitFor(() => {
-      expect(useAppStore.getState().traderId).toBe('T2');
+      expect(useAppStore.getState().confirmedTrader).toBe('T2');
     });
   });
 

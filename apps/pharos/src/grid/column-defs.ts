@@ -21,6 +21,20 @@ export type ColumnDefDeps = {
 /** The status chip (PENDING_START) needs more room than the metadata width. */
 export const STATUS_MIN_WIDTH = 160;
 
+/** Room for the sort, filter and menu icons next to a header label. */
+const HEADER_ICONS_WIDTH = 64;
+const HEADER_CHAR_WIDTH = 7;
+
+/** Smallest width at which the whole header label fits beside its icons. */
+export function headerMinWidth(header: string): number {
+  return Math.ceil(header.length * HEADER_CHAR_WIDTH + HEADER_ICONS_WIDTH);
+}
+
+/** Header text; datetimes display in UTC, so say so. */
+export function headerLabel(meta: ColumnMeta): string {
+  return meta.type === 'datetime' ? `${meta.header} (UTC)` : meta.header;
+}
+
 const FILTERS = {
   text: 'agTextColumnFilter',
   set: 'agSetColumnFilter',
@@ -56,11 +70,16 @@ function filterParamsFor(meta: ColumnMeta, deps: ColumnDefDeps): ColDef['filterP
 
 /** Builds the AG Grid column definition for one column of the shared metadata. */
 export function buildColumnDef(meta: ColumnMeta, deps: ColumnDefDeps): ColDef {
+  const headerName = headerLabel(meta);
+  const minWidth = headerMinWidth(headerName);
+  const baseWidth = meta.field === 'status' ? Math.max(meta.width ?? 0, STATUS_MIN_WIDTH) : (meta.width ?? 120);
   const def: ColDef = {
     colId: meta.field,
     field: meta.field,
-    headerName: meta.header,
-    width: meta.field === 'status' ? Math.max(meta.width ?? 0, STATUS_MIN_WIDTH) : (meta.width ?? 120),
+    headerName,
+    headerTooltip: headerName,
+    minWidth,
+    width: Math.max(baseWidth, minWidth),
     filter: FILTERS[meta.filter],
     filterParams: filterParamsFor(meta, deps),
     enableRowGroup: meta.groupable,
@@ -76,6 +95,7 @@ export function buildColumnDef(meta: ColumnMeta, deps: ColumnDefDeps): ColDef {
   if (meta.field === 'status') def.cellRenderer = StatusChip;
   if (meta.field === 'side') def.cellClass = sideCellClass;
   if (meta.field === 'createdAt') def.sort = 'desc';
+  if (meta.field === 'orderId') def.pinned = 'left';
   return def;
 }
 

@@ -17,7 +17,6 @@ import {
   aggFuncs,
   autoGroupColumnDef,
   defaultColDef,
-  getChildCount,
   sideBar,
   theme,
 } from './grid-options';
@@ -51,7 +50,9 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       'serverSideDatasource',
       createDatasource({
         client,
-        onRootRowCount: store.setRowCount,
+        onRootRowCount: (count, grouped) => {
+          store.setRowCount(count, grouped);
+        },
         onNotReady: store.setNotReady,
         onError: ({ code, message }) => {
           store.pushToast('error', describeFailure(code, message));
@@ -94,7 +95,6 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
           autoGroupColumnDef={autoGroupColumnDef}
           aggFuncs={aggFuncs}
           getRowId={getRowId}
-          getChildCount={getChildCount}
           cacheBlockSize={CACHE_BLOCK_SIZE}
           maxBlocksInCache={MAX_BLOCKS_IN_CACHE}
           blockLoadDebounceMillis={60}

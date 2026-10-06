@@ -93,7 +93,8 @@ describe('createAppController', () => {
     useAppStore.getState().setRowCount(1000);
     await controller.changeTrader('T1');
     expect(client.hello).toHaveBeenCalledWith('T1', 'json');
-    expect(useAppStore.getState().traderId).toBe('T1');
+    expect(useAppStore.getState().requestedTrader).toBe('T1');
+    expect(useAppStore.getState().confirmedTrader).toBe('T1');
     expect(useAppStore.getState().rowCount).toBeNull();
     expect(purge).toHaveBeenCalledTimes(1);
   });
@@ -105,7 +106,8 @@ describe('createAppController', () => {
     const purge = vi.fn();
     controller.setPurge(purge);
     await controller.changeTrader('Z');
-    expect(useAppStore.getState().traderId).toBe('ALL');
+    expect(useAppStore.getState().requestedTrader).toBe('ALL');
+    expect(useAppStore.getState().confirmedTrader).toBe('ALL');
     expect(purge).not.toHaveBeenCalled();
     expect(useAppStore.getState().toasts[0]?.text).toMatch(/trader/i);
   });
@@ -115,7 +117,7 @@ describe('createAppController', () => {
     const controller = createAppController(client);
     const purge = vi.fn();
     controller.setPurge(purge);
-    useAppStore.getState().setTraderId('T1');
+    useAppStore.getState().setRequestedTrader('T1');
     await controller.changeCodec('msgpack');
     expect(client.hello).toHaveBeenCalledWith('T1', 'msgpack');
     expect(useAppStore.getState().codec).toBe('msgpack');
@@ -128,6 +130,53 @@ describe('createAppController', () => {
     await createAppController(client).changeCodec('msgpack');
     expect(useAppStore.getState().codec).toBe('json');
     expect(useAppStore.getState().toasts[0]?.text).toBe('boom');
+  });
+
+  it('keeps the old trader confirmed (and shows switching) until the server confirms the new one', async () => {
+    const client = makeClient();
+    let confirm: (w: WelcomeMsg) => void = () => undefined;
+    client.hello.mockImplementation(
+      () =>
+        new Promise<WelcomeMsg>((resolve) => {
+          confirm = resolve;
+        }),
+    );
+    const controller = createAppController(client);
+    const purge = vi.fn();
+    controller.setPurge(purge);
+    const pending = controller.changeTrader('T2');
+    expect(useAppStore.getState().requestedTrader).toBe('T2');
+    expect(useAppStore.getState().confirmedTrader).toBe('ALL');
+    expect(purge).not.toHaveBeenCalled();
+    confirm(welcome);
+    await pending;
+    expect(useAppStore.getState().confirmedTrader).toBe('T2');
+    expect(purge).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the request when the link drops mid-switch and confirms it on the reconnect welcome', async () => {
+    const client = makeClient();
+    client.hello
+      .mockResolvedValueOnce(welcome)
+      .mockRejectedValueOnce(new RequestError({ code: 'DISCONNECTED', message: 'gone' }));
+    const controller = createAppController(client);
+    const purge = vi.fn();
+    controller.setPurge(purge);
+    controller.start('ws://x/ws');
+    await controller.changeTrader('T2');
+    expect(useAppStore.getState().requestedTrader).toBe('T2');
+    expect(useAppStore.getState().confirmedTrader).toBe('ALL');
+    expect(useAppStore.getState().toasts).toHaveLength(0);
+    emitMessage(client, welcome);
+    expect(useAppStore.getState().confirmedTrader).toBe('T2');
+    expect(purge).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends the requested trader in the first hello and when the codec changes', async () => {
+    const client = makeClient();
+    useAppStore.getState().setRequestedTrader('T4');
+    createAppController(client).start('ws://x/ws');
+    expect(client.hello).toHaveBeenCalledWith('T4', 'json');
   });
 
   it('stores server stats from summary, toasts stray errors and hands deltas to the delta handler', () => {

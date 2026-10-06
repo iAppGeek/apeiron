@@ -4,6 +4,7 @@ import {
   FALLBACK_PRICE_DECIMALS,
   decimalsForRow,
   formatCell,
+  formatCount,
   formatDate,
   formatDateTime,
   formatNumber,
@@ -36,9 +37,9 @@ describe('formatNumber', () => {
 });
 
 describe('formatDateTime', () => {
-  it('formats local time as YYYY-MM-DD HH:mm:ss', () => {
-    const d = new Date(2026, 2, 5, 7, 8, 9);
-    expect(formatDateTime(d.getTime())).toBe('2026-03-05 07:08:09');
+  it('formats UTC time as YYYY-MM-DD HH:mm:ss, whatever the local zone', () => {
+    expect(formatDateTime(Date.UTC(2026, 2, 5, 7, 8, 9))).toBe('2026-03-05 07:08:09');
+    expect(formatDateTime(Date.UTC(2026, 11, 31, 23, 59, 59))).toBe('2026-12-31 23:59:59');
   });
 
   it('shows non-numbers as empty', () => {
@@ -95,7 +96,7 @@ describe('formatCell', () => {
   });
 
   it('formats datetimes and dates', () => {
-    const t = new Date(2026, 5, 1, 13, 14, 15).getTime();
+    const t = Date.UTC(2026, 5, 1, 13, 14, 15);
     expect(formatCell(meta('createdAt'), t, {})).toBe('2026-06-01 13:14:15');
     expect(formatCell(meta('valueDate'), Date.UTC(2026, 5, 3), {})).toBe('2026-06-03');
   });
@@ -103,5 +104,13 @@ describe('formatCell', () => {
   it('prints strings and enums and blanks null', () => {
     expect(formatCell(meta('status'), 'LIVE', {})).toBe('LIVE');
     expect(formatCell(meta('orderId'), null, {})).toBe('');
+  });
+});
+
+describe('formatCount', () => {
+  it('adds thousands separators and blanks non-numbers', () => {
+    expect(formatCount(250546)).toBe('250,546');
+    expect(formatCount(12)).toBe('12');
+    expect(formatCount(undefined)).toBe('');
   });
 });

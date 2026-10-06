@@ -38,7 +38,8 @@ export function App({ client, wsUrl }: AppProps): ReactElement {
     <div className="app">
       <Header
         traders={state.traders}
-        traderId={state.traderId}
+        traderId={state.confirmedTrader}
+        switching={state.requestedTrader !== state.confirmedTrader}
         codec={state.codec}
         ready={state.welcomed}
         onTraderChange={(id) => {
@@ -56,6 +57,7 @@ export function App({ client, wsUrl }: AppProps): ReactElement {
         reconnectAttempt={state.reconnectAttempt}
         codec={state.codec}
         rowCount={state.rowCount}
+        grouped={state.grouped}
         rttMs={state.rttMs}
         fps={state.fps}
         msgsInPerSec={state.msgsInPerSec}

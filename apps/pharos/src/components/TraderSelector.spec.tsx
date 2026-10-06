@@ -37,3 +37,13 @@ describe('TraderSelector', () => {
     expect(screen.getAllByRole('option')).toHaveLength(1);
   });
 });
+
+describe('TraderSelector switching state', () => {
+  it('shows switching while the picked trader is not confirmed, and hides it after', () => {
+    const { rerender } = render(<TraderSelector traders={traders} value="ALL" switching onChange={vi.fn()} />);
+    expect(screen.getByText(/switching/)).toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toHaveValue('ALL');
+    rerender(<TraderSelector traders={traders} value="T2" onChange={vi.fn()} />);
+    expect(screen.queryByText(/switching/)).toBeNull();
+  });
+});

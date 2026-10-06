@@ -29,14 +29,19 @@ export function formatNumber(value: unknown, decimals: number): string {
   return Number.isFinite(n) ? numberFormat(decimals).format(n) : '';
 }
 
-/** `YYYY-MM-DD HH:mm:ss` in the browser's local time. */
+/** `YYYY-MM-DD HH:mm:ss` in UTC, the same day boundaries the server filters on. */
 export function formatDateTime(value: unknown): string {
   if (typeof value !== 'number' || Number.isNaN(value)) return '';
   const d = new Date(value);
   return (
-    `${pad(d.getFullYear(), 4)}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
-    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+    `${pad(d.getUTCFullYear(), 4)}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+    `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
   );
+}
+
+/** Grouped row counts with thousands separators. */
+export function formatCount(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value) ? numberFormat(0).format(value) : '';
 }
 
 /**

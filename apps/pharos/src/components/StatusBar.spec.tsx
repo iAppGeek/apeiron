@@ -7,6 +7,7 @@ const base: StatusBarProps = {
   reconnectAttempt: 0,
   codec: 'json',
   rowCount: 1_000_000,
+  grouped: false,
   rttMs: 3.4,
   fps: 60,
   msgsInPerSec: 12.34,
@@ -26,6 +27,16 @@ describe('StatusBar', () => {
     expect(text('status-fps')).toBe('60');
     expect(text('status-in')).toBe('12.3 msg/s');
     expect(text('status-out')).toBe('2.0 msg/s');
+  });
+
+  it('says Groups instead of Rows when the count is of root groups', () => {
+    const { rerender } = render(<StatusBar {...base} rowCount={20} grouped />);
+    expect(screen.getByText('Groups')).toBeInTheDocument();
+    expect(screen.queryByText('Rows')).toBeNull();
+    expect(text('status-rows')).toBe('20');
+    rerender(<StatusBar {...base} />);
+    expect(screen.getByText('Rows')).toBeInTheDocument();
+    expect(screen.queryByText('Groups')).toBeNull();
   });
 
   it('shows dashes for unknown values and the server placeholders', () => {

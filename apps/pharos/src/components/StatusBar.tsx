@@ -8,6 +8,8 @@ export type StatusBarProps = {
   reconnectAttempt: number;
   codec: CodecName;
   rowCount: number | null;
+  /** True when `rowCount` counts root groups, so the label says Groups. */
+  grouped: boolean;
   rttMs: number | null;
   fps: number | null;
   msgsInPerSec: number;
@@ -51,7 +53,7 @@ export function StatusBar(props: StatusBarProps): ReactElement {
         </span>
       </div>
       <Item label="Codec" value={props.codec === 'msgpack' ? 'msgpack' : 'json'} testId="status-codec" />
-      <Item label="Rows" value={orDash(props.rowCount, (n) => integer.format(n))} testId="status-rows" />
+      <Item label={props.grouped ? 'Groups' : 'Rows'} value={orDash(props.rowCount, (n) => integer.format(n))} testId="status-rows" />
       <Item label="RTT" value={orDash(props.rttMs, (n) => `${integer.format(n)} ms`)} testId="status-rtt" />
       <Item label="FPS" value={orDash(props.fps, (n) => integer.format(n))} testId="status-fps" />
       <Item label="In" value={`${oneDecimal.format(props.msgsInPerSec)} msg/s`} testId="status-in" />

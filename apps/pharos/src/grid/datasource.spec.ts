@@ -107,7 +107,17 @@ describe('createDatasource', () => {
     });
     expect(h.getRows).toHaveBeenCalledWith(toSsrmRequest(params.request));
     expect(params.fail).not.toHaveBeenCalled();
-    expect(h.onRootRowCount).toHaveBeenCalledWith(1_000_000);
+    expect(h.onRootRowCount).toHaveBeenCalledWith(1_000_000, false);
+  });
+
+  it('flags a grouped root count so the status bar can say Groups', async () => {
+    const h = makeHarness();
+    h.getRows.mockResolvedValue({ rows: [], rowCount: 20, ms: 1 });
+    const params = makeParams(agRequest({ rowGroupCols: [{ id: 'currencyPair', displayName: 'Pair', field: 'currencyPair' }] }));
+    createDatasource(h.deps).getRows(params);
+    await vi.waitFor(() => {
+      expect(h.onRootRowCount).toHaveBeenCalledWith(20, true);
+    });
   });
 
   it('only reports the root row count for root-level requests', async () => {

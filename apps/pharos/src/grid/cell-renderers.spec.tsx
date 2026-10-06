@@ -1,7 +1,7 @@
 import type { CustomCellRendererProps } from 'ag-grid-react';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { StatusChip, sideCellClass } from './cell-renderers';
+import { GroupLabel, StatusChip, sideCellClass } from './cell-renderers';
 
 const renderChip = (value: unknown): void => {
   render(<StatusChip {...({ value } as CustomCellRendererProps)} />);
@@ -36,5 +36,17 @@ describe('sideCellClass', () => {
     expect(sideCellClass({ value: 'BUY' })).toBe('side-buy');
     expect(sideCellClass({ value: 'SELL' })).toBe('side-sell');
     expect(sideCellClass({ value: 'x' })).toBeUndefined();
+  });
+});
+
+describe('GroupLabel', () => {
+  it('shows the key and the count with thousands separators', () => {
+    render(<GroupLabel {...({ value: 'EURUSD', data: { childCount: 250546 } } as CustomCellRendererProps)} />);
+    expect(screen.getByText('EURUSD', { exact: false })).toHaveTextContent('EURUSD (250,546)');
+  });
+
+  it('shows just the key when there is no count', () => {
+    render(<GroupLabel {...({ value: 'BUY', data: {} } as CustomCellRendererProps)} />);
+    expect(screen.getByText('BUY')).toHaveTextContent(/^BUY$/);
   });
 });

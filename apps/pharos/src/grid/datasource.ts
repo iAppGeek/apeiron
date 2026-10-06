@@ -55,7 +55,7 @@ export const DEFAULT_RETRY: RetryPolicy = { baseMs: 400, maxMs: 5000, factor: 1.
 export type DatasourceDeps = {
   client: Pick<BlotterClient, 'getRows'>;
   /** Called with the exact row count of the root level after each root block loads. */
-  onRootRowCount: (rowCount: number) => void;
+  onRootRowCount: (rowCount: number, grouped: boolean) => void;
   /** True while at least one request is waiting for the server to finish loading orders. */
   onNotReady: (waiting: boolean) => void;
   onError: (failure: { code: FailureCode; message: string }) => void;
@@ -93,7 +93,7 @@ export function createDatasource(deps: DatasourceDeps): IServerSideDatasource {
         try {
           const result = await deps.client.getRows(request);
           if (destroyed) return;
-          if (request.groupKeys.length === 0) deps.onRootRowCount(result.rowCount);
+          if (request.groupKeys.length === 0) deps.onRootRowCount(result.rowCount, request.rowGroupCols.length > 0);
           params.success({ rowData: result.rows, rowCount: result.rowCount });
           return;
         } catch (error) {

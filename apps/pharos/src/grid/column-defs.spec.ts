@@ -7,6 +7,7 @@ import {
   STATUS_MIN_WIDTH,
   buildColumnDef,
   buildColumnDefs,
+  headerMinWidth,
   toWireAggFunc,
 } from './column-defs';
 
@@ -33,10 +34,37 @@ describe('buildColumnDefs', () => {
     expect(defs.map((d) => d.field)).toEqual(COLUMNS.map((c) => c.field));
   });
 
-  it('takes headerName and width from the metadata', () => {
+  it('takes headerName and width from the metadata, never narrower than the header needs', () => {
     expect(byId('orderQty').headerName).toBe('Order Qty');
     expect(byId('orderQty').width).toBe(130);
-    expect(byId('createdAt').width).toBe(160);
+    for (const meta of COLUMNS) {
+      const def = byId(meta.field);
+      expect(def.minWidth).toBe(headerMinWidth(def.headerName ?? ''));
+      expect(def.width).toBeGreaterThanOrEqual(def.minWidth ?? 0);
+      expect(def.width).toBeGreaterThanOrEqual(meta.width ?? 0);
+      expect(def.headerTooltip).toBe(def.headerName);
+    }
+  });
+
+  it('labels datetime columns as UTC and leaves the rest alone', () => {
+    expect(byId('createdAt').headerName).toBe('Created (UTC)');
+    expect(byId('lastUpdateTime').headerName).toBe('Last Update (UTC)');
+    expect(byId('completedAt').headerName).toBe('Completed (UTC)');
+    expect(byId('valueDate').headerName).toBe('Value Date');
+    expect(byId('side').headerName).toBe('Side');
+  });
+
+  it('pins Order ID to the left and nothing else', () => {
+    expect(byId('orderId').pinned).toBe('left');
+    expect(defs.filter((d) => d.pinned !== undefined)).toHaveLength(1);
+  });
+
+  it('gives short headers enough room for the full label (Trader ID, Base, Quote, Tenor, Side)', () => {
+    for (const id of ['traderId', 'baseCcy', 'quoteCcy', 'tenor', 'side']) {
+      const def = byId(id);
+      expect(def.width).toBeGreaterThanOrEqual(headerMinWidth(def.headerName ?? ''));
+    }
+    expect(headerMinWidth('Trader ID')).toBe(127);
   });
 
   it('widens the status column for the chip', () => {

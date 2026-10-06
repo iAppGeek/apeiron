@@ -17,6 +17,8 @@ export type AppController = {
 /** Glue between the transport client and the app store: wiring, trader and codec changes. */
 export function createAppController(client: BlotterClient): AppController {
   let purge: (() => void) | null = null;
+  /** Trader hellos sent and not yet answered. */
+  let inflightTraderHellos = 0;
   let deltaHandler: ((delta: Extract<ServerMsg, { t: 'delta' }>) => void) | null = null;
 
   const reportFailure = (error: unknown): void => {
@@ -25,11 +27,24 @@ export function createAppController(client: BlotterClient): AppController {
     else state.pushToast('error', error instanceof Error ? error.message : String(error));
   };
 
+  /** The server accepted `traderId`: show it, and reload the grid for it. */
+  const confirmTrader = (traderId: string): void => {
+    const state = useAppStore.getState();
+    state.setConfirmedTrader(traderId);
+    state.setRowCount(null);
+    purge?.();
+  };
+
   const onMessage = (msg: ServerMsg): void => {
     const state = useAppStore.getState();
     switch (msg.t) {
       case 'welcome':
         state.setWelcomed(msg.traders);
+        // A welcome with no trader change in flight is the answer to a reconnect hello, which carries the
+        // requested trader, so the server has now confirmed it.
+        if (inflightTraderHellos === 0 && state.requestedTrader !== state.confirmedTrader) {
+          confirmTrader(state.requestedTrader);
+        }
         return;
       case 'summary':
         state.setServer(msg.server);
@@ -55,8 +70,8 @@ export function createAppController(client: BlotterClient): AppController {
       });
       const offMessage = client.on('message', onMessage);
       client.connect(url);
-      const { traderId, codec } = useAppStore.getState();
-      client.hello(traderId, codec).catch((error: unknown) => {
+      const { requestedTrader, codec } = useAppStore.getState();
+      client.hello(requestedTrader, codec).catch((error: unknown) => {
         // A dropped link is already shown in the status bar, and the reconnect re-sends this hello.
         if (!(error instanceof RequestError && error.code === 'DISCONNECTED')) reportFailure(error);
       });
@@ -68,22 +83,27 @@ export function createAppController(client: BlotterClient): AppController {
     },
 
     async changeTrader(traderId: string): Promise<void> {
-      const { codec, setTraderId } = useAppStore.getState();
+      const { codec, setRequestedTrader } = useAppStore.getState();
+      setRequestedTrader(traderId);
+      inflightTraderHellos += 1;
       try {
         await client.hello(traderId, codec);
       } catch (error) {
+        inflightTraderHellos -= 1;
+        // A dropped link keeps the request: the reconnect hello carries it and its welcome confirms it.
+        if (error instanceof RequestError && error.code === 'DISCONNECTED') return;
+        useAppStore.getState().setRequestedTrader(useAppStore.getState().confirmedTrader);
         reportFailure(error);
         return;
       }
-      setTraderId(traderId);
-      useAppStore.getState().setRowCount(null);
-      purge?.();
+      inflightTraderHellos -= 1;
+      confirmTrader(traderId);
     },
 
     async changeCodec(codec: CodecName): Promise<void> {
-      const { traderId, setCodec } = useAppStore.getState();
+      const { requestedTrader, setCodec } = useAppStore.getState();
       try {
-        await client.hello(traderId, codec);
+        await client.hello(requestedTrader, codec);
       } catch (error) {
         reportFailure(error);
         return;

@@ -195,3 +195,30 @@ No version exceptions were added in this phase.
 - **Datasource retries are unbounded** for `NOT_READY` and `DISCONNECTED` by design (the grid just keeps loading); abandoned requests stop when the grid replaces the datasource.
 - **No live updates**: `applyDelta` is a no-op until phase 5, and the status bar CPU and RSS show a dash until `summary` messages exist.
 - **Grid in jsdom is not exercised**: component tests mock `ag-grid-react` and check the configuration and wiring; real grid behaviour was verified in the browser only (and phase 8 adds Playwright E2E).
+
+## Review fixes
+
+Applied from `docs/checkpoints/PHASE-4-review.md` (APPROVE WITH FIXES).
+
+- **P4-1:** datetimes display in UTC (`YYYY-MM-DD HH:mm:ss`) and the datetime headers read "Created (UTC)", "Start (UTC)", "End (UTC)", "Last Update (UTC)", "Completed (UTC)". Closes known weakness 1 (display now uses the same UTC days as the filter).
+- **P4-2:** the store keeps `requestedTrader` and `confirmedTrader`. The selector shows the confirmed trader plus a "switching…" hint while they differ; first hello and reconnects use the requested one. A hello cut by a dropped link keeps the request, and the reconnect welcome confirms it and purges the grid. A server rejection reverts the request. Closes known weakness 2. Tests in `app-controller.spec.ts`, `app-store.spec.ts`, `TraderSelector.spec.tsx`.
+- **P4-3:** every column's `minWidth` is derived from its header text plus icon room, `width` is the larger of that and the metadata width, and `headerTooltip` is set. No header is clipped in the browser (checked all 62 header cells). `Order ID` is pinned left after the group column. **Not in the review text:** `headerTooltip` needs AG Grid's `TooltipModule` (error #200 without it), so that module is now registered.
+- **P4-4:** group labels are drawn by a `GroupLabel` inner renderer with `suppressCount`, so counts read `EURUSD (250,546)`. This replaced the `getChildCount` option.
+- **P4-5:** the status bar says "Groups 20" when the root level is grouped and "Rows 1,000,000" when flat (the datasource reports whether the root request had group columns).
+
+### Verification
+
+```
+$ pnpm lint && pnpm typecheck && pnpm test && pnpm build
+ Tasks: 7 successful, 7 total (lint) / 7 (typecheck) / 7 (test) / 5 (build)
+ @apeiron/pharos  Tests 159 passed (159)
+
+$ docker compose --profile core up -d --build pharos        # all four services healthy
+Browser (Playwright, http://localhost:8080), console: only the AG Grid licence banner (7 lines)
+ flat:     "Rows 1,000,000"; no clipped header cell; Order ID pinned left
+ grouped:  "Groups 20"; AUDJPY (23,496)  AUDUSD (69,604)  EURUSD (250,546)
+ trader:   pick T3 -> select still ALL + "switching…" -> select T3, hint gone, "Rows 199,302"
+ created:  2026-10-06 21:15:55 (UTC column, header "Created (UTC)")
+```
+
+`01-flat.png` and `02-grouped.png` were retaken after the fixes.

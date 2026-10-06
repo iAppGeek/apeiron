@@ -1,5 +1,6 @@
 import type { CustomCellRendererProps } from 'ag-grid-react';
 import type { ReactElement } from 'react';
+import { formatCount } from './formatters';
 
 const STATUS_CLASS: Record<string, string> = {
   LIVE: 'chip-live',
@@ -22,4 +23,15 @@ export function sideCellClass(params: { value?: unknown }): string | undefined {
   if (params.value === 'BUY') return 'side-buy';
   if (params.value === 'SELL') return 'side-sell';
   return undefined;
+}
+
+/** Group row label: the key, then the server's child count with thousands separators. */
+export function GroupLabel({ value, data }: CustomCellRendererProps): ReactElement {
+  const count = typeof data === 'object' && data !== null ? (data as { childCount?: unknown }).childCount : undefined;
+  return (
+    <span>
+      {String(value ?? '')}
+      {typeof count === 'number' && <span className="group-count"> ({formatCount(count)})</span>}
+    </span>
+  );
 }

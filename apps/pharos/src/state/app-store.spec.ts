@@ -9,15 +9,16 @@ describe('app store', () => {
   });
 
   it('starts connecting with all traders and the json codec', () => {
-    expect(state()).toMatchObject({ status: 'connecting', traderId: 'ALL', codec: 'json', welcomed: false, rowCount: null });
+    expect(state()).toMatchObject({ status: 'connecting', requestedTrader: 'ALL', confirmedTrader: 'ALL', codec: 'json', welcomed: false, rowCount: null });
   });
 
   it('records connection state, welcome, codec, trader and counts', () => {
     state().setStatus('reconnecting', 3);
     state().setWelcomed([{ traderId: 'T1', traderName: 'Alice' }]);
     state().setCodec('msgpack');
-    state().setTraderId('T1');
-    state().setRowCount(1234);
+    state().setRequestedTrader('T1');
+    state().setConfirmedTrader('T1');
+    state().setRowCount(1234, true);
     state().setStats({ msgsIn: 5, msgsOut: 6, rttMs: 4 });
     state().setFps(59);
     state().setServer({ cpu: 12, rssMb: 800, elLagMs: 1 });
@@ -28,8 +29,10 @@ describe('app store', () => {
       welcomed: true,
       traders: [{ traderId: 'T1', traderName: 'Alice' }],
       codec: 'msgpack',
-      traderId: 'T1',
+      requestedTrader: 'T1',
+      confirmedTrader: 'T1',
       rowCount: 1234,
+      grouped: true,
       msgsInPerSec: 5,
       msgsOutPerSec: 6,
       rttMs: 4,

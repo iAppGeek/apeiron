@@ -99,3 +99,4 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); font
 
 .side-buy { color: var(--green); font-weight: 600; }
 .side-sell { color: var(--red); font-weight: 600; }
+.switching { color: var(--amber); font-size: 12px; }
