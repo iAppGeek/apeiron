@@ -66,6 +66,25 @@ services:
       start_period: 60s
     restart: unless-stopped
 
+  pharos:
+    profiles: [core]
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+    image: ${REGISTRY:-local}/apeiron/pharos:${TAG:-dev}
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      antikythera:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
   gaia:
     profiles: [seed]
     build:

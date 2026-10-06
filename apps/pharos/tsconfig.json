@@ -1,0 +1,15 @@
+{
+  "extends": "@apeiron/tsconfig/base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["vite/client", "@testing-library/jest-dom"]
+  },
+  "include": ["src", "vite.config.ts"]
+}

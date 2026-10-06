@@ -1,0 +1,150 @@
+import type { CodecName, Row, ServerMsg, SsrmRequest } from '@apeiron/logos';
+import type {
+  ConnectionStatus,
+  Failure,
+  FailureCode,
+  MainToWorker,
+  RequestMsg,
+  WelcomeMsg,
+  WorkerToMain,
+} from './messages';
+
+/** The slice of `Worker` the client needs. */
+export type WorkerLike = {
+  postMessage(message: MainToWorker): void;
+  onmessage: ((event: { data: WorkerToMain }) => void) | null;
+  terminate(): void;
+};
+
+export type RowsResult = { rows: Row[]; rowCount: number; ms: number };
+
+export type StatusEvent = { status: ConnectionStatus; attempt: number; codec: CodecName };
+export type StatsEvent = { msgsIn: number; msgsOut: number; rttMs: number | null };
+
+export type ClientEvents = {
+  status: StatusEvent;
+  /** Server messages that are not answers to a request: delta, summary, welcome, stray errors. */
+  message: ServerMsg;
+  stats: StatsEvent;
+};
+
+/** A request or hello that failed. `code` is the server's `ErrorCode`, or a transport code. */
+export class RequestError extends Error {
+  readonly code: FailureCode;
+
+  constructor(failure: Failure) {
+    super(failure.message);
+    this.name = 'RequestError';
+    this.code = failure.code;
+  }
+}
+
+export type BlotterClient = {
+  connect(url: string): void;
+  /** Resolves with the server's welcome once it accepts the trader and codec. */
+  hello(traderId: string, codec: CodecName): Promise<WelcomeMsg>;
+  getRows(req: SsrmRequest): Promise<RowsResult>;
+  setFilterValues(colId: string): Promise<string[]>;
+  on<E extends keyof ClientEvents>(event: E, handler: (payload: ClientEvents[E]) => void): () => void;
+  dispose(): void;
+};
+
+type Settler<T> = { resolve: (value: T) => void; reject: (reason: RequestError) => void };
+
+/** Main-thread facade over the transport worker. */
+export function createBlotterClient(worker: WorkerLike): BlotterClient {
+  let nextId = 1;
+  const requests = new Map<number, Settler<ServerMsg>>();
+  const hellos = new Map<number, Settler<WelcomeMsg>>();
+  const listeners: { [E in keyof ClientEvents]: Set<(payload: ClientEvents[E]) => void> } = {
+    status: new Set(),
+    message: new Set(),
+    stats: new Set(),
+  };
+
+  const emit = <E extends keyof ClientEvents>(event: E, payload: ClientEvents[E]): void => {
+    for (const handler of [...listeners[event]]) handler(payload);
+  };
+
+  worker.onmessage = (event): void => {
+    const data = event.data;
+    switch (data.kind) {
+      case 'status':
+        emit('status', { status: data.status, attempt: data.attempt, codec: data.codec });
+        return;
+      case 'message':
+        emit('message', data.msg);
+        return;
+      case 'stats':
+        emit('stats', { msgsIn: data.msgsIn, msgsOut: data.msgsOut, rttMs: data.rttMs });
+        return;
+      case 'response': {
+        const settler = requests.get(data.reqId);
+        if (settler === undefined) return;
+        requests.delete(data.reqId);
+        if (data.ok) settler.resolve(data.msg);
+        else settler.reject(new RequestError(data));
+        return;
+      }
+      case 'hello-result': {
+        const settler = hellos.get(data.id);
+        if (settler === undefined) return;
+        hellos.delete(data.id);
+        if (data.ok) settler.resolve(data.welcome);
+        else settler.reject(new RequestError(data));
+        return;
+      }
+    }
+  };
+
+  const request = (build: (reqId: number) => RequestMsg): Promise<ServerMsg> =>
+    new Promise<ServerMsg>((resolve, reject) => {
+      const reqId = nextId++;
+      requests.set(reqId, { resolve, reject });
+      worker.postMessage({ kind: 'request', msg: build(reqId) });
+    });
+
+  return {
+    connect(url: string): void {
+      worker.postMessage({ kind: 'connect', url });
+    },
+
+    hello(traderId: string, codec: CodecName): Promise<WelcomeMsg> {
+      return new Promise<WelcomeMsg>((resolve, reject) => {
+        const id = nextId++;
+        hellos.set(id, { resolve, reject });
+        worker.postMessage({ kind: 'hello', id, traderId, codec });
+      });
+    },
+
+    async getRows(req: SsrmRequest): Promise<RowsResult> {
+      const msg = await request((reqId) => ({ t: 'getRows', reqId, req }));
+      if (msg.t !== 'rows') throw new RequestError({ code: 'INTERNAL', message: `Unexpected reply: ${msg.t}` });
+      return { rows: msg.rows, rowCount: msg.rowCount, ms: msg.ms };
+    },
+
+    async setFilterValues(colId: string): Promise<string[]> {
+      const msg = await request((reqId) => ({ t: 'setFilterValues', reqId, colId }));
+      if (msg.t !== 'filterValues') throw new RequestError({ code: 'INTERNAL', message: `Unexpected reply: ${msg.t}` });
+      return msg.values;
+    },
+
+    on<E extends keyof ClientEvents>(event: E, handler: (payload: ClientEvents[E]) => void): () => void {
+      listeners[event].add(handler);
+      return (): void => {
+        listeners[event].delete(handler);
+      };
+    },
+
+    dispose(): void {
+      worker.postMessage({ kind: 'close' });
+      worker.onmessage = null;
+      worker.terminate();
+      const gone = new RequestError({ code: 'DISCONNECTED', message: 'Client disposed' });
+      for (const settler of requests.values()) settler.reject(gone);
+      for (const settler of hellos.values()) settler.reject(gone);
+      requests.clear();
+      hellos.clear();
+    },
+  };
+}
