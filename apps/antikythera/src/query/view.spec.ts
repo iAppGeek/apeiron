@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { makeStore } from '../testing/orders.js';
-import { filterRows } from './filter.js';
+import { RowBuf } from './row-buf.js';
 import type { SortEntry } from './request.js';
 import { View, type ViewSpec } from './view.js';
 
@@ -11,8 +11,8 @@ const store = makeStore([
 ]);
 const entry = (colId: string, desc: boolean): SortEntry => ({ colId, field: colId === 'ag-Grid-AutoColumn' ? null : (colId as SortEntry['field']), desc });
 
-function view(spec: Partial<ViewSpec>, rows = filterRows(store.size, [])): View {
-  return new View(store, { sort: [], groupCols: [], valueCols: [], ...spec }, rows, true);
+function view(spec: Partial<ViewSpec>): View {
+  return new View(store, { sort: [], groupCols: [], valueCols: [], filter: {}, traderId: 'ALL', ...spec });
 }
 
 describe('View', () => {
@@ -27,9 +27,18 @@ describe('View', () => {
     expect(v.bytes).toBe(24);
   });
 
-  it('does not count a shared filtered array', () => {
-    const v = new View(store, { sort: [], groupCols: [], valueCols: [] }, filterRows(3, []), false);
+  it('does not count a shared identity array', () => {
+    const identity = RowBuf.empty();
+    identity.appendRange(0, store.size);
+    const v = new View(store, { sort: [], groupCols: [], valueCols: [], filter: {}, traderId: 'ALL' }, identity);
+    expect(v.filteredCount).toBe(3);
     expect(v.bytes).toBe(0);
+  });
+
+  it('applies a trader scope and a filter when it builds', () => {
+    const scoped = view({ filter: { side: { filterType: 'set', values: ['BUY'] } } });
+    expect(scoped.filteredCount).toBe(2);
+    expect(scoped.getBlock([], 0, 10).rows.map((r) => r.createdAt)).toEqual([3, 1]);
   });
 
   it('serves leaf blocks in sort order, defaulting to createdAt desc', () => {
@@ -59,7 +68,7 @@ describe('View', () => {
 
   it('returns nothing for a route that does not exist', () => {
     const v = view({ groupCols: ['side'] });
-    expect(v.getBlock(['HOLD'], 0, 10)).toEqual({ rows: [], rowCount: 0 });
+    expect(v.getBlock(['HOLD'], 0, 10)).toMatchObject({ rows: [], rowCount: 0 });
   });
 
   it('orders group rows from the sort entries (auto column, group column, aggregate)', () => {

@@ -2,7 +2,7 @@ import { mulberry32, type Order } from '@apeiron/logos';
 import { describe, expect, it } from 'vitest';
 import { propertyOrders, storeFrom } from '../testing/dataset.js';
 import { makeOrders, makeStore } from '../testing/orders.js';
-import { DEFAULT_SORT, sortRows, type SortKey } from './sort.js';
+import { DEFAULT_SORT, makeComparator, sortRows, type SortKey } from './sort.js';
 
 const all = (n: number): Uint32Array => Uint32Array.from({ length: n }, (_, i) => i);
 const ids = (rows: Uint32Array): number[] => [...rows];
@@ -118,5 +118,82 @@ describe('sortRows', () => {
       const expected = [...rows].sort(cmp);
       expect(ids(sortRows(store, rows, keys)), JSON.stringify(keys)).toEqual(expected);
     }
+  });
+});
+
+describe('makeComparator', () => {
+  const store = makeStore(
+    Array.from({ length: 60 }, (_, i) => ({
+      orderQty: (i * 7) % 5,
+      venue: (['EBS', 'LMAX', 'FXALL'] as const)[i % 3],
+      strategyParams: `p${(i * 13) % 9}`,
+      limitPrice: i % 4 === 0 ? null : i % 6,
+    })),
+  );
+  const keysets: SortKey[][] = [
+    [{ field: 'orderQty', desc: false }],
+    [{ field: 'orderQty', desc: true }, { field: 'venue', desc: false }],
+    [{ field: 'strategyParams', desc: true }, { field: 'limitPrice', desc: false }],
+    [{ field: 'limitPrice', desc: true }],
+    [{ field: 'orderId', desc: true }],
+  ];
+
+  it('sorts rows into exactly the order sortRows produces', () => {
+    for (const keys of keysets) {
+      const cmp = makeComparator(store, keys);
+      const sorted = [...all(60)].sort(cmp);
+      expect(sorted, JSON.stringify(keys)).toEqual(ids(sortRows(store, all(60), keys)));
+    }
+  });
+
+  it('is a strict total order (never returns 0 for distinct rows)', () => {
+    const cmp = makeComparator(store, [{ field: 'orderQty', desc: false }]);
+    for (let a = 0; a < 60; a++) for (let b = a + 1; b < 60; b++) expect(cmp(a, b)).not.toBe(0);
+  });
+
+  it('compares changed rows by their previous values when given prevOf', () => {
+    const s = makeStore([{ orderQty: 10 }, { orderQty: 20 }, { orderQty: 30 }, { orderQty: 40 }]);
+    const keys: SortKey[] = [{ field: 'orderQty', desc: false }];
+    const before = [...all(4)].sort(makeComparator(s, keys));
+    s.updateRow(0, { orderQty: 99 });
+    const prev = new Map<number, Partial<Order>>([[0, { orderQty: 10 }]]);
+    expect([...all(4)].sort(makeComparator(s, keys, (r) => prev.get(r)))).toEqual(before);
+    expect([...all(4)].sort(makeComparator(s, keys))).toEqual([1, 2, 3, 0]);
+  });
+
+  it('falls back to string comparison of orderIds when ids are not ascending in row order', () => {
+    const shuffled = makeStore([{ orderQty: 1 }, { orderQty: 1 }, { orderQty: 1 }]);
+    shuffled.appendBatch(makeOrders([{ orderQty: 1 }]).map((o) => ({ ...o, orderId: 'A-first' })));
+    expect(shuffled.idsAscending).toBe(false);
+    const cmp = makeComparator(shuffled, [{ field: 'orderQty', desc: false }]);
+    expect([...all(4)].sort(cmp)[0]).toBe(3);
+  });
+});
+
+describe('sortRows with ranks that lag behind appended rows', () => {
+  it('merges the radix-sorted covered rows with the comparator-sorted newer ones', () => {
+    const base = Array.from({ length: 400 }, (_, i) => ({ strategyParams: `v${(i * 37) % 53}` }));
+    const store = makeStore(base);
+    const keys: SortKey[] = [{ field: 'strategyParams', desc: false }];
+    store.stringRank('strategyParams');
+    const more = makeOrders(Array.from({ length: 30 }, (_, i) => ({ strategyParams: `v${(i * 11) % 61}` }))).map((o, i) => ({
+      ...o,
+      orderId: `T${String(1000 + i).padStart(7, '0')}`,
+    }));
+    store.appendBatch(more);
+    expect(store.staleRankFields()).toEqual(['strategyParams']);
+    const hybrid = sortRows(store, all(store.size), keys);
+    const expected = [...all(store.size)].sort(makeComparator(store, keys));
+    expect(ids(hybrid)).toEqual(expected);
+    for (const field of store.staleRankFields()) for (const _ of store.refreshStringRanks(field)) void _;
+    expect(ids(sortRows(store, all(store.size), keys))).toEqual(expected);
+  });
+
+  it('uses the comparator path when a string changed under the ranks', () => {
+    const store = makeStore(Array.from({ length: 50 }, (_, i) => ({ strategyParams: `v${(i * 7) % 11}` })));
+    const keys: SortKey[] = [{ field: 'strategyParams', desc: true }];
+    store.stringRank('strategyParams');
+    store.updateRow(10, { strategyParams: 'zzz' });
+    expect(ids(sortRows(store, all(50), keys))).toEqual([...all(50)].sort(makeComparator(store, keys)));
   });
 });

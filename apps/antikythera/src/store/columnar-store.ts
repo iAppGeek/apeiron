@@ -1,5 +1,6 @@
 import { COLUMNS, type Order, type OrderField, type Row } from '@apeiron/logos';
 import { Dictionary } from './dictionary.js';
+import { buildRankState, refreshRankState, type RankState } from './string-rank.js';
 
 export type NumberColumn = { kind: 'number'; field: OrderField; data: Float64Array };
 export type EnumColumn = {
@@ -35,7 +36,16 @@ export type StoreMemory = {
 export type StoreOptions = {
   /** Rows to reserve up front. Typed arrays are SharedArrayBuffer-backed and grow by 1.5x beyond this. */
   capacity?: number;
+  /** Called when an append breaks ascending `orderId` order (the radix tiebreak shortcut stops being valid). */
+  onAscendingBroken?: (orderId: string) => void;
 };
+
+/** What an in-place update changed: the changed fields and their previous values (null for a null number). */
+export type RowUpdate = { changed: OrderField[]; prev: Partial<Order> };
+
+export type UpsertResult =
+  | { kind: 'append'; row: number }
+  | ({ kind: 'update'; row: number } & RowUpdate);
 
 export const DEFAULT_STORE_CAPACITY = 1_500_000;
 
@@ -58,11 +68,14 @@ export class ColumnarStore {
   private count = 0;
   private cap: number;
   private ascendingIds = true;
-  private versionCounter = 0;
-  private readonly stringRankCache = new Map<OrderField, { version: number; rank: Uint32Array }>();
+  private layout = 0;
+  private readonly rankStates = new Map<OrderField, RankState>();
+  private readonly grownDictionaries = new Set<OrderField>();
+  private readonly onAscendingBroken: ((orderId: string) => void) | undefined;
 
   constructor(options: StoreOptions = {}) {
     this.cap = Math.max(1, options.capacity ?? DEFAULT_STORE_CAPACITY);
+    this.onAscendingBroken = options.onAscendingBroken;
     this.columnList = COLUMNS.map((meta): Column => {
       switch (meta.type) {
         case 'enum':
@@ -89,9 +102,20 @@ export class ColumnarStore {
     return this.ascendingIds;
   }
 
-  /** Bumped by every append; cached views are only valid for the version they were built at. */
-  get version(): number {
-    return this.versionCounter;
+  /**
+   * Bumped when a typed array is reallocated (capacity growth, or an enum column widening to 16-bit codes).
+   * Anything that captured a column array, such as a compiled filter, must be rebuilt when this changes.
+   * It is not a data version: appends and updates never bump it.
+   */
+  get layoutVersion(): number {
+    return this.layout;
+  }
+
+  /** Enum columns whose dictionary gained a value since the last call. */
+  takeDictionaryGrowth(): Set<OrderField> {
+    const grown = new Set(this.grownDictionaries);
+    this.grownDictionaries.clear();
+    return grown;
   }
 
   column(field: OrderField): Column {
@@ -119,41 +143,60 @@ export class ColumnarStore {
   }
 
   /**
-   * `rank[row]` is the sort position of the row's string among all values of a string column (equal
-   * strings share a rank). Built on first use and rebuilt after an append; lets string sorts use radix.
+   * Complete, current ranks for a string column: builds (or rebuilds) synchronously when the column has
+   * none or they are stale. Used at load and in tests; the hot path uses {@link stringRankState}.
    */
   stringRank(field: OrderField): Uint32Array {
-    const cached = this.stringRankCache.get(field);
-    if (cached !== undefined && cached.version === this.versionCounter) return cached.rank;
-    const data = this.stringColumn(field);
-    const n = this.count;
-    const codeOf = new Map<string, number>();
-    const codes = new Uint32Array(n);
-    for (let i = 0; i < n; i++) {
-      const s = data[i] as string;
-      let c = codeOf.get(s);
-      if (c === undefined) {
-        c = codeOf.size;
-        codeOf.set(s, c);
-      }
-      codes[i] = c;
+    const state = this.rankStates.get(field);
+    if (state !== undefined && !state.dirty && state.built === this.count) return state.rank;
+    const built = buildRankState(this.stringColumn(field), this.count);
+    this.rankStates.set(field, built);
+    return built.rank;
+  }
+
+  /**
+   * The ranks as last built, possibly covering fewer rows than the store holds (`built`), or null when none
+   * exist or a string changed under them. Rows `>= built` have no rank.
+   */
+  stringRankState(field: OrderField): RankState | null {
+    const state = this.rankStates.get(field);
+    return state === undefined || state.dirty ? null : state;
+  }
+
+  /** String columns that have ranks and have fallen behind the store (appended rows, or a changed string). */
+  staleRankFields(): OrderField[] {
+    const out: OrderField[] = [];
+    for (const [field, state] of this.rankStates) if (state.dirty || state.built < this.count) out.push(field);
+    return out;
+  }
+
+  /**
+   * Brings one column's ranks up to date in slices, yielding between them. Run it from a background task:
+   * `for (const _ of store.refreshStringRanks(field)) await yieldToLoop()`.
+   */
+  *refreshStringRanks(field: OrderField, chunk = 50_000): Generator<void> {
+    const state = this.rankStates.get(field);
+    if (state === undefined) return;
+    if (state.dirty) {
+      yield;
+      this.rankStates.set(field, buildRankState(this.stringColumn(field), this.count));
+      return;
     }
-    const values = [...codeOf.keys()];
-    const order = Uint32Array.from({ length: values.length }, (_, i) => i);
-    order.sort((a, b) => ((values[a] as string) < (values[b] as string) ? -1 : 1));
-    const rankOfCode = new Uint32Array(values.length);
-    for (let r = 0; r < order.length; r++) rankOfCode[order[r] as number] = r;
-    const rank = new Uint32Array(n);
-    for (let i = 0; i < n; i++) rank[i] = rankOfCode[codes[i] as number] as number;
-    this.stringRankCache.set(field, { version: this.versionCounter, rank });
-    return rank;
+    const run = refreshRankState(state, this.stringColumn(field), this.count, chunk);
+    let step = run.next();
+    while (step.done !== true) {
+      yield;
+      if (this.rankStates.get(field) !== state) return;
+      step = run.next();
+    }
+    if (step.value !== null && this.rankStates.get(field) === state) this.rankStates.set(field, step.value);
   }
 
   rowIndexOf(orderId: string): number | undefined {
     return this.idToRow.get(orderId);
   }
 
-  /** Appends orders as new rows. Throws on a duplicate `orderId`. */
+  /** Appends orders as new rows. Throws on a duplicate `orderId`. Never invalidates anything else. */
   appendBatch(orders: readonly Order[]): void {
     if (orders.length === 0) return;
     this.ensureCapacity(this.count + orders.length);
@@ -166,7 +209,10 @@ export class ColumnarStore {
       seen.add(id);
       if (base + i > 0) {
         const prev = i === 0 ? (ids[base - 1] as string) : (orders[i - 1] as Order).orderId;
-        if (!(id > prev)) this.ascendingIds = false;
+        if (!(id > prev) && this.ascendingIds) {
+          this.ascendingIds = false;
+          this.onAscendingBroken?.(id);
+        }
       }
     }
     for (let i = 0; i < orders.length; i++) this.idToRow.set((orders[i] as Order).orderId, base + i);
@@ -179,19 +225,80 @@ export class ColumnarStore {
           data[base + i] = typeof v === 'number' ? v + 0 : Number.NaN;
         }
       } else if (col.kind === 'enum') {
+        const sizeBefore = col.dict.size;
         for (let i = 0; i < orders.length; i++) {
           const code = col.dict.getOrAdd((orders[i] as Order)[field] as string);
           if (code > 255 && col.codes instanceof Uint8Array) this.widen(col, base + i);
           col.codes[base + i] = code;
         }
+        if (col.dict.size !== sizeBefore) this.grownDictionaries.add(field);
       } else {
         const data = col.data;
         for (let i = 0; i < orders.length; i++) data.push((orders[i] as Order)[field] as string);
       }
     }
     this.count += orders.length;
-    this.versionCounter++;
   }
+
+  /** Writes every field of `order` over an existing row, or appends it as a new row. */
+  upsert(order: Order): UpsertResult {
+    const row = this.idToRow.get(order.orderId);
+    if (row === undefined) {
+      this.appendBatch([order]);
+      return { kind: 'append', row: this.count - 1 };
+    }
+    return { kind: 'update', row, ...this.updateRow(row, order) };
+  }
+
+  /**
+   * Writes the given fields of one row in place and reports which actually changed, with their previous
+   * values. Fields that already hold the value are not reported. `orderId` and unknown keys are ignored.
+   * Nothing global is invalidated; the caller feeds the result to the tick's ChangeSet.
+   */
+  updateRow(row: number, partial: Partial<Order>): RowUpdate {
+    const changed: OrderField[] = [];
+    const prev: Record<string, unknown> = {};
+    for (const key of Object.keys(partial) as OrderField[]) {
+      if (key === 'orderId') continue;
+      const col = this.columns.get(key);
+      if (col === undefined) continue;
+      const value = partial[key];
+      if (col.kind === 'number') {
+        const next = typeof value === 'number' ? value + 0 : Number.NaN;
+        const old = col.data[row] as number;
+        if (old === next || (old !== old && next !== next)) continue;
+        prev[key] = old !== old ? null : old;
+        col.data[row] = next;
+        changed.push(key);
+      } else if (col.kind === 'enum') {
+        const sizeBefore = col.dict.size;
+        const code = col.dict.getOrAdd(value as string);
+        if (col.dict.size !== sizeBefore) this.grownDictionaries.add(key);
+        if (code > 255 && col.codes instanceof Uint8Array) this.widen(col, this.count);
+        const oldCode = col.codes[row] as number;
+        if (oldCode === code) continue;
+        prev[key] = col.dict.values[oldCode];
+        col.codes[row] = code;
+        changed.push(key);
+      } else {
+        const next = value as string;
+        const old = col.data[row] as string;
+        if (old === next) continue;
+        prev[key] = old;
+        col.data[row] = next;
+        const state = this.rankStates.get(key);
+        if (state !== undefined && row < state.built) state.dirty = true;
+        changed.push(key);
+      }
+    }
+    return { changed, prev: prev as Partial<Order> };
+  }
+
+  /** The row as a typed order (the same values as {@link rowAt}). */
+  orderAt(index: number): Order {
+    return this.rowAt(index) as unknown as Order;
+  }
+
 
   /** Builds the full 50-field row, restoring null from NaN. */
   rowAt(index: number): Row {
@@ -267,6 +374,7 @@ export class ColumnarStore {
     const wide = newCodes(this.cap, true);
     wide.set(col.codes.subarray(0, written));
     col.codes = wide;
+    this.layout++;
   }
 
   private ensureCapacity(needed: number): void {
@@ -284,5 +392,6 @@ export class ColumnarStore {
       }
     }
     this.cap = next;
+    this.layout++;
   }
 }

@@ -80,13 +80,29 @@ describe('ColumnarStore', () => {
     expect(store.idsAscending).toBe(false);
   });
 
-  it('bumps its version on append and ignores empty batches', () => {
+  it('ignores empty batches and does not bump the layout version for plain appends', () => {
     const store = new ColumnarStore({ capacity: 4 });
-    const v0 = store.version;
+    const v0 = store.layoutVersion;
     store.appendBatch([]);
-    expect(store.version).toBe(v0);
+    expect(store.size).toBe(0);
     store.appendBatch([orders[0] as Order]);
-    expect(store.version).toBe(v0 + 1);
+    expect(store.size).toBe(1);
+    expect(store.layoutVersion).toBe(v0);
+  });
+
+  it('bumps the layout version when arrays are reallocated (growth, widening)', () => {
+    const store = new ColumnarStore({ capacity: 2 });
+    const v0 = store.layoutVersion;
+    store.appendBatch(orders.slice(0, 5));
+    expect(store.layoutVersion).toBeGreaterThan(v0);
+    const v1 = store.layoutVersion;
+    const many: Order[] = Array.from({ length: 300 }, (_, i) => ({
+      ...(orders[0] as Order),
+      orderId: `Z${String(i).padStart(4, '0')}`,
+      account: `ACC-${i}`,
+    }));
+    store.appendBatch(many);
+    expect(store.layoutVersion).toBeGreaterThan(v1);
   });
 
   it('widens enum codes beyond 256 distinct values', () => {
@@ -168,5 +184,145 @@ describe('ColumnarStore', () => {
     expect(() => store.numberColumn('status')).toThrow();
     expect(() => store.enumColumn('orderQty')).toThrow();
     expect(() => store.stringColumn('side')).toThrow();
+  });
+
+  describe('live updates', () => {
+    it('updates fields in place and reports only what changed, with previous values', () => {
+      const store = loaded();
+      const before = store.rowAt(5);
+      const result = store.updateRow(5, {
+        filledQty: (before.filledQty as number) + 1,
+        orderQty: before.orderQty as number,
+        status: before.status === 'LIVE' ? 'PAUSED' : 'LIVE',
+        strategyParams: 'x=1',
+      });
+      expect(result.changed.sort()).toEqual(['filledQty', 'status', 'strategyParams']);
+      expect(result.prev).toEqual({ filledQty: before.filledQty, status: before.status, strategyParams: before.strategyParams });
+      expect(store.rowAt(5).filledQty).toBe((before.filledQty as number) + 1);
+      expect(store.rowAt(5).strategyParams).toBe('x=1');
+      expect(store.rowAt(4)).toEqual(normalise(orders[4] as Order));
+    });
+
+    it('reports nothing for a no-op, ignores orderId and unknown keys, and treats NaN as null', () => {
+      const store = loaded();
+      const row = store.rowAt(2);
+      expect(store.updateRow(2, { orderId: 'other', bogus: 1, filledQty: row.filledQty as number } as Partial<Order>)).toEqual({ changed: [], prev: {} });
+      expect(store.rowAt(2).orderId).toBe((orders[2] as Order).orderId);
+      const idx = orders.findIndex((o) => o.limitPrice === null);
+      expect(store.updateRow(idx, { limitPrice: null })).toEqual({ changed: [], prev: {} });
+      const to = store.updateRow(idx, { limitPrice: 1.5 });
+      expect(to).toEqual({ changed: ['limitPrice'], prev: { limitPrice: null } });
+      expect(store.updateRow(idx, { limitPrice: null })).toEqual({ changed: ['limitPrice'], prev: { limitPrice: 1.5 } });
+      expect(store.rowAt(idx).limitPrice).toBeNull();
+    });
+
+    it('normalises -0 to 0', () => {
+      const store = loaded();
+      store.updateRow(0, { slippageUsd: 5 });
+      expect(store.updateRow(0, { slippageUsd: -0 }).changed).toEqual(['slippageUsd']);
+      expect(Object.is(store.numberColumn('slippageUsd')[0], 0)).toBe(true);
+    });
+
+    it('does not bump the layout version or global state for plain updates', () => {
+      const store = loaded();
+      const layout = store.layoutVersion;
+      store.updateRow(1, { filledQty: 12345, status: 'PAUSED' });
+      expect(store.layoutVersion).toBe(layout);
+    });
+
+    it('tracks dictionaries that gained a value, from updates and appends, and clears on read', () => {
+      const store = loaded();
+      store.takeDictionaryGrowth();
+      store.updateRow(0, { venue: 'BRAND-NEW-VENUE' as Order['venue'] });
+      store.appendBatch([{ ...(orders[0] as Order), orderId: 'ZZ-NEW', status: 'WEIRD' as Order['status'] }]);
+      expect([...store.takeDictionaryGrowth()].sort()).toEqual(['status', 'venue']);
+      expect(store.takeDictionaryGrowth().size).toBe(0);
+      store.updateRow(0, { venue: 'BRAND-NEW-VENUE' as Order['venue'] });
+      expect(store.takeDictionaryGrowth().size).toBe(0);
+    });
+
+    it('widens an enum column that outgrows 8-bit codes during updates and bumps the layout version', () => {
+      const store = loaded();
+      const layout = store.layoutVersion;
+      for (let i = 0; i < 300; i++) store.updateRow(i % store.size, { account: `ACC-${i}` });
+      expect(store.enumColumn('account').codes).toBeInstanceOf(Uint16Array);
+      expect(store.layoutVersion).toBeGreaterThan(layout);
+      expect(store.rowAt(299 % store.size).account).toBe('ACC-299');
+    });
+
+    it('upserts: an unknown id appends, a known id updates in place', () => {
+      const store = loaded();
+      const fresh: Order = { ...(orders[0] as Order), orderId: 'ZZ-UPSERT' };
+      expect(store.upsert(fresh)).toEqual({ kind: 'append', row: orders.length });
+      expect(store.size).toBe(orders.length + 1);
+      const again = store.upsert({ ...fresh, filledQty: 99 });
+      expect(again).toMatchObject({ kind: 'update', row: orders.length, changed: ['filledQty'] });
+      expect(store.size).toBe(orders.length + 1);
+      expect(store.upsert(fresh)).toMatchObject({ kind: 'update', changed: ['filledQty'], prev: { filledQty: 99 } });
+    });
+
+    it('builds typed orders and warns once when an append breaks ascending ids', () => {
+      const broken: string[] = [];
+      const store = new ColumnarStore({ capacity: 8, onAscendingBroken: (id) => broken.push(id) });
+      store.appendBatch([{ ...(orders[0] as Order), orderId: 'B' }]);
+      store.appendBatch([{ ...(orders[1] as Order), orderId: 'A' }]);
+      store.appendBatch([{ ...(orders[2] as Order), orderId: '0' }]);
+      expect(broken).toEqual(['A']);
+      expect(store.idsAscending).toBe(false);
+      expect(store.orderAt(0).orderId).toBe('B');
+    });
+
+    it('keeps ascending ids across live appends in order', () => {
+      const broken: string[] = [];
+      const store = new ColumnarStore({ capacity: 4, onAscendingBroken: (id) => broken.push(id) });
+      for (let i = 0; i < 20; i++) store.appendBatch([{ ...(orders[i] as Order), orderId: `ALG${String(i).padStart(8, '0')}` }]);
+      expect(store.idsAscending).toBe(true);
+      expect(broken).toEqual([]);
+    });
+  });
+
+  describe('string ranks under live changes', () => {
+    const make = (): ColumnarStore => {
+      const store = new ColumnarStore({ capacity: 8 });
+      store.appendBatch(['b', 'a', 'c'].map((strategyParams, i) => ({ ...(orders[0] as Order), orderId: `R${i}`, strategyParams })));
+      return store;
+    };
+
+    it('has no state until first asked, then reports staleness after appends', () => {
+      const store = make();
+      expect(store.stringRankState('strategyParams')).toBeNull();
+      expect(store.staleRankFields()).toEqual([]);
+      store.stringRank('strategyParams');
+      expect(store.stringRankState('strategyParams')?.built).toBe(3);
+      store.appendBatch([{ ...(orders[0] as Order), orderId: 'R9', strategyParams: 'A' }]);
+      expect(store.stringRankState('strategyParams')?.built).toBe(3);
+      expect(store.staleRankFields()).toEqual(['strategyParams']);
+    });
+
+    it('refreshes in the background to the same ranks a full rebuild gives', () => {
+      const store = make();
+      store.stringRank('strategyParams');
+      store.appendBatch(['B', 'zz', 'a'].map((strategyParams, i) => ({ ...(orders[0] as Order), orderId: `S${i}`, strategyParams })));
+      for (const _ of store.refreshStringRanks('strategyParams', 2)) void _;
+      const refreshed = [...(store.stringRankState('strategyParams')?.rank ?? [])];
+      expect(store.staleRankFields()).toEqual([]);
+      expect(refreshed).toEqual([...store.stringRank('strategyParams')]);
+      expect(refreshed).toEqual([2, 1, 3, 0, 4, 1]);
+    });
+
+    it('marks ranks dirty when a covered string changes and rebuilds them on refresh', () => {
+      const store = make();
+      store.stringRank('strategyParams');
+      store.updateRow(0, { strategyParams: 'zzz' });
+      expect(store.stringRankState('strategyParams')).toBeNull();
+      expect(store.staleRankFields()).toEqual(['strategyParams']);
+      for (const _ of store.refreshStringRanks('strategyParams')) void _;
+      expect([...(store.stringRankState('strategyParams')?.rank ?? [])]).toEqual([2, 0, 1]);
+    });
+
+    it('ignores a refresh for a column that was never ranked', () => {
+      const store = make();
+      expect([...store.refreshStringRanks('clientOrderId')]).toEqual([]);
+    });
   });
 });

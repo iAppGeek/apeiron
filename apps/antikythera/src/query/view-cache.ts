@@ -51,11 +51,28 @@ export class ViewCache {
     let bytes = this.totalBytes();
     for (const [key, view] of this.views) {
       if (this.views.size <= this.options.maxViews && bytes <= this.options.maxBytes) break;
-      if (key === keep) continue;
+      if (key === keep || view.refs > 0) continue;
       this.views.delete(key);
       bytes -= view.bytes;
       this.evictionCount++;
     }
+  }
+
+  /** Evicts views that no client tracks and nobody has read for `idleMs`. Returns how many went. */
+  sweep(idleMs: number, now: number): number {
+    let removed = 0;
+    for (const [key, view] of this.views) {
+      if (view.refs === 0 && now - view.lastUsed >= idleMs) {
+        this.views.delete(key);
+        removed++;
+        this.evictionCount++;
+      }
+    }
+    return removed;
+  }
+
+  values(): IterableIterator<View> {
+    return this.views.values();
   }
 
   clear(): void {

@@ -1,7 +1,8 @@
 import { sampleOrders, type Order, type Row, type SsrmRequest } from '@apeiron/logos';
 import { describe, expect, it } from 'vitest';
+import { applyOrders } from '../testing/apply.js';
 import { makeOrders, makeStore } from '../testing/orders.js';
-import { SET_FILTER_VALUE_CAP, QueryEngine } from './engine.js';
+import { SET_FILTER_VALUE_CAP, QueryEngine, type RowsResult } from './engine.js';
 
 const req = (r: Partial<SsrmRequest> = {}): SsrmRequest => ({
   startRow: 0,
@@ -15,7 +16,7 @@ const req = (r: Partial<SsrmRequest> = {}): SsrmRequest => ({
 });
 const opts = { maxViews: 8, maxBytes: 10_000_000, maxBlockRows: 1_000 };
 
-function rowsOk(engine: QueryEngine, trader: string, r: SsrmRequest): { rows: Row[]; rowCount: number; built: boolean } {
+function rowsOk(engine: QueryEngine, trader: string, r: SsrmRequest): RowsResult {
   const res = engine.getRows(trader, r);
   if (!res.ok) throw new Error(`${res.code}: ${res.message}`);
   return res.value;
@@ -99,15 +100,25 @@ describe('QueryEngine.getRows (flat)', () => {
     expect(code(req({ endRow: 5_000 }))).toBe('BAD_REQUEST');
   });
 
-  it('drops cached views when the store changes', () => {
+  it('patches cached views in place when the store changes, instead of dropping them', () => {
     const store = makeStore(data);
     const e = new QueryEngine(store, opts);
     expect(rowsOk(e, 'ALL', req()).rowCount).toBe(5);
-    store.appendBatch(makeOrders([{ orderId: 'Z9999999', createdAt: 99 }]));
+    applyOrders(store, e, makeOrders([{ orderId: 'Z9999999', createdAt: 99 }]));
     const r = rowsOk(e, 'ALL', req());
-    expect(r.built).toBe(true);
+    expect(r.built).toBe(false);
     expect(r.rowCount).toBe(6);
     expect(r.rows[0]?.orderId).toBe('Z9999999');
+  });
+
+  it('reports the tracked block for live deltas', () => {
+    const e = new QueryEngine(makeStore(data), opts);
+    const r = rowsOk(e, 'ALL', req({ startRow: 1, endRow: 3 }));
+    expect(r.track).toMatchObject({ route: [], routeKey: '', startRow: 1, kind: 'leaf' });
+    expect(r.track.rowIdx).toHaveLength(2);
+    const g = rowsOk(e, 'ALL', req({ rowGroupCols: [{ id: 'side' }], valueCols: [] }));
+    expect(g.track).toMatchObject({ kind: 'group' });
+    expect(g.track.labels).toEqual(g.rows.map((row) => row.side));
   });
 });
 
@@ -214,13 +225,13 @@ describe('QueryEngine.setFilterValues', () => {
     expect(values('T9', 'venue')).toEqual([]);
   });
 
-  it('serves repeat calls from a cache and refreshes after appends', () => {
+  it('serves repeat calls from a cache and refreshes when a dictionary gains a value', () => {
     const s = makeStore([{ venue: 'EBS' }]);
     const e = new QueryEngine(s, opts);
     const first = e.setFilterValues('ALL', 'venue');
     const second = e.setFilterValues('ALL', 'venue');
     expect(second.ok && first.ok && second.value === first.value).toBe(true);
-    s.appendBatch(makeOrders([{ orderId: 'Z0000001', venue: 'LMAX' }]));
+    applyOrders(s, e, makeOrders([{ orderId: 'Z0000001', venue: 'LMAX' }]));
     expect(e.setFilterValues('ALL', 'venue')).toEqual({ ok: true, value: ['EBS', 'LMAX'] });
   });
 
