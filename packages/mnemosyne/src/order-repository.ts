@@ -16,6 +16,13 @@ export type OrderRepository = {
   count(): Promise<number>;
   /** True when at least one order is stored. */
   isSeeded(): Promise<boolean>;
+  /**
+   * The orders that can still change: PENDING_START, LIVE and PAUSED, ascending by `orderId`. Hermes uses
+   * it to rebuild its state at startup.
+   */
+  loadCurrent(): Promise<Order[]>;
+  /** The highest stored `orderId`, or null when empty, so new ids can stay ascending. */
+  maxOrderId(): Promise<string | null>;
   /** Removes every stored order. Idempotent on an empty repository. */
   clear(): Promise<void>;
 };

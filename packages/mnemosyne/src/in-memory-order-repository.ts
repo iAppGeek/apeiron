@@ -17,6 +17,19 @@ export class InMemoryOrderRepository implements OrderRepository {
     return Promise.resolve();
   }
 
+  loadCurrent(): Promise<Order[]> {
+    const current = [...this.orders.values()]
+      .filter((o) => o.status === 'PENDING_START' || o.status === 'LIVE' || o.status === 'PAUSED')
+      .sort((a, b) => (a.orderId < b.orderId ? -1 : 1));
+    return Promise.resolve(current.map((o) => structuredClone(o)));
+  }
+
+  maxOrderId(): Promise<string | null> {
+    let max: string | null = null;
+    for (const id of this.orders.keys()) if (max === null || id > max) max = id;
+    return Promise.resolve(max);
+  }
+
   count(): Promise<number> {
     return Promise.resolve(this.orders.size);
   }

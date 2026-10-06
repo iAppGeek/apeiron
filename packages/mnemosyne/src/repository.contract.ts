@@ -130,5 +130,37 @@ export function runOrderRepositoryContract(name: string, create: () => Promise<R
       await repo.upsertMany(data.slice(60));
       expect(await repo.count()).toBe(90);
     });
+
+    it('loadCurrent returns only PENDING_START, LIVE and PAUSED orders, ascending by orderId', async () => {
+      expect(await repo.loadCurrent()).toEqual([]);
+      const base = orders(12);
+      const statuses = ['FILLED', 'LIVE', 'CANCELLED', 'PAUSED', 'PENDING_START', 'LIVE'] as const;
+      const data = base.slice(0, 6).map((o, i): Order => ({ ...o, status: statuses[i] ?? 'FILLED' }));
+      await repo.upsertMany([...data].reverse());
+      const current = await repo.loadCurrent();
+      expect(current.map((o) => o.status)).toEqual(['LIVE', 'PAUSED', 'PENDING_START', 'LIVE']);
+      expect(current.map((o) => o.orderId)).toEqual(
+        [data[1], data[3], data[4], data[5]].map((o) => (o as Order).orderId),
+      );
+      expect(current[0]).toEqual(data[1]);
+    });
+
+    it('loadCurrent follows status changes made by upsert', async () => {
+      const [first] = orders(1) as [Order];
+      await repo.upsertMany([{ ...first, status: 'LIVE' }]);
+      expect(await repo.loadCurrent()).toHaveLength(1);
+      await repo.upsertMany([{ ...first, status: 'FILLED' }]);
+      expect(await repo.loadCurrent()).toEqual([]);
+    });
+
+    it('maxOrderId is null when empty and the highest id otherwise', async () => {
+      expect(await repo.maxOrderId()).toBeNull();
+      const data = orders(30);
+      await repo.upsertMany([...data].reverse());
+      const sorted = data.map((o) => o.orderId).sort();
+      expect(await repo.maxOrderId()).toBe(sorted[sorted.length - 1]);
+      await repo.clear();
+      expect(await repo.maxOrderId()).toBeNull();
+    });
   });
 }
