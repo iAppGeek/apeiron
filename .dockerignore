@@ -1,0 +1,10 @@
+**/node_modules
+**/dist
+**/.turbo
+.git
+.env*
+!.env.example
+docs
+loadtest/results
+playwright-report
+test-results

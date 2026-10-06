@@ -1,0 +1,22 @@
+{
+  "name": "apeiron",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Infinity Blotter POC: 1M FX algo orders x 50 columns in a React + AG Grid blotter.",
+  "license": "MIT",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "dev": "turbo run dev",
+    "seed": "pnpm --filter @apeiron/gaia start"
+  },
+  "devDependencies": {
+    "turbo": "^2.11.7"
+  }
+}

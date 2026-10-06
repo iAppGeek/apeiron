@@ -1,0 +1,5 @@
+# Root entry point so `docker compose --profile core up` works from the repo root.
+# All service definitions live in infra/docker-compose.yml.
+include:
+  - path: infra/docker-compose.yml
+    project_directory: .
