@@ -26,9 +26,10 @@ Requirements: Node >= 24, pnpm 10, Docker.
 pnpm install
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
 cp .env.example .env                      # optional local overrides
-docker compose --profile core up -d       # mongo + nats
+docker compose --profile core up -d       # mongo + nats + antikythera (WS/HTTP on 127.0.0.1:4000, /health)
 docker compose --profile core --profile seed up gaia   # seed 1M orders (idempotent; second run is a no-op)
 pnpm --filter @apeiron/gaia stats          # sample statistics of the generated dataset
+pnpm --filter @apeiron/antikythera bench   # engine benchmarks on 1M generator rows (cold and warm)
 ```
 
 ## Licence
