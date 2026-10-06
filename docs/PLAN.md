@@ -134,7 +134,10 @@ apeiron/
 - **Rates:** set via env or a NATS control subject (`medium` default, `stress` preset), toggleable from a UI dev menu.
 
 ## Data layer (packages/mnemosyne)
-- **`OrderRepository` interface:** `loadAll(): AsyncIterable<Order[]>`, `upsertMany(orders)`, `count()`, `isSeeded()`.
+- **`OrderRepository` interface:** `loadAll(): AsyncIterable<Order[]>`, `upsertMany(orders)`, `count()`, `isSeeded()`, `clear()` (CP-1). Phase 5 adds:
+  - `loadCurrent(): Promise<Order[]>`: the LIVE, PAUSED and PENDING_START orders. Hermes uses it to rebuild its state at startup.
+  - `maxOrderId(): Promise<string | null>`: the highest `orderId`, so new IDs stay ascending.
+  - Both go in the contract suite. A `{status}` index already exists.
 - **`MongoOrderRepository`:** `orders` collection, indexes `{traderId, createdAt:-1}` and `{status}`, `bulkWrite` upserts.
 - **Contract test suite** (`repository.contract.ts`): runs against Mongo (mongodb-memory-server) and an in-memory fake, ready for future Oracle/KDB adapters.
 - **`docs/db-adapters.md`:** Oracle DDL sketch (gvenzl/oracle-free container, `node-oracledb`), and a KDB schema sketch (date-partitioned table, a tickerplant feed as an alternative to NATS, IPC client).
@@ -407,6 +410,14 @@ type ServerMsg =
   - Server state: `NOT_READY`, `NOT_IMPLEMENTED`, `INTERNAL`
   - Phases 5 and 6 add: `INVALID_TRANSITION` (a command not allowed in the order's state), `UNKNOWN_ORDER`, `SLOW_CONSUMER` (sent just before closing a client that is too far behind)
 - **NATS subjects:** `prices.<PAIR>` with `{pair, bid, ask, ts}`; `orders.events` with `{type: 'NEW'|'UPDATE', order: Partial<Order> & {orderId}, ts}`; `orders.commands` with `{orderId, action, requestedBy, ts}`; `control.load` with `{preset}`.
+- **Event rules (pre-phase-5):**
+  - **Absolute values:** events carry **absolute post-change values**, never increments (for example `filledQty: 4_200_000`, not `+100_000`). That makes applying them **idempotent**: replaying the ORDERS stream after a restart, or receiving a NEW for an order already in the store, is a safe upsert.
+  - **Who sets which fields:** hermes owns the lifecycle and fill fields. The server owns the price-derived fields (`marketBid`/`Ask`/`Mid`, `spreadBps`, `distanceToLimitBps`, `slippageBps`, `unrealisedPnlUsd`) and recomputes them from the latest tick, including right after a fill.
+  - **Shared fill maths:** the fill and lifecycle maths lives in logos as pure functions (`applyFill`, `transition`), used by both hermes and the tests.
+- **Commands (phase 6):**
+  - `orders.commands` adds `commandId = "<clientId>:<reqId>"`.
+  - Hermes answers each command with an `orders.events` message: an `UPDATE` carrying `commandId`, or `{type: 'REJECT', commandId, orderId, code: 'INVALID_TRANSITION' | 'UNKNOWN_ORDER', message, ts}`.
+  - The server sends the matching client `ack`, or an `error` with that code.
 - **JetStream:** streams `ORDERS` (`orders.*`, limits retention, 24h) and `PRICES` (`prices.*`, max 1 message per subject).
   - Durable consumer `blotter-server` with filter subject `orders.events`; the server also consumes `prices.*`.
   - Durable consumer `hermes-commands` with filter subject `orders.commands`.
