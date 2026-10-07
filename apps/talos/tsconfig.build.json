@@ -1,0 +1,6 @@
+{
+  "extends": "@apeiron/tsconfig/node.json",
+  "compilerOptions": { "outDir": "dist", "rootDir": "src", "noEmit": false },
+  "include": ["src"],
+  "exclude": ["src/**/*.spec.ts", "src/testing/**"]
+}
