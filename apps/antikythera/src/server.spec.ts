@@ -204,6 +204,25 @@ describe.each<CodecName>(['json', 'msgpack'])('GET /ws (%s)', (codec) => {
   });
 });
 
+describe('GET /ws codec renegotiation', () => {
+  it('switches json to msgpack to json to msgpack on one socket, serving getRows after each switch', async () => {
+    await server.load();
+    const c = await connect(wsUrl);
+    let reqId = 0;
+    for (const codec of ['json', 'msgpack', 'json', 'msgpack'] as const) {
+      // Every hello is JSON text, whichever codec is in use; the welcome comes back in the new codec.
+      c.send({ t: 'hello', traderId: 'ALL', codec, clientId: 'switch' }, 'json');
+      expect(await c.next()).toMatchObject({ t: 'welcome' });
+      reqId += 1;
+      c.send({ t: 'getRows', reqId, req: req() });
+      const rows = await c.next();
+      if (rows.t !== 'rows') throw new Error(`expected rows after switching to ${codec}, got ${JSON.stringify(rows)}`);
+      expect(rows).toMatchObject({ reqId, rowCount: ORDERS.length });
+    }
+    await c.close();
+  });
+});
+
 describe('GET /ws robustness', () => {
   it('survives garbage, binary-before-hello and oversize frames, and keeps serving others', async () => {
     await server.load();

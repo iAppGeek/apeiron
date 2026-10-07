@@ -18,7 +18,7 @@ const makeWorker = (): FakeWorker => {
 };
 
 const req: SsrmRequest = { startRow: 0, endRow: 100, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [] };
-const welcome: Extract<ServerMsg, { t: 'welcome' }> = { t: 'welcome', serverTime: 1, traders: [], columnsVersion: 'v' };
+const welcome: Extract<ServerMsg, { t: 'welcome' }> = { t: 'welcome', serverTime: 1, traders: [], columnsVersion: 'v', preset: null };
 
 const lastRequestId = (w: FakeWorker): number => {
   const m = w.posted.at(-1);

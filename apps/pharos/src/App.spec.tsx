@@ -19,6 +19,7 @@ const welcome: WelcomeMsg = {
     { traderId: 'T2', traderName: 'Ben' },
   ],
   columnsVersion: 'v',
+  preset: null,
 };
 
 type Handlers = { [E in keyof ClientEvents]?: (payload: ClientEvents[E]) => void };
@@ -146,5 +147,40 @@ describe('App', () => {
       expect(screen.getByRole('radio', { name: 'Stress' })).toBeChecked();
     });
     expect(screen.getByText(/active: stress/)).toBeInTheDocument();
+  });
+
+  it('shows the preset from welcome in the dev menu at once and a STRESS pill in the status bar', async () => {
+    const { client, handlers } = makeClient();
+    render(<App client={client} wsUrl="ws://host/ws" />);
+    expect(screen.queryByTestId('status-preset')).toBeNull();
+    act(() => {
+      handlers.message?.({ ...welcome, preset: 'stress' });
+    });
+    expect(screen.getByTestId('status-preset')).toHaveTextContent('STRESS');
+    await userEvent.click(screen.getByRole('button', { name: 'Dev' }));
+    expect(screen.getByRole('radio', { name: 'Stress' })).toBeChecked();
+    act(() => {
+      handlers.message?.({ ...welcome, preset: 'medium' });
+    });
+    expect(screen.queryByTestId('status-preset')).toBeNull();
+    expect(screen.getByRole('radio', { name: 'Medium' })).toBeChecked();
+  });
+
+  it('toggles the codec both ways from the dev menu', async () => {
+    const { client, handlers, hello } = makeClient();
+    render(<App client={client} wsUrl="ws://host/ws" />);
+    act(() => {
+      handlers.message?.(welcome);
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Dev' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'MessagePack' }));
+    await waitFor(() => {
+      expect(screen.getByRole('radio', { name: 'MessagePack' })).toBeChecked();
+    });
+    await userEvent.click(screen.getByRole('radio', { name: 'JSON' }));
+    await waitFor(() => {
+      expect(screen.getByRole('radio', { name: 'JSON' })).toBeChecked();
+    });
+    expect(hello).toHaveBeenLastCalledWith('ALL', 'json');
   });
 });

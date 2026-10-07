@@ -94,4 +94,15 @@ describe('StatusBar', () => {
     render(<StatusBar {...base} status={status} />);
     expect(text('status-connection')).toBe(label);
   });
+
+  it('shows a STRESS pill only while the stress preset is running', () => {
+    const { rerender } = render(<StatusBar {...base} preset="stress" />);
+    expect(screen.getByTestId('status-preset')).toHaveTextContent('STRESS');
+    rerender(<StatusBar {...base} preset="medium" />);
+    expect(screen.queryByTestId('status-preset')).toBeNull();
+    rerender(<StatusBar {...base} preset={null} />);
+    expect(screen.queryByTestId('status-preset')).toBeNull();
+    rerender(<StatusBar {...base} />);
+    expect(screen.queryByTestId('status-preset')).toBeNull();
+  });
 });

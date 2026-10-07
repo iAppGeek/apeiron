@@ -2,6 +2,7 @@ import {
   SUBJECTS,
   mulberry32,
   parseLoadControl,
+  type LoadState,
   priceSubject,
   type Bus,
   type BusSubscription,
@@ -37,6 +38,9 @@ export type HermesStatus = {
   publishErrors: number;
   inflight: number;
 };
+
+/** How often hermes repeats `control.state`, so a server that starts later learns the preset within this long. */
+export const STATE_INTERVAL_MS = 5_000;
 
 /** Publishes beyond this many unacknowledged messages are held back until the backlog drains. */
 export const MAX_INFLIGHT = 20_000;
@@ -101,6 +105,15 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
     'reconciled current orders',
   );
 
+  const publishState = (): void => {
+    const state: LoadState = { preset: simulator.preset };
+    bus.publish(SUBJECTS.controlState, state).catch((error: unknown) => {
+      log.warn({ err: error }, 'publish control.state failed');
+    });
+  };
+  publishState();
+  const stateTimer = setInterval(publishState, STATE_INTERVAL_MS);
+
   let control: BusSubscription | null = null;
   control = await bus.subscribe(SUBJECTS.controlLoad, (payload) => {
     const parsed = parseLoadControl(payload);
@@ -110,6 +123,7 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
     }
     simulator.setPreset(parsed.value.preset, now());
     log.info({ preset: parsed.value.preset, live: simulator.liveCount }, 'load preset changed');
+    publishState();
   });
 
   let last = now();
@@ -148,6 +162,7 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
     stop: async (): Promise<void> => {
       stopped = true;
       clearInterval(timer);
+      clearInterval(stateTimer);
       await control?.close();
     },
   };

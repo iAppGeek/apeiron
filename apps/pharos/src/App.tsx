@@ -103,6 +103,7 @@ export function App({ client, wsUrl }: AppProps): ReactElement {
         latencyP50Ms={state.latencyP50Ms}
         latencyP95Ms={state.latencyP95Ms}
         server={state.server}
+        preset={state.preset}
       />
       <Toasts toasts={state.toasts} onDismiss={state.dismissToast} />
     </div>

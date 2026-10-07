@@ -123,3 +123,8 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); font
 /* Price cells keep an up or down colour for a moment after they change */
 .tick-up { color: var(--green); font-weight: 600; }
 .tick-down { color: var(--red); font-weight: 600; }
+
+.stress-pill {
+  padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+  color: var(--amber); background: rgba(251, 191, 36, 0.14); border: 1px solid rgba(251, 191, 36, 0.5);
+}

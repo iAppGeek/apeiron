@@ -29,7 +29,14 @@ export type ClientMsg =
   | { t: 'ping'; ts: number };
 
 export type ServerMsg =
-  | { t: 'welcome'; serverTime: number; traders: TraderInfo[]; columnsVersion: string }
+  | {
+      t: 'welcome';
+      serverTime: number;
+      traders: TraderInfo[];
+      columnsVersion: string;
+      /** The load preset the mock middleware last reported; null until it has. */
+      preset: LoadPreset | null;
+    }
   | { t: 'rows'; reqId: number; rows: Row[]; rowCount: number; ms: number }
   | { t: 'filterValues'; reqId: number; values: string[] }
   | {
@@ -52,6 +59,8 @@ export type ServerMsg =
       /** Scoped to the client's trader (and filter). */
       totalRows: number;
       server: { cpu: number; rssMb: number; elLagMs: number };
+      /** The load preset the mock middleware last reported; null until it has. */
+      preset: LoadPreset | null;
     }
   | { t: 'ack'; reqId: number }
   | { t: 'error'; reqId?: number; code: ErrorCode; message: string }

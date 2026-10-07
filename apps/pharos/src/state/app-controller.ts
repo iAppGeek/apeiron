@@ -110,6 +110,7 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
       case 'welcome':
         slowConsumerToast = false;
         state.setWelcomed(msg.traders);
+        if (msg.preset !== null) state.setPreset(msg.preset);
         // A welcome with no trader change in flight is the answer to a reconnect hello, which carries the
         // requested trader, so the server has now confirmed it.
         if (inflightTraderHellos === 0 && state.requestedTrader !== state.confirmedTrader) {
@@ -122,6 +123,8 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
         return;
       case 'summary':
         state.setServer(msg.server);
+        // The server reports null until hermes has said which preset it runs; never let that hide a known one.
+        if (msg.preset !== null) state.setPreset(msg.preset);
         state.setSummary({ byStatus: msg.byStatus, liveNotionalUsd: msg.liveNotionalUsd, totalRows: msg.totalRows });
         return;
       case 'delta':

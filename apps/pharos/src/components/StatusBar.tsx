@@ -1,4 +1,4 @@
-import type { CodecName } from '@apeiron/logos';
+import type { CodecName, LoadPreset } from '@apeiron/logos';
 import type { ReactElement } from 'react';
 import type { ServerStats } from '../state/app-store';
 import type { ConnectionStatus } from '../transport/messages';
@@ -24,6 +24,8 @@ export type StatusBarProps = {
   latencyP50Ms?: number | null;
   latencyP95Ms?: number | null;
   server: ServerStats | null;
+  /** The load preset the mock middleware is running; a STRESS pill shows while it is stress. */
+  preset?: LoadPreset | null;
 };
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -64,6 +66,11 @@ export function StatusBar(props: StatusBarProps): ReactElement {
           {label}
         </span>
       </div>
+      {props.preset === 'stress' && (
+        <span className="stress-pill" data-testid="status-preset" title="Mock middleware load preset: stress">
+          STRESS
+        </span>
+      )}
       <Item label="Codec" value={props.codec === 'msgpack' ? 'msgpack' : 'json'} testId="status-codec" />
       <Item
         label="Rows"

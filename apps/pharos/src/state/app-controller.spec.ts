@@ -14,7 +14,7 @@ type FakeClient = BlotterClient & {
   off: ReturnType<typeof vi.fn>;
 };
 
-const welcome: WelcomeMsg = { t: 'welcome', serverTime: 1, traders: [{ traderId: 'T1', traderName: 'Alice' }], columnsVersion: 'v' };
+const welcome: WelcomeMsg = { t: 'welcome', serverTime: 1, traders: [{ traderId: 'T1', traderName: 'Alice' }], columnsVersion: 'v', preset: null };
 
 const makeClient = (): FakeClient => {
   const handlers: Handlers = {};
@@ -191,6 +191,7 @@ describe('createAppController', () => {
       liveNotionalUsd: 0,
       totalRows: 0,
       server: { cpu: 7, rssMb: 700, elLagMs: 2 },
+      preset: null,
     });
     expect(useAppStore.getState().server).toEqual({ cpu: 7, rssMb: 700, elLagMs: 2 });
 
@@ -216,6 +217,7 @@ describe('createAppController', () => {
         liveNotionalUsd: 4.2e9,
         totalRows: 1_000_015,
         server: { cpu: 7, rssMb: 700, elLagMs: 2 },
+        preset: null,
       });
       expect(useAppStore.getState().summary).toEqual({
         byStatus: { PENDING_START: 1, LIVE: 2, PAUSED: 3, FILLED: 4, CANCELLED: 5 },
@@ -414,5 +416,54 @@ describe('createAppController', () => {
       expect(useAppStore.getState()).toMatchObject({ preset: 'medium', presetPending: false });
       expect(useAppStore.getState().toasts).toHaveLength(1);
     });
+  });
+
+  describe('reported load preset', () => {
+    const summary = (preset: 'medium' | 'stress' | null): ServerMsg => ({
+      t: 'summary',
+      byStatus: { PENDING_START: 0, LIVE: 0, PAUSED: 0, FILLED: 0, CANCELLED: 0 },
+      liveNotionalUsd: 0,
+      totalRows: 0,
+      server: { cpu: 1, rssMb: 1, elLagMs: 1 },
+      preset,
+    });
+
+    it('takes the preset from welcome straight away', () => {
+      const client = makeClient();
+      createAppController(client).start('ws://x/ws');
+      emitMessage(client, { ...welcome, preset: 'stress' });
+      expect(useAppStore.getState().preset).toBe('stress');
+    });
+
+    it('follows the preset in each summary, so a change made elsewhere shows up', () => {
+      const client = makeClient();
+      createAppController(client).start('ws://x/ws');
+      emitMessage(client, summary('stress'));
+      expect(useAppStore.getState().preset).toBe('stress');
+      emitMessage(client, summary('medium'));
+      expect(useAppStore.getState().preset).toBe('medium');
+    });
+
+    it('does not let an unknown (null) preset hide a known one', () => {
+      const client = makeClient();
+      createAppController(client).start('ws://x/ws');
+      emitMessage(client, summary('stress'));
+      emitMessage(client, summary(null));
+      emitMessage(client, welcome);
+      expect(useAppStore.getState().preset).toBe('stress');
+    });
+  });
+
+  it('switches the codec json to msgpack to json, re-sending hello each time and purging each time', async () => {
+    const client = makeClient();
+    const controller = createAppController(client);
+    const purge = vi.fn();
+    controller.setPurge(purge);
+    await controller.changeCodec('msgpack');
+    await controller.changeCodec('json');
+    await controller.changeCodec('msgpack');
+    expect(client.hello.mock.calls.map((c) => c[1])).toEqual(['msgpack', 'json', 'msgpack']);
+    expect(useAppStore.getState().codec).toBe('msgpack');
+    expect(purge).toHaveBeenCalledTimes(3);
   });
 });

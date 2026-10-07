@@ -92,6 +92,7 @@ const welcome: ServerMsg = {
   serverTime: 1,
   traders: [{ traderId: 'T1', traderName: 'Alice' }],
   columnsVersion: 'abc',
+  preset: null,
 };
 
 type Rig = {
@@ -257,6 +258,7 @@ describe('request matching', () => {
       liveNotionalUsd: 0,
       totalRows: 0,
       server: { cpu: 1, rssMb: 2, elLagMs: 3 },
+      preset: null,
     });
     expect(rig.ofKind('message').map((m) => m.msg.t)).toEqual(['welcome', 'rows', 'error', 'summary']);
     expect(rig.ofKind('response')).toHaveLength(0);
@@ -544,5 +546,40 @@ describe('close codes', () => {
     quiet.last().open();
     quiet.core.close();
     expect(quiet.ofKind('closed')).toEqual([]);
+  });
+});
+
+describe('codec round trip', () => {
+  it('sends every hello as JSON text, and the frames after each hello in the negotiated codec', () => {
+    const rig = makeRig();
+    rig.core.connect('ws://x/ws');
+    rig.last().open();
+    rig.core.hello(1, 'ALL', 'msgpack');
+    rig.last().receive(welcome, 'json');
+    rig.core.hello(2, 'ALL', 'json');
+    rig.last().receive(welcome, 'msgpack');
+    rig.core.hello(3, 'ALL', 'msgpack');
+    rig.last().receive(welcome, 'json');
+    const frames = rig.last().sent;
+    const hellos = frames.filter((f) => ((typeof f === 'string' ? jsonCodec.decode(f) : msgpackCodec.decode(f)) as ClientMsg).t === 'hello');
+    expect(hellos.length).toBeGreaterThanOrEqual(3);
+    for (const h of hellos) expect(typeof h).toBe('string');
+    rig.core.request({ t: 'getRows', reqId: 9, req: { startRow: 0, endRow: 1, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [] } });
+    expect(rig.last().sent.at(-1)).toBeInstanceOf(Uint8Array);
+    rig.core.hello(4, 'ALL', 'json');
+    rig.core.request({ t: 'getRows', reqId: 10, req: { startRow: 0, endRow: 1, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [] } });
+    expect(typeof rig.last().sent.at(-1)).toBe('string');
+  });
+
+  it('decodes incoming frames by type whichever codec was asked for', () => {
+    const rig = makeRig();
+    rig.core.connect('ws://x/ws');
+    rig.last().open();
+    rig.core.hello(1, 'ALL', 'msgpack');
+    rig.last().receive(welcome, 'json');
+    rig.last().receive({ t: 'ack', reqId: 99 }, 'json');
+    rig.last().receive({ t: 'ack', reqId: 100 }, 'msgpack');
+    const acks = rig.ofKind('message').map((e) => e.msg).filter((m) => m.t === 'ack');
+    expect(acks).toEqual([{ t: 'ack', reqId: 99 }, { t: 'ack', reqId: 100 }]);
   });
 });

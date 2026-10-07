@@ -19,6 +19,8 @@ export const SUBJECTS = {
   ordersEvents: 'orders.events',
   ordersCommands: 'orders.commands',
   controlLoad: 'control.load',
+  /** Hermes reports the preset it is running, at startup, on every change and every few seconds. */
+  controlState: 'control.state',
   pricesWildcard: 'prices.*',
 } as const;
 
@@ -41,6 +43,9 @@ export type OrderEvent =
   | { type: 'REJECT'; commandId: string; orderId: string; code: RejectCode; message: string; ts: number };
 
 export type LoadControl = { preset: LoadPreset };
+
+/** `control.state` payload: the preset hermes is running. */
+export type LoadState = { preset: LoadPreset };
 
 export type OrderCommand = {
   orderId: string;
@@ -136,6 +141,8 @@ export const orderEventSchema: z.ZodType<OrderEvent> = z.discriminatedUnion('typ
 
 export const loadControlSchema: z.ZodType<LoadControl> = z.object({ preset: z.enum(['medium', 'stress']) });
 
+export const loadStateSchema: z.ZodType<LoadState> = z.object({ preset: z.enum(['medium', 'stress']) });
+
 export const orderCommandSchema: z.ZodType<OrderCommand> = z.object({
   orderId: z.string().min(1),
   action: z.enum(['CANCEL', 'PAUSE', 'RESUME']),
@@ -153,4 +160,5 @@ function parseWith<T>(schema: z.ZodType<T>, input: unknown): ParseResult<T> {
 export const parsePriceTick = (input: unknown): ParseResult<PriceTick> => parseWith(priceTickSchema, input);
 export const parseOrderEvent = (input: unknown): ParseResult<OrderEvent> => parseWith(orderEventSchema, input);
 export const parseLoadControl = (input: unknown): ParseResult<LoadControl> => parseWith(loadControlSchema, input);
+export const parseLoadState = (input: unknown): ParseResult<LoadState> => parseWith(loadStateSchema, input);
 export const parseOrderCommand = (input: unknown): ParseResult<OrderCommand> => parseWith(orderCommandSchema, input);

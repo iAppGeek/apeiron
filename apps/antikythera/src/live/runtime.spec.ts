@@ -98,6 +98,28 @@ describe('LiveRuntime', () => {
     await r.runtime.stop();
   });
 
+  it('caches the preset hermes reports on control.state and tells new clients in welcome and summary', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig();
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.runtime.preset()).toBeNull();
+    const before = client(r.runtime, r.engine);
+    expect(before.sent.find((m) => m.t === 'welcome')).toMatchObject({ preset: null });
+    await r.bus.publish('control.state', { preset: 'stress' });
+    expect(r.runtime.preset()).toBe('stress');
+    await r.bus.publish('control.state', { preset: 'bogus' });
+    expect(r.runtime.preset()).toBe('stress');
+    const after = client(r.runtime, r.engine);
+    expect(after.sent.find((m) => m.t === 'welcome')).toMatchObject({ preset: 'stress' });
+    after.ask();
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(after.sent.find((m) => m.t === 'summary')).toMatchObject({ preset: 'stress' });
+    await r.bus.publish('control.state', { preset: 'medium' });
+    expect(r.runtime.preset()).toBe('medium');
+    await r.runtime.stop();
+  });
+
   it('applies events and ticks on each flush, patches cached views and sends clients a delta and a summary', async () => {
     vi.useFakeTimers({ now: 10_000 });
     const r = await rig();
