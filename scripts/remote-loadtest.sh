@@ -45,8 +45,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[[ "$CLIENTS" =~ ^[0-9]+$ ]] && [ "$CLIENTS" -ge 1 ] || die "--clients must be a positive whole number"
-[[ "$DURATION" =~ ^[0-9]+$ ]] && [ "$DURATION" -ge 1 ] || die "--duration must be a positive whole number"
+if ! [[ "$CLIENTS" =~ ^[0-9]+$ ]] || [ "$CLIENTS" -lt 1 ]; then die "--clients must be a positive whole number"; fi
+if ! [[ "$DURATION" =~ ^[0-9]+$ ]] || [ "$DURATION" -lt 1 ]; then die "--duration must be a positive whole number"; fi
 [[ "$SEED" =~ ^[0-9]+$ ]] || die "--seed must be a whole number"
 case "$CODEC" in json | msgpack | both) ;; *) die "--codec must be json, msgpack or both" ;; esac
 
