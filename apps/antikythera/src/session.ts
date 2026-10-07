@@ -3,6 +3,7 @@ import {
   TRADERS,
   getCodec,
   jsonCodec,
+  msgpackCodec,
   parseClientMsg,
   type ClientMsg,
   type Codec,
@@ -31,6 +32,8 @@ export type LiveHooks = {
   register(session: ClientSession): void;
   unregister(session: ClientSession): void;
   setPreset(preset: LoadPreset): Promise<void>;
+  /** The preset hermes last reported on `control.state`, or null before it has. */
+  preset(): LoadPreset | null;
   summary(traderId: string): StatusSummary;
   stats(): ServerStats;
   maxTrackedBlocks: number;
@@ -63,7 +66,7 @@ function reqIdOf(input: unknown): number | undefined {
 
 /**
  * One client connection speaking the Appendix C protocol. The first frame must be a JSON `hello`; every
- * later frame uses the negotiated codec. Nothing a client sends can throw out of `handleFrame`.
+ * later frame is decoded by its type (text JSON, binary msgpack) and encoded with the negotiated codec. Nothing a client sends can throw out of `handleFrame`.
  */
 export class ClientSession {
   private codec: Codec = jsonCodec;
@@ -152,6 +155,7 @@ export class ClientSession {
       liveNotionalUsd: scope.liveNotionalUsd,
       totalRows,
       server: live.stats(),
+      preset: live.preset(),
     });
   }
 
@@ -175,10 +179,11 @@ export class ClientSession {
         }
         decoded = jsonCodec.decode(frame);
       } else {
-        decoded = this.codec.decode(frame);
+        // Frames are self-describing: text is JSON, binary is msgpack, whatever was negotiated.
+        decoded = typeof frame === 'string' ? jsonCodec.decode(frame) : msgpackCodec.decode(frame);
       }
     } catch {
-      this.sendError(undefined, 'BAD_FRAME', `Frame is not valid ${this.helloDone ? this.codec.name : 'json'}`);
+      this.sendError(undefined, 'BAD_FRAME', `Frame is not valid ${typeof frame === 'string' || !this.helloDone ? 'json' : 'msgpack'}`);
       return;
     }
 
@@ -236,6 +241,7 @@ export class ClientSession {
       serverTime: this.now(),
       traders: [...this.traders],
       columnsVersion: COLUMNS_VERSION,
+      preset: this.deps.live?.()?.preset() ?? null,
     });
   }
 

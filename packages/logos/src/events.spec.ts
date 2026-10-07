@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   orderSchema,
   parseLoadControl,
+  parseLoadState,
+  SUBJECTS,
   parseOrderCommand,
   parseOrderEvent,
   parsePriceTick,
@@ -72,5 +74,16 @@ describe('events', () => {
     const cmd = { orderId: 'ALG1', action: 'CANCEL', requestedBy: 'c', ts: 1, commandId: 'c:1' };
     expect(parseOrderCommand(cmd)).toEqual({ ok: true, value: cmd });
     expect(parseOrderCommand({ ...cmd, action: 'KILL' }).ok).toBe(false);
+  });
+});
+
+describe('control.state', () => {
+  it('has its own subject and validates the reported preset', () => {
+    expect(SUBJECTS.controlState).toBe('control.state');
+    expect(parseLoadState({ preset: 'medium' })).toEqual({ ok: true, value: { preset: 'medium' } });
+    expect(parseLoadState({ preset: 'stress' }).ok).toBe(true);
+    expect(parseLoadState({ preset: 'huge' }).ok).toBe(false);
+    expect(parseLoadState({}).ok).toBe(false);
+    expect(parseLoadState(null).ok).toBe(false);
   });
 });

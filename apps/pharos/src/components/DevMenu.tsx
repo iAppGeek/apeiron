@@ -1,10 +1,14 @@
-import type { CodecName } from '@apeiron/logos';
+import type { CodecName, LoadPreset } from '@apeiron/logos';
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 
 export type DevMenuProps = {
   codec: CodecName;
+  /** The load preset last set from this page; null until one is chosen. */
+  preset: LoadPreset | null;
+  presetPending?: boolean;
   disabled?: boolean;
   onCodecChange: (codec: CodecName) => void;
+  onPresetChange: (preset: LoadPreset) => void;
 };
 
 const CODECS: { value: CodecName; label: string }[] = [
@@ -12,8 +16,13 @@ const CODECS: { value: CodecName; label: string }[] = [
   { value: 'msgpack', label: 'MessagePack' },
 ];
 
-/** Small developer menu: the wire codec toggle (switching re-sends hello). */
-export function DevMenu({ codec, disabled, onCodecChange }: DevMenuProps): ReactElement {
+const PRESETS: { value: LoadPreset; label: string }[] = [
+  { value: 'medium', label: 'Medium' },
+  { value: 'stress', label: 'Stress' },
+];
+
+/** Small developer menu: the wire codec toggle (switching re-sends hello) and the mock middleware load preset. */
+export function DevMenu({ codec, preset, presetPending, disabled, onCodecChange, onPresetChange }: DevMenuProps): ReactElement {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
 
@@ -64,6 +73,22 @@ export function DevMenu({ codec, disabled, onCodecChange }: DevMenuProps): React
                 }}
               />
               {c.label}
+            </label>
+          ))}
+          <div className="dev-title dev-title-gap">Load preset{preset === null ? '' : ` (active: ${preset})`}</div>
+          {PRESETS.map((p) => (
+            <label key={p.value} className="dev-option">
+              <input
+                type="radio"
+                name="preset"
+                value={p.value}
+                checked={preset === p.value}
+                disabled={disabled || presetPending}
+                onChange={() => {
+                  onPresetChange(p.value);
+                }}
+              />
+              {p.label}
             </label>
           ))}
         </div>

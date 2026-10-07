@@ -1,8 +1,20 @@
-import type { CodecName, TraderInfo } from '@apeiron/logos';
+import type { CodecName, LoadPreset, OrderStatus, TraderInfo } from '@apeiron/logos';
 import { create } from 'zustand';
 import type { ConnectionStatus } from '../transport/messages';
 
 export type ServerStats = { cpu: number; rssMb: number; elLagMs: number };
+
+/** The last `summary` message, scoped to the selected trader. */
+export type SummaryStats = { byStatus: Record<OrderStatus, number>; liveNotionalUsd: number; totalRows: number };
+
+/** Live figures the controller publishes about once a second. */
+export type LiveStats = {
+  /** Rolling p50 and p95 tick-to-screen latency over the last 10 seconds, null until a delta has been applied. */
+  latencyP50Ms: number | null;
+  latencyP95Ms: number | null;
+  deltasPerSec: number;
+  rowsUpdatedPerSec: number;
+};
 
 export type Toast = { id: number; kind: 'error' | 'info'; text: string };
 
@@ -25,8 +37,18 @@ export type AppState = {
   fps: number | null;
   msgsInPerSec: number;
   msgsOutPerSec: number;
-  /** Arrives through `summary` messages (phase 5); null until then. */
+  /** Arrives through `summary` messages; null until then. */
   server: ServerStats | null;
+  summary: SummaryStats | null;
+  latencyP50Ms: number | null;
+  latencyP95Ms: number | null;
+  deltasPerSec: number;
+  rowsUpdatedPerSec: number;
+  /** The mock middleware load preset as last set from this page; null until the user picks one. */
+  preset: LoadPreset | null;
+  presetPending: boolean;
+  /** New orders that arrived above a scrolled-down viewport since the user last looked at the top. */
+  newOrders: number;
   /** True while requests wait for the server to finish loading orders. */
   notReady: boolean;
   toasts: Toast[];
@@ -42,6 +64,12 @@ export type AppActions = {
   setStats: (stats: { msgsIn: number; msgsOut: number; rttMs: number | null }) => void;
   setFps: (fps: number) => void;
   setServer: (server: ServerStats) => void;
+  setSummary: (summary: SummaryStats) => void;
+  setLive: (live: LiveStats) => void;
+  setPreset: (preset: LoadPreset | null) => void;
+  setPresetPending: (pending: boolean) => void;
+  addNewOrders: (count: number) => void;
+  clearNewOrders: () => void;
   setNotReady: (notReady: boolean) => void;
   pushToast: (kind: Toast['kind'], text: string) => number;
   dismissToast: (id: number) => void;
@@ -62,6 +90,14 @@ export const INITIAL_APP_STATE: AppState = {
   msgsInPerSec: 0,
   msgsOutPerSec: 0,
   server: null,
+  summary: null,
+  latencyP50Ms: null,
+  latencyP95Ms: null,
+  deltasPerSec: 0,
+  rowsUpdatedPerSec: 0,
+  preset: null,
+  presetPending: false,
+  newOrders: 0,
   notReady: false,
   toasts: [],
 };
@@ -91,6 +127,24 @@ export const useAppStore = create<AppState & AppActions>()((set) => ({
   },
   setStats: ({ msgsIn, msgsOut, rttMs }): void => {
     set({ msgsInPerSec: msgsIn, msgsOutPerSec: msgsOut, rttMs });
+  },
+  setSummary: (summary): void => {
+    set({ summary });
+  },
+  setLive: (live): void => {
+    set(live);
+  },
+  setPreset: (preset): void => {
+    set({ preset });
+  },
+  setPresetPending: (presetPending): void => {
+    set({ presetPending });
+  },
+  addNewOrders: (count): void => {
+    set((s) => ({ newOrders: s.newOrders + count }));
+  },
+  clearNewOrders: (): void => {
+    set((s) => (s.newOrders === 0 ? s : { newOrders: 0 }));
   },
   setFps: (fps): void => {
     set({ fps });

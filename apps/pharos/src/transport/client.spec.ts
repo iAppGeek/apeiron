@@ -18,7 +18,7 @@ const makeWorker = (): FakeWorker => {
 };
 
 const req: SsrmRequest = { startRow: 0, endRow: 100, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [] };
-const welcome: Extract<ServerMsg, { t: 'welcome' }> = { t: 'welcome', serverTime: 1, traders: [], columnsVersion: 'v' };
+const welcome: Extract<ServerMsg, { t: 'welcome' }> = { t: 'welcome', serverTime: 1, traders: [], columnsVersion: 'v', preset: null };
 
 const lastRequestId = (w: FakeWorker): number => {
   const m = w.posted.at(-1);
@@ -103,10 +103,10 @@ describe('createBlotterClient', () => {
     client.on('stats', stats);
     w.reply({ kind: 'status', status: 'connected', attempt: 0, codec: 'json' });
     w.reply({ kind: 'message', msg: welcome });
-    w.reply({ kind: 'stats', msgsIn: 1, msgsOut: 2, rttMs: 3 });
+    w.reply({ kind: 'stats', msgsIn: 1, msgsOut: 2, deltasIn: 4, rttMs: 3, clockOffsetMs: 5 });
     expect(status).toHaveBeenCalledWith({ status: 'connected', attempt: 0, codec: 'json' });
     expect(message).toHaveBeenCalledWith(welcome);
-    expect(stats).toHaveBeenCalledWith({ msgsIn: 1, msgsOut: 2, rttMs: 3 });
+    expect(stats).toHaveBeenCalledWith({ msgsIn: 1, msgsOut: 2, deltasIn: 4, rttMs: 3, clockOffsetMs: 5 });
     off();
     w.reply({ kind: 'status', status: 'closed', attempt: 0, codec: 'json' });
     expect(status).toHaveBeenCalledTimes(1);
@@ -131,5 +131,39 @@ describe('createBlotterClient', () => {
     expect(w.terminate).toHaveBeenCalled();
     await expect(p).rejects.toMatchObject({ code: 'DISCONNECTED' });
     await expect(h).rejects.toMatchObject({ code: 'DISCONNECTED' });
+  });
+
+  it('control sends the preset and resolves on the ack', async () => {
+    const w = makeWorker();
+    const p = createBlotterClient(w).control('stress');
+    expect(w.posted[0]).toMatchObject({ kind: 'request', msg: { t: 'control', preset: 'stress' } });
+    const reqId = lastRequestId(w);
+    w.reply({ kind: 'response', reqId, ok: true, msg: { t: 'ack', reqId } });
+    await expect(p).resolves.toBeUndefined();
+  });
+
+  it('control rejects with the server code', async () => {
+    const w = makeWorker();
+    const p = createBlotterClient(w).control('medium');
+    const reqId = lastRequestId(w);
+    w.reply({ kind: 'response', reqId, ok: false, code: 'NOT_IMPLEMENTED', message: 'no bus' });
+    await expect(p).rejects.toMatchObject({ code: 'NOT_IMPLEMENTED' });
+  });
+
+  it('control rejects on an unexpected reply', async () => {
+    const w = makeWorker();
+    const p = createBlotterClient(w).control('medium');
+    const reqId = lastRequestId(w);
+    w.reply({ kind: 'response', reqId, ok: true, msg: { t: 'filterValues', reqId, values: [] } });
+    await expect(p).rejects.toMatchObject({ code: 'INTERNAL' });
+  });
+
+  it('delivers the close code of an unexpected close', () => {
+    const w = makeWorker();
+    const client = createBlotterClient(w);
+    const closed = vi.fn();
+    client.on('closed', closed);
+    w.reply({ kind: 'closed', code: 1013 });
+    expect(closed).toHaveBeenCalledWith({ code: 1013 });
   });
 });

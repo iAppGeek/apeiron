@@ -19,5 +19,16 @@ attachWorkerHost(scope, {
       clearInterval(handle as number);
     },
     random: () => Math.random(),
+    // Chrome workers have requestAnimationFrame; elsewhere the core falls back to a 16ms timeout.
+    ...(typeof self.requestAnimationFrame === 'function'
+      ? {
+          nextFrame: (fn: () => void): unknown => self.requestAnimationFrame(() => {
+            fn();
+          }),
+          cancelFrame: (handle: unknown): void => {
+            self.cancelAnimationFrame(handle as number);
+          },
+        }
+      : {}),
   },
 });

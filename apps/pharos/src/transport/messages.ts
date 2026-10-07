@@ -25,4 +25,15 @@ export type WorkerToMain =
   | ({ kind: 'response'; reqId: number } & ({ ok: true; msg: ServerMsg } | ({ ok: false } & Failure)))
   /** Every server message that is not the answer to a request (delta, summary, welcome, stray errors). */
   | { kind: 'message'; msg: ServerMsg }
-  | { kind: 'stats'; msgsIn: number; msgsOut: number; rttMs: number | null };
+  /** The socket closed without the page asking for it; `code` is the WebSocket close code (1013 means slow consumer). */
+  | { kind: 'closed'; code: number | null }
+  | {
+      kind: 'stats';
+      msgsIn: number;
+      msgsOut: number;
+      /** Delta messages received per second, before any coalescing. */
+      deltasIn: number;
+      rttMs: number | null;
+      /** Milliseconds to add to the client clock to get the server clock; null before the first pong. */
+      clockOffsetMs: number | null;
+    };

@@ -2,6 +2,7 @@ import {
   SUBJECTS,
   CONSUMERS,
   STREAMS,
+  parseLoadState,
   parseOrderEvent,
   parsePriceTick,
   type Bus,
@@ -78,6 +79,7 @@ export class LiveRuntime implements LiveHooks {
   private attachTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private attached = false;
+  private currentPreset: LoadPreset | null = null;
 
   constructor(private readonly options: LiveRuntimeOptions) {
     this.live = new LiveStore(options.store, options.log);
@@ -129,6 +131,10 @@ export class LiveRuntime implements LiveHooks {
 
   unregister(session: ClientSession): void {
     this.sessions.delete(session);
+  }
+
+  preset(): LoadPreset | null {
+    return this.currentPreset;
   }
 
   setPreset(preset: LoadPreset): Promise<void> {
@@ -207,6 +213,11 @@ export class LiveRuntime implements LiveHooks {
         if (parsed.ok) this.live.enqueueTick(parsed.value);
       });
       this.subscriptions.push(prices);
+      const state = await bus.subscribe(SUBJECTS.controlState, (payload) => {
+        const parsed = parseLoadState(payload);
+        if (parsed.ok) this.currentPreset = parsed.value.preset;
+      });
+      this.subscriptions.push(state);
       const orders = await bus.consume(
         { stream: STREAMS.orders, durable: CONSUMERS.blotterServer, subject: SUBJECTS.ordersEvents },
         (payload, _subject, ack) => {

@@ -168,4 +168,37 @@ describe('value formatters', () => {
     expect(format(byId('orderQty'), 2500000, {})).toBe('2,500,000');
     expect(format(byId('valueDate'), Date.UTC(2026, 1, 2), {})).toBe('2026-02-02');
   });
+
+  describe('price tick colouring', () => {
+    type RuleParams = { node: { id?: string } };
+    const rules = (def: ColDef): Record<string, (p: RuleParams) => boolean> =>
+      def.cellClassRules as unknown as Record<string, (p: RuleParams) => boolean>;
+
+    it('adds no class rules without a tick source, and none to non-price columns', () => {
+      expect(byId('marketMid').cellClassRules).toBeUndefined();
+      const withTicks = buildColumnDefs(COLUMNS, { ...makeDeps(), tickDirection: () => 'up' });
+      expect(withTicks.find((d) => d.colId === 'orderQty')?.cellClassRules).toBeUndefined();
+    });
+
+    it('adds tick-up and tick-down rules to every price column, driven by the tracked direction', () => {
+      const tickDirection = vi.fn<(rowId: string | undefined, field: string) => 'up' | 'down' | null>().mockReturnValue('up');
+      const withTicks = buildColumnDefs(COLUMNS, { ...makeDeps(), tickDirection });
+      const priceFields = COLUMNS.filter((c) => c.priceColumn === true).map((c) => c.field);
+      expect(priceFields.length).toBeGreaterThan(0);
+      for (const field of priceFields) {
+        const def = withTicks.find((d) => d.colId === field) as ColDef;
+        expect(Object.keys(rules(def))).toEqual(['tick-up', 'tick-down']);
+      }
+      const mid = withTicks.find((d) => d.colId === 'marketMid') as ColDef;
+      expect(rules(mid)['tick-up']?.({ node: { id: 'A' } })).toBe(true);
+      expect(rules(mid)['tick-down']?.({ node: { id: 'A' } })).toBe(false);
+      expect(tickDirection).toHaveBeenCalledWith('A', 'marketMid');
+      tickDirection.mockReturnValue('down');
+      expect(rules(mid)['tick-up']?.({ node: { id: 'A' } })).toBe(false);
+      expect(rules(mid)['tick-down']?.({ node: { id: 'A' } })).toBe(true);
+      tickDirection.mockReturnValue(null);
+      expect(rules(mid)['tick-up']?.({ node: {} })).toBe(false);
+      expect(rules(mid)['tick-down']?.({ node: {} })).toBe(false);
+    });
+  });
 });

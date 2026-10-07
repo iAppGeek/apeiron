@@ -1,4 +1,4 @@
-import { jsonCodec, type ClientMsg, type Order, type ServerMsg, type SsrmRequest } from '@apeiron/logos';
+import { jsonCodec, type ClientMsg, type LoadPreset, type Order, type ServerMsg, type SsrmRequest } from '@apeiron/logos';
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_BACKPRESSURE } from './live/backpressure.js';
 import { QueryEngine } from './query/engine.js';
@@ -49,6 +49,7 @@ function world(overrides: Partial<LiveHooks> = {}, withLive = true): World {
     register: vi.fn(),
     unregister: vi.fn(),
     setPreset: vi.fn(() => Promise.resolve()),
+    preset: vi.fn((): LoadPreset | null => null),
     summary: vi.fn(() => ({ byStatus: { PENDING_START: 0, LIVE: 2, PAUSED: 0, FILLED: 1, CANCELLED: 0 }, liveNotionalUsd: 42 })),
     stats: vi.fn(() => ({ cpu: 12.5, rssMb: 300, elLagMs: 1.5 })),
     maxTrackedBlocks: 10,
@@ -171,6 +172,7 @@ describe('ClientSession summary', () => {
         liveNotionalUsd: 42,
         totalRows: 2,
         server: { cpu: 12.5, rssMb: 300, elLagMs: 1.5 },
+        preset: null,
       },
     ]);
     expect(w.live.summary).toHaveBeenCalledWith('ALL');
@@ -178,6 +180,16 @@ describe('ClientSession summary', () => {
     expect(w.sent.filter((m) => m.t === 'summary')).toHaveLength(1);
     w.flush(idle(w), 11_000);
     expect(w.sent.filter((m) => m.t === 'summary')).toHaveLength(2);
+  });
+
+  it('carries the preset the runtime knows in welcome and summary', () => {
+    const w = world({ preset: vi.fn((): LoadPreset | null => 'stress') });
+    getRows(w);
+    w.sent.length = 0;
+    w.flush(idle(w), 10_000);
+    expect(w.sent.find((m) => m.t === 'summary')).toMatchObject({ preset: 'stress' });
+    w.session.handleFrame(json({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'c1' }));
+    expect(w.sent.find((m) => m.t === 'welcome')).toMatchObject({ preset: 'stress' });
   });
 
   it('counts every row of the trader before the client has asked for any', () => {

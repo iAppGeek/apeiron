@@ -1,4 +1,4 @@
-import { MemoryBus, parseOrderEvent, parsePriceTick, PAIRS, type OrderEvent, type PriceTick } from '@apeiron/logos';
+import { MemoryBus, parseLoadState, parseOrderEvent, parsePriceTick, PAIRS, type OrderEvent, type PriceTick } from '@apeiron/logos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startHermes, type Hermes } from './hermes.js';
 import { createLogger } from './log.js';
@@ -77,6 +77,37 @@ describe('startHermes', () => {
     await bus.publish('control.load', { preset: 'stress' });
     expect(hermes.status().preset).toBe('stress');
     expect(hermes.simulator.liveCount).toBe(3_000);
+  });
+
+  it('publishes control.state at startup, on every change and every 5 seconds', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const seen: string[] = [];
+    await bus.subscribe('control.state', (p) => {
+      const parsed = parseLoadState(p);
+      if (parsed.ok) seen.push(parsed.value.preset);
+    });
+    await start(bus);
+    expect(seen).toEqual(['medium']);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(seen).toEqual(['medium', 'medium']);
+    await bus.publish('control.load', { preset: 'stress' });
+    expect(seen).toEqual(['medium', 'medium', 'stress']);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(seen.at(-1)).toBe('stress');
+    expect(seen).toHaveLength(4);
+  });
+
+  it('does not publish control.state after stop()', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const seen: unknown[] = [];
+    await bus.subscribe('control.state', (p) => void seen.push(p));
+    const hermes = await start(bus);
+    await hermes.stop();
+    seen.length = 0;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(seen).toEqual([]);
   });
 
   it('counts publish failures without crashing', async () => {

@@ -1,18 +1,23 @@
 import { COLUMNS } from '@apeiron/logos';
-import type { GridApi, GridReadyEvent } from 'ag-grid-community';
+import type { BodyScrollEvent, GridApi, GridReadyEvent, StoreRefreshedEvent } from 'ag-grid-community';
 import { AgGridProvider, AgGridReact } from 'ag-grid-react';
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { NewOrdersBadge } from '../components/NewOrdersBadge';
 import type { AppController } from '../state/app-controller';
 import { useAppStore } from '../state/app-store';
 import type { BlotterClient } from '../transport/client';
-import { applyDelta } from './apply-delta';
+import { ROW_BUFFER, readTopRow } from './anchor';
+import { createDeltaApplier, type DeltaApplier } from './apply-delta';
 import { buildColumnDefs } from './column-defs';
 import { createDatasource } from './datasource';
 import { describeFailure } from './errors';
 import { fetchFilterValues } from './filter-values';
-import { getRowId } from './get-row-id';
+import { computeRowId, getRowId } from './get-row-id';
 import {
   CACHE_BLOCK_SIZE,
+  CELL_FADE_MS,
+  CELL_FLASH_MS,
+  TICK_HOLD_MS,
   MAX_BLOCKS_IN_CACHE,
   aggFuncs,
   autoGroupColumnDef,
@@ -21,21 +26,49 @@ import {
   theme,
 } from './grid-options';
 import { GRID_MODULES } from './modules';
+import { createTickTracker } from './tick-tracker';
+import { readFirstVisibleRow } from './viewport-probe';
 
 export type BlotterProps = {
   client: BlotterClient;
   controller: AppController;
 };
 
+const wallClock = (): number => Date.now();
+
+const PRICE_FIELDS: ReadonlySet<string> = new Set(COLUMNS.filter((c) => c.priceColumn === true).map((c) => c.field));
+
+/** The badge reads its own slice of the store, so a new-order count ticking up does not re-render the grid. */
+function NewOrdersBadgeConnected({ api }: { api: GridApi | null }): ReactElement {
+  const count = useAppStore((s) => s.newOrders);
+  return (
+    <NewOrdersBadge
+      count={count}
+      onClick={() => {
+        api?.ensureIndexVisible(0, 'top');
+        useAppStore.getState().clearNewOrders();
+      }}
+    />
+  );
+}
+
 export function Blotter({ client, controller }: BlotterProps): ReactElement {
   const [api, setApi] = useState<GridApi | null>(null);
+  const applier = useRef<DeltaApplier | null>(null);
+  const root = useRef<HTMLDivElement>(null);
+  const probe = useCallback((): number | null => readFirstVisibleRow(root.current), []);
+  const ticks = useMemo(() => createTickTracker({ holdMs: TICK_HOLD_MS, now: wallClock }), []);
   const welcomed = useAppStore((s) => s.welcomed);
   const notReady = useAppStore((s) => s.notReady);
   const status = useAppStore((s) => s.status);
 
   const columnDefs = useMemo(
-    () => buildColumnDefs(COLUMNS, { fetchFilterValues: (colId) => fetchFilterValues(client, colId) }),
-    [client],
+    () =>
+      buildColumnDefs(COLUMNS, {
+        fetchFilterValues: (colId) => fetchFilterValues(client, colId),
+        tickDirection: (rowId, field) => ticks.direction(rowId, field),
+      }),
+    [client, ticks],
   );
 
   const onGridReady = useCallback((event: GridReadyEvent) => {
@@ -64,17 +97,51 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
 
   useEffect(() => {
     if (api === null) return undefined;
-    controller.setPurge(() => {
-      api.refreshServerSide({ purge: true });
+    const live = createDeltaApplier({
+      api,
+      priceFields: PRICE_FIELDS,
+      ticks,
+      groupRowId: (route, row) =>
+        computeRowId({
+          data: row,
+          parentKeys: route,
+          level: route.length,
+          groupFields: api.getRowGroupColumns().map((col) => col.getColDef().field),
+        }),
+      onNewAbove: (count) => {
+        useAppStore.getState().addNewOrders(count);
+      },
+      topRowProbe: probe,
+      canSetRowCount: () => api.getRowGroupColumns().length === 0,
     });
-    const off = client.on('message', (msg) => {
-      if (msg.t === 'delta') applyDelta(api, msg);
+    applier.current = live;
+    controller.setDeltaHandler((delta) => live.apply(delta));
+    // A purge starts over: forget previous values, pending refreshes and the new-orders badge, then reload.
+    controller.setPurge(() => {
+      live.reset();
+      useAppStore.getState().clearNewOrders();
+      api.refreshServerSide({ purge: true });
     });
     return (): void => {
       controller.setPurge(null);
-      off();
+      controller.setDeltaHandler(null);
+      live.dispose();
+      applier.current = null;
     };
-  }, [api, client, controller]);
+  }, [api, controller, ticks, probe]);
+
+  const onStoreRefreshed = useCallback((event: StoreRefreshedEvent) => {
+    applier.current?.onStoreRefreshed(event.route);
+  }, []);
+
+  // Back at the top by scrolling: nothing is hidden above the viewport any more.
+  const onBodyScroll = useCallback(
+    (event: BodyScrollEvent) => {
+      if (api === null || event.direction !== 'vertical' || useAppStore.getState().newOrders === 0) return;
+      if (readTopRow(api, probe) === 0) useAppStore.getState().clearNewOrders();
+    },
+    [api, probe],
+  );
 
   const overlay = !welcomed
     ? status === 'reconnecting'
@@ -85,7 +152,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       : null;
 
   return (
-    <div className="blotter">
+    <div className="blotter" ref={root}>
       <AgGridProvider modules={GRID_MODULES}>
         <AgGridReact
           theme={theme}
@@ -100,10 +167,18 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
           blockLoadDebounceMillis={60}
           rowGroupPanelShow="always"
           suppressAggFuncInHeader
+          // Rows shift constantly as orders arrive on top; animating each shift leaves ghost rows overlapping.
+          animateRows={false}
+          rowBuffer={ROW_BUFFER}
+          cellFlashDuration={CELL_FLASH_MS}
+          cellFadeDuration={CELL_FADE_MS}
+          onStoreRefreshed={onStoreRefreshed}
+          onBodyScroll={onBodyScroll}
           sideBar={sideBar}
           onGridReady={onGridReady}
         />
       </AgGridProvider>
+      <NewOrdersBadgeConnected api={api} />
       {overlay !== null && (
         <div className="overlay" role="status">
           <div className="overlay-card">

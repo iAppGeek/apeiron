@@ -63,6 +63,7 @@ describe('ClientSession handshake', () => {
     if (msg.t !== 'welcome') throw new Error('unreachable');
     expect(msg.traders.map((t) => t.traderId)).toEqual(['T1', 'T2', 'T3', 'T4', 'T5']);
     expect(msg.columnsVersion).toMatch(/^[0-9a-f]{8}$/);
+    expect(msg.preset).toBeNull();
     expect(h.session.trader).toBe('ALL');
     expect(h.session.id).toBe('c1');
   });
@@ -155,10 +156,52 @@ describe('ClientSession requests', () => {
     expect(decodePack(h.sent[1] as Frame)).toMatchObject({ t: 'pong', ts: 4 });
   });
 
-  it('rejects a text frame in msgpack mode without crashing', () => {
+  it('decodes frames by type, so a JSON text frame works in msgpack mode and gets a msgpack reply', () => {
     const h = ready('ALL', 'msgpack');
     h.session.handleFrame('{"t":"ping","ts":1}');
-    expect(decodePack(h.sent[0] as Frame)).toMatchObject({ t: 'error', code: 'BAD_FRAME' });
+    expect(decodePack(h.sent[0] as Frame)).toEqual({ t: 'pong', ts: 1, serverTs: 1234 });
+  });
+
+  it('decodes a binary frame in json mode as msgpack and replies in JSON text', () => {
+    const h = ready('ALL', 'json');
+    h.session.handleFrame(msgpackCodec.encode({ t: 'ping', ts: 2 }) as Uint8Array);
+    expect(decodeJson(h.sent[0] as Frame)).toEqual({ t: 'pong', ts: 2, serverTs: 1234 });
+  });
+
+  it('rejects garbage in either frame type without crashing', () => {
+    const h = ready('ALL', 'msgpack');
+    h.session.handleFrame('{not json');
+    h.session.handleFrame(new Uint8Array([0xc1]));
+    expect(decodePack(h.sent[0] as Frame)).toMatchObject({ t: 'error', code: 'BAD_FRAME', message: expect.stringContaining('json') });
+    expect(decodePack(h.sent[1] as Frame)).toMatchObject({ t: 'error', code: 'BAD_FRAME', message: expect.stringContaining('msgpack') });
+  });
+
+  it('switches json to msgpack to json to msgpack with JSON text hellos, serving getRows after each', () => {
+    const h = harness();
+    const rowsOk = (decode: (f: Frame) => ServerMsg, encode: (m: ClientMsg) => Frame, id: number): void => {
+      h.sent.length = 0;
+      h.session.handleFrame(encode({ t: 'getRows', reqId: id, req: req() }));
+      expect(decode(h.sent[0] as Frame)).toMatchObject({ t: 'rows', reqId: id, rowCount: 3 });
+    };
+    const asJson = (m: ClientMsg): Frame => json(m);
+    const asPack = (m: ClientMsg): Frame => msgpackCodec.encode(m) as Uint8Array;
+    h.session.handleFrame(json(hello('ALL', 'json')));
+    rowsOk(decodeJson, asJson, 1);
+    h.sent.length = 0;
+    h.session.handleFrame(json(hello('ALL', 'msgpack')));
+    expect(h.sent[0]).toBeInstanceOf(Uint8Array);
+    expect(decodePack(h.sent[0] as Frame)).toMatchObject({ t: 'welcome' });
+    rowsOk(decodePack, asPack, 2);
+    h.sent.length = 0;
+    h.session.handleFrame(json(hello('ALL', 'json')));
+    expect(typeof h.sent[0]).toBe('string');
+    expect(decodeJson(h.sent[0] as Frame)).toMatchObject({ t: 'welcome' });
+    expect(h.session.codecName).toBe('json');
+    rowsOk(decodeJson, asJson, 3);
+    h.sent.length = 0;
+    h.session.handleFrame(json(hello('ALL', 'msgpack')));
+    expect(h.session.codecName).toBe('msgpack');
+    rowsOk(decodePack, asPack, 4);
   });
 
   it('serves setFilterValues', () => {

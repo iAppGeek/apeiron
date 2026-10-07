@@ -1,4 +1,4 @@
-import type { ColDef, SetFilterValuesFuncParams, ValueFormatterParams } from 'ag-grid-community';
+import type { CellClassParams, ColDef, SetFilterValuesFuncParams, ValueFormatterParams } from 'ag-grid-community';
 import type { ColumnMeta } from '@apeiron/logos';
 import { StatusChip, sideCellClass } from './cell-renderers';
 import { formatCell } from './formatters';
@@ -16,6 +16,8 @@ export function toWireAggFunc(aggFunc: NonNullable<ColumnMeta['aggFunc']>): Wire
 export type ColumnDefDeps = {
   /** Fetches the distinct values for a set filter, scoped to the current trader. */
   fetchFilterValues: (colId: string) => Promise<string[]>;
+  /** Direction of a price cell's latest change while its up or down colour is showing. */
+  tickDirection?: (rowId: string | undefined, field: string) => 'up' | 'down' | null;
 };
 
 /** The status chip (PENDING_START) needs more room than the metadata width. */
@@ -91,6 +93,14 @@ export function buildColumnDef(meta: ColumnMeta, deps: ColumnDefDeps): ColDef {
     def.aggFunc = toWireAggFunc(meta.aggFunc);
     def.allowedAggFuncs = [...ALLOWED_AGG_FUNCS];
     def.enableValue = true;
+  }
+  const tickDirection = deps.tickDirection;
+  if (meta.priceColumn === true && tickDirection !== undefined) {
+    // Re-evaluated whenever the cell refreshes, which a changed value does, and when the applier clears an expired tick.
+    def.cellClassRules = {
+      'tick-up': (params: CellClassParams): boolean => tickDirection(params.node.id, meta.field) === 'up',
+      'tick-down': (params: CellClassParams): boolean => tickDirection(params.node.id, meta.field) === 'down',
+    };
   }
   if (meta.field === 'status') def.cellRenderer = StatusChip;
   if (meta.field === 'side') def.cellClass = sideCellClass;

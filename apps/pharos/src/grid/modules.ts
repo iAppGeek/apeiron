@@ -2,7 +2,11 @@ import {
   CellStyleModule,
   ColumnApiModule,
   DateFilterModule,
+  HighlightChangesModule,
   NumberFilterModule,
+  RenderApiModule,
+  RowApiModule,
+  ScrollApiModule,
   TextFilterModule,
   TooltipModule,
   type Module,
@@ -22,7 +26,9 @@ import {
 /**
  * Appendix A modules for this phase (server-side row model, grouping, the four filters, cell style),
  * plus what the UI strictly needs: header tooltips, the group panel, side bar with its two tool panels, and the column menu.
- * ContextMenu, HighlightChanges and StatusBar arrive with phases 5 and 6 (the status bar is app-level).
+ * Phase 5b adds HighlightChanges (cell flash) and the row, scroll and render api modules the live client calls
+ * (`getRowNode`, `ensureIndexVisible`, `getVerticalPixelRange`, `refreshCells`).
+ * ContextMenu arrives with phase 6 (the status bar is app-level).
  */
 export const GRID_MODULES: Module[] = [
   ServerSideRowModelModule,
@@ -35,6 +41,10 @@ export const GRID_MODULES: Module[] = [
   DateFilterModule,
   CellStyleModule,
   ColumnApiModule,
+  HighlightChangesModule,
+  RenderApiModule,
+  RowApiModule,
+  ScrollApiModule,
   TooltipModule,
   ColumnMenuModule,
   SideBarModule,
