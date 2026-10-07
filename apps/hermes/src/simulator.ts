@@ -263,7 +263,7 @@ export class Simulator {
       stats.statusChanges++;
       return;
     }
-    const base = order.orderQty / (Math.max(1, order.durationMins) * 6);
+    const base = order.orderQty / this.rates.fillsPerOrder;
     const qty = Math.max(1_000, Math.round((base * uniform(this.options.rng, 0.7, 1.3)) / 1_000) * 1_000);
     const changes = applyFill(this.priced(order), qty, this.fillPrice(order), now);
     if (Object.keys(changes).length === 0) return;
@@ -287,7 +287,8 @@ export class Simulator {
   private create(status: 'LIVE' | 'PENDING_START', now: number): void {
     for (const [pair, mid] of Object.entries(this.currentMids())) this.factory.mids.set(pair as Order['currencyPair'], mid);
     const rng = this.options.rng;
-    const durationMins = 1 + Math.floor(rng() * 4);
+    // 1-2 minutes: arrivals x lifetime is about 450 LIVE on medium and 4,500 on stress, inside each band.
+    const durationMins = 1 + Math.floor(rng() * 2);
     const startTime = status === 'LIVE' ? now : now + Math.round(uniform(rng, 10_000, 2 * MIN_MS));
     const order = this.factory.create({
       status,

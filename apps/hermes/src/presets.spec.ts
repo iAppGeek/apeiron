@@ -8,6 +8,14 @@ describe('LOAD_PRESETS', () => {
     expect(TICKS_PER_SECOND).toBe(3);
   });
 
+  it('sizes fills so they cannot drain LIVE faster than new orders refill it', () => {
+    for (const p of Object.values(LOAD_PRESETS)) {
+      const needed = p.updatesPerSec / (0.8 * p.newOrdersPerSec);
+      expect(p.fillsPerOrder).toBeGreaterThanOrEqual(needed * 0.9);
+      expect(p.fillsPerOrder).toBeLessThanOrEqual(needed * 1.3);
+    }
+  });
+
   it('keeps each preset internally consistent', () => {
     for (const p of Object.values(LOAD_PRESETS)) {
       expect(p.liveMin).toBeLessThanOrEqual(p.liveTarget);

@@ -149,14 +149,15 @@ describe('Simulator rates', () => {
     expect(updates).toBeLessThan(1_150);
   });
 
-  it('splits new orders about 80/20 between LIVE and PENDING_START', () => {
+  it('splits new orders about 80/20 between LIVE and PENDING_START once the population is in steady state', () => {
     const h = harness({ seed: 4 });
     h.sim.reconcile(SEED_NOW);
+    const t = run(h, SEED_NOW, 240);
     h.events.length = 0;
-    // Run past the LIVE cap by pausing nothing: a long run still has the minimum band satisfied.
-    run(h, SEED_NOW, 60);
+    run(h, t, 180);
     const news = h.events.filter((e): e is Extract<OrderEvent, { type: 'NEW' }> => e.type === 'NEW');
     const live = news.filter((e) => e.order.status === 'LIVE').length;
+    expect(news.length / 180).toBeGreaterThan(4);
     expect(live / news.length).toBeGreaterThan(0.7);
     expect(live / news.length).toBeLessThan(0.95);
     expect(news.some((e) => e.order.status === 'PENDING_START')).toBe(true);
@@ -172,8 +173,22 @@ describe('Simulator rates', () => {
       counts.push(h.sim.liveCount);
     }
     expect(Math.max(...counts)).toBeLessThanOrEqual(650);
-    expect(Math.min(...counts.slice(30))).toBeGreaterThanOrEqual(150);
+    expect(Math.min(...counts.slice(60))).toBeGreaterThanOrEqual(380);
   });
+
+  it('holds the stress LIVE population up instead of letting 2,000 fills/s drain it', () => {
+    const h = harness({ seed: 9 });
+    h.sim.reconcile(SEED_NOW);
+    h.sim.setPreset('stress', SEED_NOW);
+    let t = SEED_NOW;
+    const counts: number[] = [];
+    for (let s = 0; s < 120; s++) {
+      t = run(h, t, 1);
+      counts.push(h.sim.liveCount);
+    }
+    expect(Math.max(...counts)).toBeLessThanOrEqual(5_000);
+    expect(Math.min(...counts.slice(30))).toBeGreaterThanOrEqual(1_500);
+  }, 60_000);
 
   it('switches to the stress preset live: 2,000 fills/s, 50 new/s, LIVE cap 5,000', () => {
     const h = harness({ seed: 2 });
