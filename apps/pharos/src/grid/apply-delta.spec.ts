@@ -371,6 +371,14 @@ describe('createDeltaApplier', () => {
       expect(onNewAbove).toHaveBeenCalledWith(3);
     });
 
+    it('anchors on the row the probe reports, which is exact even where the scroll position is scaled', () => {
+      const { grid, applier, onNewAbove } = setup({ topRowProbe: () => 600_000 });
+      grid.scrollTop = 0;
+      applier.apply(delta({ adds: topAdd(2), newAbove: 2 }));
+      expect(grid.ensureIndexVisible).toHaveBeenCalledWith(600_002, 'top');
+      expect(onNewAbove).toHaveBeenCalledWith(2);
+    });
+
     it('reads the viewport before the rows are inserted', () => {
       const { grid, applier } = setup();
       grid.scrollTop = 100 * 28;

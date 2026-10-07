@@ -12,14 +12,14 @@ const FALLBACK_ROW_HEIGHT = 28;
 export const ROW_BUFFER = 10;
 
 /**
- * The row index at the top of the viewport.
- *
- * `getFirstDisplayedRowIndex` is the first rendered row, which sits `ROW_BUFFER` rows above the viewport once the
- * grid is scrolled past that buffer. That holds at any depth, whereas dividing the scroll position by the row height
- * does not: with a million rows AG Grid caps the scroll container's height and scales the scroll position. Near the
- * top (first rendered row 0) the scroll position is unscaled and the pixel maths is exact to the nearest row.
+ * The row index at the top of the viewport. When a probe of the rendered rows is available it is exact. Without
+ * one, the first rendered row sits `ROW_BUFFER` rows above the viewport once the grid is scrolled past that buffer
+ * (true at any depth, though it can read one row low), and near the top the unscaled scroll position gives the
+ * nearest row. Dividing the scroll position alone fails deep down: with a million rows AG Grid scales it.
  */
-export function readTopRow(api: AnchorApi): number {
+export function readTopRow(api: AnchorApi, probe?: () => number | null): number {
+  const probed = probe?.() ?? null;
+  if (probed !== null) return probed;
   const firstRendered = api.getFirstDisplayedRowIndex();
   if (firstRendered > 0) return firstRendered + ROW_BUFFER;
   const top = api.getVerticalPixelRange().top;

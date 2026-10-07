@@ -35,6 +35,12 @@ describe('readTopRow', () => {
     expect(readTopRow(api(0, 28, 15))).toBe(15 + ROW_BUFFER);
   });
 
+  it('prefers the probe of the rendered rows when it has an answer', () => {
+    expect(readTopRow(api(28 * 200), () => 123)).toBe(123);
+    expect(readTopRow(api(28 * 200), () => 0)).toBe(0);
+    expect(readTopRow(api(28 * 200), () => null)).toBe(200);
+  });
+
   it('is 0 for a nonsense row height', () => {
     expect(readTopRow(api(280, 0))).toBe(0);
   });

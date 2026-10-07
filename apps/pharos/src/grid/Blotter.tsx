@@ -27,6 +27,7 @@ import {
 } from './grid-options';
 import { GRID_MODULES } from './modules';
 import { createTickTracker } from './tick-tracker';
+import { readFirstVisibleRow } from './viewport-probe';
 
 export type BlotterProps = {
   client: BlotterClient;
@@ -54,6 +55,8 @@ function NewOrdersBadgeConnected({ api }: { api: GridApi | null }): ReactElement
 export function Blotter({ client, controller }: BlotterProps): ReactElement {
   const [api, setApi] = useState<GridApi | null>(null);
   const applier = useRef<DeltaApplier | null>(null);
+  const root = useRef<HTMLDivElement>(null);
+  const probe = useCallback((): number | null => readFirstVisibleRow(root.current), []);
   const ticks = useMemo(() => createTickTracker({ holdMs: TICK_HOLD_MS, now: wallClock }), []);
   const welcomed = useAppStore((s) => s.welcomed);
   const notReady = useAppStore((s) => s.notReady);
@@ -108,6 +111,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       onNewAbove: (count) => {
         useAppStore.getState().addNewOrders(count);
       },
+      topRowProbe: probe,
     });
     applier.current = live;
     controller.setDeltaHandler((delta) => live.apply(delta));
@@ -123,7 +127,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       live.dispose();
       applier.current = null;
     };
-  }, [api, controller, ticks]);
+  }, [api, controller, ticks, probe]);
 
   const onStoreRefreshed = useCallback((event: StoreRefreshedEvent) => {
     applier.current?.onStoreRefreshed(event.route);
@@ -133,9 +137,9 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
   const onBodyScroll = useCallback(
     (event: BodyScrollEvent) => {
       if (api === null || event.direction !== 'vertical' || useAppStore.getState().newOrders === 0) return;
-      if (readTopRow(api) === 0) useAppStore.getState().clearNewOrders();
+      if (readTopRow(api, probe) === 0) useAppStore.getState().clearNewOrders();
     },
-    [api],
+    [api, probe],
   );
 
   const overlay = !welcomed
@@ -147,7 +151,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       : null;
 
   return (
-    <div className="blotter">
+    <div className="blotter" ref={root}>
       <AgGridProvider modules={GRID_MODULES}>
         <AgGridReact
           theme={theme}

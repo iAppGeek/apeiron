@@ -40,6 +40,8 @@ export type DeltaApplierOptions = {
   groupRowId: (route: readonly string[], row: Row) => string;
   /** Called with the number of new orders hidden above a scrolled-down viewport, for the badge. */
   onNewAbove?: (count: number) => void;
+  /** Reads the first row the user can see straight from the rendered rows, when the host can. */
+  topRowProbe?: () => number | null;
   timers?: Timers;
   /** Each route is refreshed at most once per this long. Default 1000ms. */
   refreshIntervalMs?: number;
@@ -162,7 +164,7 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       const stats: ApplyStats = { rowsUpdated: 0, rowsAdded: 0, skipped: 0, rootRowCount: null };
       const hasRootAdds = delta.adds.some((a) => a.route.length === 0 && a.rows.length > 0);
       // The top row has to be read before the rows move.
-      const topRow = delta.newAbove > 0 || hasRootAdds ? readTopRow(api) : 0;
+      const topRow = delta.newAbove > 0 || hasRootAdds ? readTopRow(api, options.topRowProbe) : 0;
 
       const insertedAtTop = applyAdds(delta, stats);
       applyUpdates(delta, stats);
@@ -194,7 +196,7 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       if (pendingShift === 0 || (route !== undefined && route.length > 0)) return;
       const shift = pendingShift;
       pendingShift = 0;
-      const top = readTopRow(api);
+      const top = readTopRow(api, options.topRowProbe);
       if (top > 0) api.ensureIndexVisible(top + shift, 'top');
     },
 
