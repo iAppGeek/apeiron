@@ -29,6 +29,9 @@ importers:
       fastify:
         specifier: ^5.12.5
         version: 5.12.5
+      prom-client:
+        specifier: ^15.1.3
+        version: 15.1.3
       zod:
         specifier: ^4.6.5
         version: 4.6.5
@@ -56,7 +59,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.3
-        version: 5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
+        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
       ws:
         specifier: ^8.22.0
         version: 8.22.0
@@ -90,7 +93,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.3
-        version: 5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
+        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
 
   apps/hermes:
     dependencies:
@@ -103,6 +106,9 @@ importers:
       '@apeiron/mnemosyne':
         specifier: workspace:*
         version: link:../../packages/mnemosyne
+      prom-client:
+        specifier: ^15.1.3
+        version: 15.1.3
       zod:
         specifier: ^4.6.5
         version: 4.6.5
@@ -124,7 +130,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.3
-        version: 5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
+        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
 
   apps/pharos:
     dependencies:
@@ -161,7 +167,7 @@ importers:
         version: 10.4.2
       '@testing-library/jest-dom':
         specifier: ^7.0.1
-        version: 7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15)))
+        version: 7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15)))
       '@testing-library/react':
         specifier: ^16.3.3
         version: 16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -197,7 +203,38 @@ importers:
         version: 8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15)
       vitest:
         specifier: ^5.0.3
-        version: 5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
+        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
+
+  apps/talos:
+    dependencies:
+      '@apeiron/logos':
+        specifier: workspace:*
+        version: link:../../packages/logos
+      ws:
+        specifier: ^8.22.0
+        version: 8.22.0
+    devDependencies:
+      '@apeiron/eslint-config':
+        specifier: workspace:*
+        version: link:../../packages/eslint-config
+      '@apeiron/tsconfig':
+        specifier: workspace:*
+        version: link:../../packages/tsconfig
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.1
+      '@types/ws':
+        specifier: ^8.18.2
+        version: 8.18.2
+      eslint:
+        specifier: ^10.12.0
+        version: 10.12.0
+      typescript:
+        specifier: ~6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: ^5.0.3
+        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
 
   packages/eslint-config:
     dependencies:
@@ -243,7 +280,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.3
-        version: 5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
+        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
 
   packages/logos:
     dependencies:
@@ -271,7 +308,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.3
-        version: 5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
+        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
 
   packages/mnemosyne:
     dependencies:
@@ -302,7 +339,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.3
-        version: 5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
+        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
 
   packages/tsconfig: {}
 
@@ -730,6 +767,10 @@ packages:
   '@nats-io/transport-node@3.4.0':
     resolution: {integrity: sha512-hH7u7ejIBTFEJIZ8rIcMrHJI6wl+HhpO5sVFs1+ppmXa8RuB2+Lh1+UwTzZ5xTNNm1TKcRkYy+2qCV56qp8RxA==}
     engines: {node: '>= 18.0.0'}
+
+  '@opentelemetry/api@1.9.1':
+    resolution: {integrity: sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q==}
+    engines: {node: '>=8.0.0'}
 
   '@oxc-project/types@0.152.0':
     resolution: {integrity: sha512-oM/5rLBm2tPkg0iBgkH/FOeR3PCDpY19GTgAZjMFM8h9WI9VW7cLgzp6nwtarYKmovavIQZ+Fe/RKX/8C8O/Rw==}
@@ -1174,6 +1215,9 @@ packages:
 
   bidi-js@1.1.0:
     resolution: {integrity: sha512-fX1Onk0tdVPC7obPWB5EbJ1z7NVhLq4m2xZLq2YXBkxzMXIGRpNMU88n0EPgWseKl12J7zXs7qrDxPK4sRs2fg==}
+
+  bintrees@1.0.2:
+    resolution: {integrity: sha512-VOMgTMwjAaUG580SXn3LacVgjurrbMme7ZZNYGSSV7mmtY6QQRh0Eg3pwIcntQ77DErK1L0NxkbetjcoXzVwKw==}
 
   brace-expansion@5.0.12:
     resolution: {integrity: sha512-YovQ3rzhaLMIrDjNDMkNS01tea93qhEhG5xy8f6+R0l+dw3Ki+5sCoIoI942iuLZTHWogWktgwVDhU09iNEimQ==}
@@ -1842,6 +1886,11 @@ packages:
   process-warning@5.1.0:
     resolution: {integrity: sha512-jQSaVHsPgtyw60e1rQ/A+/ArPEj/S8pS/vFnyGa/gYFXrKk/6RuDkoqVDQ5NI5MmS01698ltlAk0NoDBNLujRw==}
 
+  prom-client@15.1.3:
+    resolution: {integrity: sha512-6ZiOBfCywsD4k1BN9IX0uZhF+tJkV8q8llP64G5Hajs4JOeVLPCwpPVcpXy3BwYiUGgyJzsJJQeOIv7+hDSq8g==}
+    engines: {node: ^16 || ^18 || >=20}
+    deprecated: prom-client has been replaced by @prometheus-io/client
+
   prop-types@15.8.1:
     resolution: {integrity: sha512-oj87CgZICdulUohogVAR7AjlC0327U4el4L6eAvOqCeudMDVU0NThNaV+b9Df4dXgSP1gXMTnPdhfe/2qDH5cg==}
 
@@ -1975,6 +2024,9 @@ packages:
 
   tar-stream@3.2.2:
     resolution: {integrity: sha512-+8NeqHRjQWH9nYlwo2gamAMImZCVzI4UoEgDpWorBt9OEfppiZn+uSkskzQKPWIZyji/C8fpWO7u69G0DX0tbg==}
+
+  tdigest@0.1.3:
+    resolution: {integrity: sha512-zbRt+lT+/H4fRItHshczHErVCQnitJk8MfMT24MqFJf3YL7SJJPqGIGeuOdvxXxM/AHFzKBl7WoyaYwqO9s3Kw==}
 
   teex@1.0.1:
     resolution: {integrity: sha512-eYE6iEI62Ni1H8oIa7KlDU6uQBtqr4Eajni3wX7rpfXD8ysFx8z0+dri+KWEPWpBsxXfxu58x/0jvTVT1ekOSg==}
@@ -2636,6 +2688,8 @@ snapshots:
       '@nats-io/nkeys': 2.0.3
       '@nats-io/nuid': 3.0.0
 
+  '@opentelemetry/api@1.9.1': {}
+
   '@oxc-project/types@0.152.0': {}
 
   '@pinojs/redact@0.4.0': {}
@@ -2698,7 +2752,7 @@ snapshots:
       picocolors: 1.1.1
       pretty-format: 27.5.1
 
-  '@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15)))':
+  '@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15)))':
     dependencies:
       '@adobe/css-tools': 4.5.0
       '@testing-library/dom': 10.4.2
@@ -2708,7 +2762,7 @@ snapshots:
       picocolors: 1.1.1
       redent: 3.0.0
     optionalDependencies:
-      vitest: 5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
+      vitest: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
 
   '@testing-library/react@16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)':
     dependencies:
@@ -3020,6 +3074,8 @@ snapshots:
   bidi-js@1.1.0:
     dependencies:
       require-from-string: 2.0.2
+
+  bintrees@1.0.2: {}
 
   brace-expansion@5.0.12:
     dependencies:
@@ -3694,6 +3750,11 @@ snapshots:
 
   process-warning@5.1.0: {}
 
+  prom-client@15.1.3:
+    dependencies:
+      '@opentelemetry/api': 1.9.1
+      tdigest: 0.1.3
+
   prop-types@15.8.1:
     dependencies:
       loose-envify: 1.4.0
@@ -3833,6 +3894,10 @@ snapshots:
       - bare-buffer
       - react-native-b4a
 
+  tdigest@0.1.3:
+    dependencies:
+      bintrees: 1.0.2
+
   teex@1.0.1:
     dependencies:
       streamx: 2.28.1
@@ -3948,7 +4013,7 @@ snapshots:
       fsevents: 2.3.3
       tsx: 4.23.15
 
-  vitest@5.0.3(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15)):
+  vitest@5.0.3(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(jsdom@30.1.2)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15)):
     dependencies:
       '@types/chai': 5.2.3
       '@vitest/mocker': 5.0.3(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15))
@@ -3965,6 +4030,7 @@ snapshots:
       vite: 8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(tsx@4.23.15)
       why-is-node-running: 3.2.1
     optionalDependencies:
+      '@opentelemetry/api': 1.9.1
       '@types/node': 24.19.1
       jsdom: 30.1.2
     transitivePeerDependencies:

@@ -78,6 +78,25 @@ describe('WriteBehind', () => {
     expect((await collect(h.repo))[0]?.numFills).toBe(5);
   });
 
+  it('reports batch size and duration on success and a failure on error', async () => {
+    const store = makeStore([{ status: 'LIVE', currencyPair: 'EURUSD', numFills: 0 }]);
+    const live = new LiveStore(store, log);
+    live.init();
+    const repo = new InMemoryOrderRepository();
+    const writeBehind = vi.fn();
+    const wb = new WriteBehind(live, repo, log, 500, { writeBehind });
+    const id = store.orderAt(0).orderId;
+    live.enqueueEvent({ type: 'UPDATE', order: { orderId: id, numFills: 1 }, ts: 1 }, vi.fn());
+    live.flush(1_000);
+    expect(live.dirtyCount).toBe(1);
+    vi.spyOn(repo, 'upsertMany').mockRejectedValueOnce(new Error('down'));
+    await wb.flush();
+    expect(writeBehind).toHaveBeenLastCalledWith(expect.objectContaining({ batchSize: 1, ok: false }));
+    await wb.flush();
+    expect(writeBehind).toHaveBeenLastCalledWith(expect.objectContaining({ batchSize: 1, ok: true }));
+    expect(live.dirtyCount).toBe(0);
+  });
+
   it('runs on its interval and stop() flushes what is left', async () => {
     vi.useFakeTimers();
     const h = setup();

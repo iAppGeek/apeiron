@@ -6,6 +6,7 @@ import { LiveRuntime } from './live/runtime.js';
 import type { BackpressureOptions } from './live/backpressure.js';
 import { QueryEngine } from './query/engine.js';
 import { LagMonitor, withLagReport } from './lag.js';
+import { Metrics } from './metrics.js';
 import { loadStore, type LoadReport } from './loader.js';
 import { memorySnapshot } from './memory.js';
 import { ClientSession } from './session.js';
@@ -38,6 +39,8 @@ export type ServerOptions = {
   maxPayload?: number;
   /** A getRows that builds its view in at least this long gets its event-loop lag logged. */
   slowBuildMs?: number;
+  /** The metrics registry served on `/metrics` (default: a new one). */
+  metrics?: Metrics;
 };
 
 export type HealthBody = {
@@ -60,6 +63,7 @@ export type BlotterServer = {
   runtime(): LiveRuntime | null;
   health(): HealthBody;
   lag: LagMonitor;
+  metrics: Metrics;
 };
 
 
@@ -82,6 +86,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
   });
   const lag = new LagMonitor();
   lag.start();
+  const metrics = options.metrics ?? new Metrics();
   app.addHook('onClose', async () => {
     lag.stop();
     await runtime?.stop();
@@ -120,6 +125,27 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
     return reply.code(body.status === 'ok' ? 200 : 503).send(body);
   });
 
+  metrics.bind({
+    storeRows: () => store.size,
+    loaded: () => engine !== null,
+    cache: () => engine?.stats().cache ?? null,
+    live: () =>
+      runtime === null
+        ? null
+        : {
+            clients: runtime.clientCount,
+            clientsByCodec: runtime.clientsByCodec(),
+            liveRows: runtime.live.liveRows,
+            pendingEvents: runtime.live.pendingEvents,
+            dirtyOrders: runtime.live.dirtyCount,
+            commandsPending: runtime.commands.size,
+            cpuPercent: runtime.system.latest.cpu,
+            lagMs: runtime.system.lastWindowLag,
+          },
+  });
+
+  app.get('/metrics', async (_req, reply) => reply.header('content-type', metrics.contentType).send(await metrics.render()));
+
   app.get('/debug/lag', async (req) => {
     const reset = (req.query as { reset?: string }).reset === '1';
     if (runtime === null) return { live: false };
@@ -146,6 +172,8 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
   };
 
   app.get('/ws', { websocket: true }, (socket) => {
+    metrics.connectionOpened();
+    socket.once('close', () => metrics.connectionClosed());
     attachWebSocket(
       socket,
       (connection) =>
@@ -153,6 +181,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
           engine: () => engine,
           live: () => runtime,
           log: app.log,
+          metrics,
           onRows: (info) => {
             if (info.built && info.ms >= slowBuildMs) logSlowBuild(info);
           },
@@ -188,6 +217,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
           backpressure: options.backpressure,
           summaryIntervalMs: options.summaryIntervalMs,
           commandTimeoutMs: options.commandTimeoutMs,
+          metrics,
         });
         runtime.start();
       }
@@ -216,5 +246,5 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
     }
   };
 
-  return { app, store, load, engine: () => engine, runtime: () => runtime, health, lag };
+  return { app, store, load, engine: () => engine, runtime: () => runtime, health, lag, metrics };
 }

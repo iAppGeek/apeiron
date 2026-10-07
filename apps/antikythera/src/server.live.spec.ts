@@ -358,3 +358,50 @@ describe('command path over a real socket', () => {
     await vi.waitFor(() => expect(s.runtime()?.commands.size).toBe(0));
   });
 });
+
+describe('GET /metrics', () => {
+  const sample = (text: string, series: string): number | undefined => {
+    const line = text.split('\n').find((l) => l.startsWith(`${series} `));
+    return line === undefined ? undefined : Number(line.slice(series.length + 1));
+  };
+
+  it('serves Prometheus text with the live measurements of a client session and a command', async () => {
+    const bus = new MemoryBus();
+    await fakeHermes(bus, ROWS.filter((o) => o.status === 'LIVE').map((o) => ({ ...o })));
+    const { server: s, wsUrl, base } = await start(bus);
+    await s.load();
+    const c = await connect(wsUrl, 'msgpack');
+    c.send({ t: 'hello', traderId: 'ALL', codec: 'msgpack', clientId: 'metrics-1' });
+    await c.until((m) => m.t === 'welcome');
+    c.send({ t: 'getRows', reqId: 1, req: rowsReq });
+    await c.until((m) => m.t === 'rows');
+    c.send({ t: 'command', reqId: 2, orderId: 'T0000001', action: 'PAUSE' });
+    await c.until((m) => m.t === 'ack' && m.reqId === 2);
+    await vi.waitFor(async () => {
+      const res = await fetch(`${base}/metrics`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/plain');
+      const text = await res.text();
+      expect(sample(text, 'apeiron_store_rows')).toBe(ROWS.length);
+      expect(sample(text, 'apeiron_store_loaded')).toBe(1);
+      expect(sample(text, 'apeiron_ws_connections')).toBe(1);
+      expect(sample(text, 'apeiron_ws_clients{codec="msgpack"}')).toBe(1);
+      expect(sample(text, 'apeiron_ws_messages_total{direction="out",type="rows",codec="msgpack"}')).toBe(1);
+      expect(sample(text, 'apeiron_getrows_duration_seconds_count{temp="cold",shape="flat"}')).toBe(1);
+      expect(sample(text, 'apeiron_command_duration_seconds_count{outcome="ok"}')).toBe(1);
+      expect(sample(text, 'apeiron_ingest_events_total{type="command"}')).toBe(1);
+      expect(sample(text, 'apeiron_ingest_events_total{type="order"}')).toBeGreaterThanOrEqual(1);
+      expect(sample(text, 'apeiron_flush_duration_seconds_count')).toBeGreaterThan(0);
+      expect(sample(text, 'apeiron_view_cache_views')).toBe(1);
+    });
+  });
+
+  it('answers before the store has loaded, with the store marked not loaded', async () => {
+    const { server: s, base } = await start(new MemoryBus());
+    const text = await (await fetch(`${base}/metrics`)).text();
+    expect(sample(text, 'apeiron_store_loaded')).toBe(0);
+    expect(s.store.size).toBe(0);
+    s.metrics.connectionOpened();
+    expect(sample(await s.metrics.render(), 'apeiron_ws_connections')).toBe(1);
+  });
+});

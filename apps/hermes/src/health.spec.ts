@@ -19,4 +19,20 @@ describe('health server', () => {
       await closeServer(server);
     }
   });
+
+  it('serves /metrics only when given a source', async () => {
+    const without = await startHealthServer(0, () => ({}), () => true);
+    const withSource = await startHealthServer(0, () => ({}), () => true, { contentType: 'text/plain; version=0.0.4', render: () => Promise.resolve('hermes_up 1\n') });
+    try {
+      const base = (s: typeof without): string => `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+      expect((await fetch(`${base(without)}/metrics`)).status).toBe(404);
+      const res = await fetch(`${base(withSource)}/metrics`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/plain');
+      expect(await res.text()).toBe('hermes_up 1\n');
+    } finally {
+      await closeServer(without);
+      await closeServer(withSource);
+    }
+  });
 });

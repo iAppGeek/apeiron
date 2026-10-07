@@ -212,3 +212,20 @@ describe('LiveStore write batches', () => {
     expect(done).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('LiveStore.lastFlushAgeMs', () => {
+  it('is the age of the oldest queued event or tick, and null when nothing was applied', () => {
+    const { live, store } = setup([{ ...LIVE_EURUSD }]);
+    const id = store.orderAt(0).orderId;
+    expect(live.lastFlushAgeMs).toBeNull();
+    live.flush(1_000);
+    expect(live.lastFlushAgeMs).toBeNull();
+    live.enqueueEvent({ type: 'UPDATE', order: { orderId: id, numFills: 1 }, ts: 900 }, ack);
+    live.enqueueTick({ pair: 'EURUSD', bid: 1.08, ask: 1.0802, ts: 950 });
+    live.flush(1_000);
+    expect(live.lastFlushAgeMs).toBe(100);
+    live.enqueueTick({ pair: 'EURUSD', bid: 1.08, ask: 1.0802, ts: 2_000 });
+    live.flush(1_500);
+    expect(live.lastFlushAgeMs).toBe(0);
+  });
+});

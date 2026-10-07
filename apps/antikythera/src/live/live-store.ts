@@ -52,6 +52,7 @@ export class LiveStore {
   private readonly liveByPair = new Map<CurrencyPair, Set<number>>();
   private dirty = new Set<string>();
   private lastAck: (() => void) | null = null;
+  private flushAgeMs: number | null = null;
 
   constructor(
     private readonly store: ColumnarStore,
@@ -82,6 +83,16 @@ export class LiveStore {
     return this.queue.length;
   }
 
+  /** Orders changed by lifecycle events that write-behind has not taken yet. */
+  get dirtyCount(): number {
+    return this.dirty.size;
+  }
+
+  /** Age in ms of the oldest event or tick the last `flush` applied, or null when it applied none. */
+  get lastFlushAgeMs(): number | null {
+    return this.flushAgeMs;
+  }
+
   get liveRows(): number {
     let n = 0;
     for (const s of this.liveByPair.values()) n += s.size;
@@ -104,10 +115,14 @@ export class LiveStore {
     const queue = this.queue;
     this.queue = [];
     const eventRows = new Set<number>();
+    let oldest = Infinity;
     for (const { event, ack } of queue) {
+      oldest = Math.min(oldest, event.ts);
       this.applyEvent(event, cs, eventRows);
       this.lastAck = ack;
     }
+    for (const pair of this.pendingTicks) oldest = Math.min(oldest, (this.latestTicks.get(pair) as PriceTick).ts);
+    this.flushAgeMs = oldest === Infinity ? null : Math.max(0, now - oldest);
     this.applyPrices(now, cs, eventRows);
     return cs;
   }

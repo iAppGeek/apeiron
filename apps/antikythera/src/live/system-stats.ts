@@ -13,6 +13,7 @@ export class SystemStats {
   private lastCpu = process.cpuUsage();
   private lastAt = performance.now();
   private current: ServerStats = { cpu: 0, rssMb: 0, elLagMs: 0 };
+  private lastLag: LagSnapshot = { p50: 0, p99: 0, max: 0, samples: 0 };
 
   start(): void {
     this.windowLag.start();
@@ -30,10 +31,11 @@ export class SystemStats {
     const cpu = process.cpuUsage();
     const busyMs = (cpu.user - this.lastCpu.user + (cpu.system - this.lastCpu.system)) / 1000;
     const elapsed = Math.max(1, now - this.lastAt);
+    this.lastLag = this.windowLag.snapshot();
     this.current = {
       cpu: Math.round((busyMs / elapsed) * 1000) / 10,
       rssMb: Math.round(process.memoryUsage.rss() / 1048576),
-      elLagMs: this.windowLag.snapshot().p99,
+      elLagMs: this.lastLag.p99,
     };
     this.lastCpu = cpu;
     this.lastAt = now;
@@ -44,6 +46,11 @@ export class SystemStats {
   /** The most recent sample. */
   get latest(): ServerStats {
     return this.current;
+  }
+
+  /** The event-loop lag distribution of the last complete one-second window. */
+  get lastWindowLag(): LagSnapshot {
+    return this.lastLag;
   }
 
   totalLag(): LagSnapshot {

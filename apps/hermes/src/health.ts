@@ -1,11 +1,26 @@
 import { createServer, type Server } from 'node:http';
 
-/** A tiny HTTP `/health` endpoint for the compose healthcheck. */
-export function startHealthServer(port: number, body: () => unknown, ready: () => boolean): Promise<Server> {
+/** What `/metrics` needs: the exposition text and its content type. */
+export type MetricsSource = { contentType: string; render(): Promise<string> };
+
+/** A tiny HTTP server: `/health` for the compose healthcheck and, when given a source, `/metrics` for Prometheus. */
+export function startHealthServer(port: number, body: () => unknown, ready: () => boolean, metrics?: MetricsSource): Promise<Server> {
   const server = createServer((req, res) => {
     if (req.url === '/health') {
       res.writeHead(ready() ? 200 : 503, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body()));
+      return;
+    }
+    if (req.url === '/metrics' && metrics !== undefined) {
+      metrics.render().then(
+        (text) => {
+          res.writeHead(200, { 'content-type': metrics.contentType });
+          res.end(text);
+        },
+        () => {
+          res.writeHead(500).end();
+        },
+      );
       return;
     }
     res.writeHead(404).end();

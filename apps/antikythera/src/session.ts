@@ -13,6 +13,7 @@ import {
   type ServerMsg,
   type TraderInfo,
 } from '@apeiron/logos';
+import type { SessionMetrics } from './metrics.js';
 import type { ChangeSet } from './query/changeset.js';
 import type { ColumnarStore } from './store/columnar-store.js';
 import type { QueryEngine, RowsResult } from './query/engine.js';
@@ -61,9 +62,13 @@ export type SessionDeps = {
   now?: () => number;
   /** Called after every successful getRows (used to log slow cold builds). */
   onRows?: (info: Pick<RowsResult, 'ms' | 'built' | 'rowCount'>) => void;
+  /** Receives message, getRows, delta, error and backpressure measurements. */
+  metrics?: SessionMetrics;
 };
 
 const round = (ms: number): number => Math.round(ms * 100) / 100;
+
+const sizeOf = (frame: Frame): number => (typeof frame === 'string' ? Buffer.byteLength(frame) : frame.byteLength);
 
 function reqIdOf(input: unknown): number | undefined {
   if (typeof input !== 'object' || input === null) return undefined;
@@ -137,7 +142,9 @@ export class ClientSession {
     if (view !== null) tracker.collect(ctx.byView.get(view), ctx.cs);
 
     const decision = this.gate.decide(this.connection.bufferedAmount, ctx.now);
+    if (decision === 'hold') this.deps.metrics?.backpressure('soft_conflate');
     if (decision === 'close') {
+      this.deps.metrics?.backpressure('slow_consumer');
       this.deps.log.warn({ clientId: this.clientId, buffered: this.connection.bufferedAmount }, 'closing slow consumer');
       this.send({ t: 'error', code: 'SLOW_CONSUMER', message: 'The client is too far behind the server' });
       this.connection.close(1013, 'slow consumer');
@@ -178,6 +185,8 @@ export class ClientSession {
 
   private process(frame: Frame): void {
     let decoded: unknown;
+    const inCodec = typeof frame === 'string' || !this.helloDone ? 'json' : 'msgpack';
+    const metrics = this.deps.metrics;
     try {
       if (!this.helloDone) {
         if (typeof frame !== 'string') {
@@ -190,15 +199,18 @@ export class ClientSession {
         decoded = typeof frame === 'string' ? jsonCodec.decode(frame) : msgpackCodec.decode(frame);
       }
     } catch {
+      metrics?.message('in', 'invalid', inCodec, sizeOf(frame));
       this.sendError(undefined, 'BAD_FRAME', `Frame is not valid ${typeof frame === 'string' || !this.helloDone ? 'json' : 'msgpack'}`);
       return;
     }
 
     const parsed = parseClientMsg(decoded);
     if (!parsed.ok) {
+      metrics?.message('in', 'invalid', inCodec, sizeOf(frame));
       this.sendError(reqIdOf(decoded), 'BAD_MESSAGE', parsed.error);
       return;
     }
+    metrics?.message('in', parsed.value.t, inCodec, sizeOf(frame));
     this.dispatch(parsed.value);
   }
 
@@ -265,6 +277,7 @@ export class ClientSession {
     }
     const { rows, rowCount, ms, built } = result.value;
     this.deps.onRows?.({ ms, built, rowCount });
+    this.deps.metrics?.getRows({ ms, built, grouped: msg.req.rowGroupCols.length > 0 });
     const live = this.deps.live?.();
     if (live !== null && live !== undefined) {
       this.tracker ??= new ClientTracker(live.maxTrackedBlocks);
@@ -324,7 +337,15 @@ export class ClientSession {
   private send(msg: ServerMsg): void {
     if (this.closed) return;
     try {
-      this.connection.send(this.codec.encode(msg));
+      const frame = this.codec.encode(msg);
+      this.connection.send(frame);
+      const metrics = this.deps.metrics;
+      if (metrics !== undefined) {
+        const bytes = sizeOf(frame);
+        metrics.message('out', msg.t, this.codec.name, bytes);
+        if (msg.t === 'delta') metrics.delta(bytes);
+        else if (msg.t === 'error') metrics.error(msg.code);
+      }
     } catch (error) {
       this.deps.log.warn({ err: error, clientId: this.clientId }, 'failed to send frame');
     }

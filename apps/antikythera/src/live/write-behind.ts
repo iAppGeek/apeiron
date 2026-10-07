@@ -1,4 +1,5 @@
 import type { OrderRepository } from '@apeiron/mnemosyne';
+import type { RuntimeMetrics } from '../metrics.js';
 import type { LiveStore } from './live-store.js';
 
 export type WriteBehindLogger = {
@@ -25,6 +26,7 @@ export class WriteBehind {
     private readonly repo: OrderRepository,
     private readonly log: WriteBehindLogger,
     private readonly intervalMs: number,
+    private readonly metrics?: Pick<RuntimeMetrics, 'writeBehind'>,
   ) {}
 
   start(): void {
@@ -64,6 +66,7 @@ export class WriteBehind {
       await this.repo.upsertMany(batch.orders);
     } catch (error) {
       this.stats.failures++;
+      this.metrics?.writeBehind({ batchSize: batch.orders.length, seconds: (performance.now() - start) / 1000, ok: false });
       this.log.error({ err: error, orders: batch.orders.length }, 'write-behind failed, will retry');
       this.live.restoreWriteBatch(batch);
       return;
@@ -71,6 +74,7 @@ export class WriteBehind {
     this.stats.passes++;
     this.stats.ordersWritten += batch.orders.length;
     this.stats.lastMs = performance.now() - start;
+    this.metrics?.writeBehind({ batchSize: batch.orders.length, seconds: this.stats.lastMs / 1000, ok: true });
     batch.ack?.();
   }
 }
