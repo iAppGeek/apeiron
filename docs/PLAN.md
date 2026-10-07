@@ -404,6 +404,11 @@ type ServerMsg =
   | { t: 'pong'; ts: number; serverTs: number };
 ```
 - **Codec negotiation:** the first frame (`hello`) is always JSON text. Every later frame uses the negotiated codec: text frames for JSON, binary frames for msgpack.
+  - **Frames are self-describing in both directions (CP-3).** A receiver decodes by frame type, never by the negotiated codec: a text frame is JSON, and a binary frame is msgpack. The negotiated codec only chooses what the *sender* emits.
+  - Every `hello`, including a mid-session re-hello, is JSON text, so switching back from msgpack to JSON works.
+- **Load preset is visible (CP-3).**
+  - Hermes publishes `control.state {preset}` on core NATS at startup, on every change, and every 5s.
+  - The server caches the latest value and sends it as `welcome.preset` and `summary.preset` (`'medium' | 'stress' | null` until known).
 - **Validation:** `ClientMsg` is validated with zod; `ServerMsg` is not, for speed.
 - **Error codes (CP-2, complete list):**
   - Request content: `UNSUPPORTED_FILTER`, `UNSUPPORTED_AGG`, `UNSUPPORTED_PIVOT`, `UNSUPPORTED_GROUP`, `UNSUPPORTED_COLUMN`, `UNKNOWN_COLUMN`, `UNKNOWN_TRADER`
