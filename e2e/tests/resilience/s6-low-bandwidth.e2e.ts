@@ -38,11 +38,13 @@ test('S6 low bandwidth ends in SLOW_CONSUMER and recovers', async ({ browser }) 
       h.measure('softConflateEvents', conflated);
       h.measure('slowConsumerEvents', slowConsumers);
     },
-    minimums: () => ({ reconnects: 1, deltas: 100 }),
+    // Not every page is cut off (a page with a small view may never fall behind): the test asserts that some page was.
+    minimums: () => ({ reconnects: 0, deltas: 100 }),
   });
   printSummary(report);
   expect(report.failures).toEqual([]);
   expect(conflated + slowConsumers, 'the server held back or cut off slow clients').toBeGreaterThan(0);
   expect(slowConsumers, 'SLOW_CONSUMER events at 16KB/s').toBeGreaterThan(0);
   expect(sawSlowConsumerClose, 'a page saw close code 1013').toBe(true);
+  expect(Math.max(...report.views.map((v) => v.reconnects)), 'a page reconnected after being cut off').toBeGreaterThan(0);
 });

@@ -288,6 +288,9 @@ export class ClientSession {
     this.deps.metrics?.getRows({ ms, built, grouped: msg.req.rowGroupCols.length > 0 });
     const live = this.deps.live?.();
     if (live !== null && live !== undefined) {
+      // A client that said hello while the store was still loading was not registered then: join the flush now.
+      // Registering twice is harmless.
+      live.register(this);
       this.tracker ??= new ClientTracker(live.maxTrackedBlocks);
       this.tracker.record(result.value.track);
     }

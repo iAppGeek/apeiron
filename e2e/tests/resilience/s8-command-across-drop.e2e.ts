@@ -10,10 +10,10 @@ import { printSummary, runScenario, waitUntilElapsed } from '../../support/scena
  * command was applied.
  */
 const ROUNDS = [
-  { label: 'Pause order', drop: 'clean' },
-  { label: 'Cancel order', drop: 'down3' },
-  { label: 'Pause order', drop: 'clean' },
-  { label: 'Cancel order', drop: 'down3' },
+  { label: 'Pause order', downMs: 1000 },
+  { label: 'Cancel order', downMs: 3000 },
+  { label: 'Pause order', downMs: 1000 },
+  { label: 'Cancel order', downMs: 3000 },
 ] as const;
 
 test('S8 commands sent just before a drop', async ({ browser }) => {
@@ -34,8 +34,11 @@ test('S8 commands sent just before a drop', async ({ browser }) => {
         sent.push(`${round.label} ${orderId}`);
         h.note(`command ${round.label}`, orderId);
         await sleep(150);
-        if (round.drop === 'clean') await h.faults.dropClean();
-        else await h.faults.down(3000);
+        // The proxy goes down while the ack is still held back, so the request can never be answered on this connection.
+        // The client must say so rather than wait: an error toast appears while the link is down.
+        const dropped = h.faults.down(round.downMs);
+        await expect(v4.page.getByRole('alert').first()).toBeVisible({ timeout: 15_000 });
+        await dropped;
         await h.faults.clear();
         await h.allConnected(60_000);
       }

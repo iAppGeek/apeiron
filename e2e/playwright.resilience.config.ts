@@ -20,6 +20,8 @@ export default defineConfig({
   use: {
     baseURL: process.env['RESILIENCE_BASE_URL'] ?? 'http://127.0.0.1:8081',
     viewport: { width: 1600, height: 900 },
+    actionTimeout: 30_000,
+    navigationTimeout: 60_000,
     trace: 'off',
     screenshot: 'off',
   },

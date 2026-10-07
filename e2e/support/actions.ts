@@ -21,12 +21,22 @@ export async function selectCodec(page: Page, codec: 'json' | 'msgpack'): Promis
 
 export type OrderCommandLabel = 'Pause order' | 'Cancel order' | 'Resume order';
 
-/** Right-clicks the status cell of a rendered row and picks an order action from the context menu. */
-export async function sendCommand(blotter: Blotter, rowIndex: number, label: OrderCommandLabel): Promise<string> {
-  const row = blotter.rowAt(rowIndex);
-  const orderId = await row.getAttribute('row-id');
-  if (orderId === null) throw new Error(`no row at index ${rowIndex}`);
-  const menu = await blotter.openRowMenu(row);
+/**
+ * Right-clicks the status cell of the `nth` rendered LIVE row and picks an order action from the context menu.
+ * Returns the order id it acted on.
+ */
+export async function sendCommand(blotter: Blotter, nth: number, label: OrderCommandLabel): Promise<string> {
+  // A view that was sorted by a far-right column is scrolled sideways; the status cell is only rendered near the left edge.
+  await blotter.scrollLeftEdge();
+  let ids: string[] = [];
+  await expect
+    .poll(async () => (ids = await blotter.rowIdsWithStatus('LIVE')).length, { message: `${nth + 1} LIVE rows rendered` })
+    .toBeGreaterThan(nth);
+  const orderId = ids[nth];
+  if (orderId === undefined) throw new Error(`fewer than ${nth + 1} LIVE rows are rendered`);
+  const menu = await blotter.openRowMenu(blotter.rowById(orderId));
   await menu.getByRole('menuitem', { name: label }).click();
+  // Cancelling is final, so the grid asks first with a one-entry submenu.
+  if (label === 'Cancel order') await blotter.page.getByRole('menuitem', { name: `Confirm: cancel ${orderId}` }).click();
   return orderId;
 }

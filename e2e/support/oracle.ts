@@ -175,8 +175,9 @@ export async function checkServerVsScreen(name: string, snapshot: PageSnapshot, 
     reader.getRows({ ...template, startRow, endRow, groupKeys: [...route] });
 
   // Root count, status bar and summary.
-  const summaryWait = reader.nextSummary();
   const root = await read([], 0, 1);
+  // Asked for after the reply: the server scopes a summary to the view the client follows, which exists only from the reply on.
+  const summaryWait = reader.nextSummary();
   stats['serverRootRowCount'] = root.rowCount;
   if (snapshot.rootRowCount !== root.rowCount) failures.add(`root row count: the grid has ${String(snapshot.rootRowCount)}, the server ${root.rowCount}`);
   if (snapshot.statusBarRowCount !== root.rowCount) failures.add(`status bar row count: ${String(snapshot.statusBarRowCount)}, the server ${root.rowCount}`);

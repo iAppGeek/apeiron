@@ -16,7 +16,9 @@
     "dev": "turbo run dev",
     "seed": "pnpm --filter @apeiron/gaia start",
     "e2e": "pnpm --filter @apeiron/e2e e2e",
-    "e2e:ci": "pnpm --filter @apeiron/e2e e2e:ci"
+    "e2e:ci": "pnpm --filter @apeiron/e2e e2e:ci",
+    "e2e:resilience": "pnpm --filter @apeiron/e2e e2e:resilience",
+    "e2e:resilience:smoke": "pnpm --filter @apeiron/e2e e2e:resilience:smoke"
   },
   "devDependencies": {
     "turbo": "^2.11.7"

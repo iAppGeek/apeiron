@@ -64,6 +64,8 @@ export type Harness = {
   since(): Promise<{ reconnects: number; deltasApplied: number }[]>;
   /** Waits until every page shows Connected and is not busy. */
   allConnected(timeoutMs: number): Promise<boolean>;
+  /** Runs check 2 on every page right now, without stopping anything. The canary uses it to prove the check can fail. */
+  screens(): Promise<Check[]>;
   /** Stops the stream, waits for everything to go quiet, runs the three checks and writes the report. */
   end(minimums: Minimums): Promise<ScenarioReport>;
   /** Puts the stack back: no toxics, hermes running, pages closed. Safe to call twice, and must run after a failure. */
@@ -174,6 +176,17 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 
     allConnected: (timeoutMs) =>
       until(async () => (await Promise.all(pages.map((p) => readStats(p.page)))).every((s) => s.state === 'connected' && !s.busy), timeoutMs, 250),
+
+    async screens(): Promise<Check[]> {
+      const out: Check[] = [];
+      for (const p of pages) {
+        const snapshot = await readSnapshot(p.page);
+        const reader = await openReader({ traderId: snapshot.view.trader });
+        out.push(await checkServerVsScreen(`server-vs-screen ${p.id}`, snapshot, reader));
+        reader.close();
+      }
+      return out;
+    },
 
     async end(minimums: Minimums): Promise<ScenarioReport> {
       if (!began) throw new Error('end() before begin()');

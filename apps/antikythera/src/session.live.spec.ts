@@ -130,6 +130,25 @@ describe('ClientSession commands', () => {
   });
 });
 
+describe('ClientSession registration across a slow start', () => {
+  it('joins the flush loop when the runtime comes up after the client said hello', () => {
+    const w = world();
+    const current: { live: LiveHooks | null } = { live: null };
+    const session = new ClientSession(w.connection as unknown as Connection, {
+      engine: () => w.engine,
+      live: () => current.live,
+      log: { warn: vi.fn(), error: vi.fn() },
+      now: () => 1234,
+    });
+    session.handleFrame(json({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'late' }));
+    expect(w.live.register).not.toHaveBeenCalledWith(session);
+    // The store finishes loading and the live runtime starts; the client's next request registers it.
+    current.live = w.live;
+    session.handleFrame(json({ t: 'getRows', reqId: 1, req: req() }));
+    expect(w.live.register).toHaveBeenCalledWith(session);
+  });
+});
+
 describe('ClientSession control and registration', () => {
   it('registers on hello and unregisters on dispose', () => {
     const w = world();

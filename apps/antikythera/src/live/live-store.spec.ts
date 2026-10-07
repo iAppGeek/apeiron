@@ -27,6 +27,7 @@ const LIVE_EURUSD: Partial<Order> = {
   marketMid: 1.08,
   marketBid: 1.0799,
   marketAsk: 1.0801,
+  lastUpdateTime: 0,
 };
 
 const tick = (pair: PriceTick['pair'], bid: number, ask: number): PriceTick => ({ pair, bid, ask, ts: 1 });
@@ -159,6 +160,25 @@ describe('LiveStore price join', () => {
     live.flush(2_000);
     expect(store.orderAt(0).unrealisedPnlUsd).toBeCloseTo(pnl * 2, 0);
     expect(store.orderAt(0).lastUpdateTime).toBe(2_000);
+  });
+
+  it('never moves lastUpdateTime backwards, whichever clock stamped the change', () => {
+    const { store, live } = setup([{ ...LIVE_EURUSD }]);
+    const id = store.orderAt(0).orderId;
+    live.enqueueEvent(update(id, { filledQty: 100_000, lastUpdateTime: 10_000 }), ack);
+    live.flush(9_997);
+    expect(store.orderAt(0).lastUpdateTime).toBe(10_000);
+    // The server's clock is three milliseconds behind the producer's: a reprice must not step back.
+    live.enqueueTick(tick('EURUSD', 1.0899, 1.0901));
+    live.flush(9_998);
+    expect(store.orderAt(0).lastUpdateTime).toBe(10_000);
+    // A late event stamped earlier than what the row already shows keeps the later time but still applies its fields.
+    live.enqueueEvent(update(id, { filledQty: 200_000, lastUpdateTime: 9_990 }), ack);
+    live.flush(9_999);
+    expect(store.orderAt(0)).toMatchObject({ lastUpdateTime: 10_000, filledQty: 200_000 });
+    live.enqueueTick(tick('EURUSD', 1.0898, 1.09));
+    live.flush(10_500);
+    expect(store.orderAt(0).lastUpdateTime).toBe(10_500);
   });
 
   it('prices a NEW order that arrives after the pair has ticked', () => {
