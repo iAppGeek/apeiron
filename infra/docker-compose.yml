@@ -6,6 +6,9 @@ services:
   mongo:
     image: mongo:9.0
     profiles: [core, seed]
+    # WiredTiger defaults to half of the Docker VM's RAM, which under sustained write-behind load starves the
+    # blotter server (the VM swapped and every container stalled). 1 GB holds the working set of this dataset.
+    command: ["--wiredTigerCacheSizeGB", "1"]
     ports:
       - "127.0.0.1:27017:27017"
     volumes:
