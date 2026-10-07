@@ -35,10 +35,12 @@ describe('SystemStats', () => {
       await sleep(40);
       busyFor(120);
       await sleep(40);
-      expect(s.totalLag().max).toBeGreaterThan(50);
+      const blockedMax = s.totalLag().max;
+      expect(blockedMax).toBeGreaterThan(50);
       s.resetTotalLag();
       await sleep(40);
-      expect(s.totalLag().max).toBeLessThan(50);
+      // Relative, not absolute: a loaded machine (CI, the compose stack) adds its own lag after the reset.
+      expect(s.totalLag().max).toBeLessThan(blockedMax);
     } finally {
       s.stop();
     }

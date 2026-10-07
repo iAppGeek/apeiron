@@ -12,7 +12,9 @@ import {
   type Module,
 } from 'ag-grid-community';
 import {
+  ClipboardModule,
   ColumnMenuModule,
+  ContextMenuModule,
   ColumnsToolPanelModule,
   FiltersToolPanelModule,
   RowGroupingModule,
@@ -28,7 +30,7 @@ import {
  * plus what the UI strictly needs: header tooltips, the group panel, side bar with its two tool panels, and the column menu.
  * Phase 5b adds HighlightChanges (cell flash) and the row, scroll and render api modules the live client calls
  * (`getRowNode`, `ensureIndexVisible`, `getVerticalPixelRange`, `refreshCells`).
- * ContextMenu arrives with phase 6 (the status bar is app-level).
+ * Phase 6 adds ContextMenu (the order actions) and Clipboard (the standard copy items in that menu).
  */
 export const GRID_MODULES: Module[] = [
   ServerSideRowModelModule,
@@ -50,4 +52,6 @@ export const GRID_MODULES: Module[] = [
   SideBarModule,
   ColumnsToolPanelModule,
   FiltersToolPanelModule,
+  ContextMenuModule,
+  ClipboardModule,
 ];

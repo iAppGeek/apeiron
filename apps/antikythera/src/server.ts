@@ -25,6 +25,8 @@ export type ServerOptions = {
   backpressure?: BackpressureOptions;
   /** Seconds between summaries are 1s unless a test says otherwise. */
   summaryIntervalMs?: number;
+  /** How long a command waits for hermes before the client gets an error (default 5000). */
+  commandTimeoutMs?: number;
   logLevel?: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
   storeCapacity?: number;
   viewCacheMaxViews?: number;
@@ -185,6 +187,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
           maxTrackedBlocks: options.maxTrackedBlocks ?? 100,
           backpressure: options.backpressure,
           summaryIntervalMs: options.summaryIntervalMs,
+          commandTimeoutMs: options.commandTimeoutMs,
         });
         runtime.start();
       }

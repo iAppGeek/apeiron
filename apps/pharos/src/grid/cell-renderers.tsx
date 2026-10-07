@@ -10,12 +10,31 @@ const STATUS_CLASS: Record<string, string> = {
   CANCELLED: 'chip-cancelled',
 };
 
-/** Colour-coded status chip. Unknown values render as plain text. */
-export function StatusChip({ value }: CustomCellRendererProps): ReactElement | null {
+/** What the grid's `context` offers cell renderers: whether an order has a command in flight. */
+export type BlotterContext = { isPending: (orderId: string) => boolean };
+
+function isPending(context: unknown, data: unknown): boolean {
+  if (typeof context !== 'object' || context === null || typeof data !== 'object' || data === null) return false;
+  const { isPending: check } = context as Partial<BlotterContext>;
+  const { orderId } = data as { orderId?: unknown };
+  return typeof check === 'function' && typeof orderId === 'string' && check(orderId);
+}
+
+/**
+ * Colour-coded status chip. Unknown values render as plain text. While a command on the order is in flight
+ * the chip is dimmed and shows a small spinner (`aria-busy`), until the server acks or refuses it.
+ */
+export function StatusChip({ value, data, context }: CustomCellRendererProps): ReactElement | null {
   if (typeof value !== 'string' || value === '') return null;
   const cls = STATUS_CLASS[value];
   if (cls === undefined) return <span>{value}</span>;
-  return <span className={`chip ${cls}`}>{value}</span>;
+  const busy = isPending(context, data);
+  return (
+    <span className={`chip ${cls}${busy ? ' chip-busy' : ''}`} aria-busy={busy ? 'true' : undefined}>
+      {value}
+      {busy && <span className="chip-spinner" role="presentation" data-testid="command-pending" />}
+    </span>
+  );
 }
 
 /** Cell class for the side column: green for BUY, red for SELL. */

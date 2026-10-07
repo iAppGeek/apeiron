@@ -49,6 +49,7 @@ function world(overrides: Partial<LiveHooks> = {}, withLive = true): World {
     register: vi.fn(),
     unregister: vi.fn(),
     setPreset: vi.fn(() => Promise.resolve()),
+    command: vi.fn(),
     preset: vi.fn((): LoadPreset | null => null),
     summary: vi.fn(() => ({ byStatus: { PENDING_START: 0, LIVE: 2, PAUSED: 0, FILLED: 1, CANCELLED: 0 }, liveNotionalUsd: 42 })),
     stats: vi.fn(() => ({ cpu: 12.5, rssMb: 300, elLagMs: 1.5 })),
@@ -79,6 +80,53 @@ function world(overrides: Partial<LiveHooks> = {}, withLive = true): World {
 
 const getRows = (w: World, r: SsrmRequest = req(), reqId = 1): void => w.session.handleFrame(json({ t: 'getRows', reqId, req: r }));
 const idle = (w: World): ReturnType<typeof applyUpdates> => applyUpdates(w.store, w.engine, [{ orderId: 'T0000001', marketMid: 1 }]);
+
+describe('ClientSession commands', () => {
+  it('hands a command to the runtime with the session, client id and request', () => {
+    const w = world();
+    w.session.handleFrame(json({ t: 'command', reqId: 4, orderId: 'T0000001', action: 'PAUSE' }));
+    expect(w.live.command).toHaveBeenCalledWith(
+      { owner: w.session, clientId: 'c1', reqId: 4, orderId: 'T0000001', action: 'PAUSE' },
+      expect.any(Function),
+    );
+  });
+
+  it('sends ack{reqId} when the command is applied', () => {
+    const w = world();
+    vi.mocked(w.live.command).mockImplementation((_req, settle) => settle({ ok: true }));
+    w.session.handleFrame(json({ t: 'command', reqId: 4, orderId: 'T0000001', action: 'PAUSE' }));
+    expect(w.sent).toEqual([{ t: 'ack', reqId: 4 }]);
+  });
+
+  it('sends error{reqId, code, message} when the command fails', () => {
+    const w = world();
+    vi.mocked(w.live.command).mockImplementation((_req, settle) =>
+      settle({ ok: false, code: 'INVALID_TRANSITION', message: 'Cannot cancel an order that is FILLED' }),
+    );
+    w.session.handleFrame(json({ t: 'command', reqId: 9, orderId: 'T0000003', action: 'CANCEL' }));
+    expect(w.sent).toEqual([{ t: 'error', reqId: 9, code: 'INVALID_TRANSITION', message: 'Cannot cancel an order that is FILLED' }]);
+  });
+
+  it('validates the command message before it reaches the runtime', () => {
+    const w = world();
+    w.session.handleFrame(json({ t: 'command', reqId: 1, orderId: 'T1', action: 'DELETE' } as unknown as ClientMsg));
+    w.session.handleFrame(json({ t: 'command', reqId: 2, orderId: '', action: 'CANCEL' }));
+    expect(w.live.command).not.toHaveBeenCalled();
+    expect(w.sent.map((m) => (m.t === 'error' ? m.code : m.t))).toEqual(['BAD_MESSAGE', 'BAD_MESSAGE']);
+  });
+
+  it('does not send a late ack after the session has closed', () => {
+    const w = world();
+    let settle: (o: { ok: true }) => void = () => undefined;
+    vi.mocked(w.live.command).mockImplementation((_req, s) => {
+      settle = s;
+    });
+    w.session.handleFrame(json({ t: 'command', reqId: 4, orderId: 'T0000001', action: 'PAUSE' }));
+    w.session.dispose();
+    settle({ ok: true });
+    expect(w.sent).toEqual([]);
+  });
+});
 
 describe('ClientSession control and registration', () => {
   it('registers on hello and unregisters on dispose', () => {

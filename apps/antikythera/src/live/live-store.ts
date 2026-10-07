@@ -72,6 +72,12 @@ export class LiveStore {
     }
   }
 
+  /** The status of an order in the store, or undefined when the store does not hold it. */
+  statusOf(orderId: string): OrderStatus | undefined {
+    const row = this.store.rowIndexOf(orderId);
+    return row === undefined ? undefined : rowStatus(this.store, row);
+  }
+
   get pendingEvents(): number {
     return this.queue.length;
   }

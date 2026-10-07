@@ -1,4 +1,4 @@
-import { MemoryBus, getCodec, jsonCodec, type ClientMsg, type CodecName, type Order, type ServerMsg } from '@apeiron/logos';
+import { MemoryBus, applyCommand, getCodec, parseOrderCommand, jsonCodec, type ClientMsg, type CodecName, type Order, type ServerMsg } from '@apeiron/logos';
 import { InMemoryOrderRepository } from '@apeiron/mnemosyne';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket, { type RawData } from 'ws';
@@ -224,5 +224,137 @@ describe('live server over a real socket', () => {
     await c.until((m) => m.t === 'welcome');
     c.send({ t: 'control', reqId: 1, preset: 'stress' });
     await expect(c.until((m) => m.t === 'error')).resolves.toMatchObject({ code: 'NOT_IMPLEMENTED' });
+  });
+});
+
+/** Stands in for hermes: consumes `orders.commands`, applies them with the shared lifecycle and answers on `orders.events`. */
+async function fakeHermes(bus: MemoryBus, held: Order[], options: { silent?: boolean } = {}): Promise<{ seen: string[] }> {
+  const seen: string[] = [];
+  await bus.consume({ stream: 'ORDERS', durable: 'hermes-commands', subject: 'orders.commands' }, (payload, _subject, ack) => {
+    const parsed = parseOrderCommand(payload);
+    if (!parsed.ok) return ack();
+    const cmd = parsed.value;
+    seen.push(cmd.commandId);
+    ack();
+    if (options.silent === true) return;
+    const order = held.find((o) => o.orderId === cmd.orderId);
+    if (order === undefined) {
+      void bus.publish('orders.events', { type: 'REJECT', commandId: cmd.commandId, orderId: cmd.orderId, code: 'UNKNOWN_ORDER', message: 'not held', ts: Date.now() });
+      return;
+    }
+    const result = applyCommand(order, cmd.action, Date.now());
+    if (!result.ok) {
+      void bus.publish('orders.events', { type: 'REJECT', commandId: cmd.commandId, orderId: cmd.orderId, code: result.code, message: result.message, ts: Date.now() });
+      return;
+    }
+    Object.assign(order, result.changes);
+    void bus.publish('orders.events', { type: 'UPDATE', order: { orderId: cmd.orderId, ...result.changes }, ts: Date.now(), commandId: cmd.commandId });
+  });
+  return { seen };
+}
+
+describe('command path over a real socket', () => {
+  const held = (): Order[] => ROWS.filter((o) => o.status === 'LIVE').map((o) => ({ ...o }));
+
+  it.each<CodecName>(['json', 'msgpack'])('pauses and resumes an order: the delta reaches every client, the ack only the sender (%s)', async (codec) => {
+    const bus = new MemoryBus();
+    await fakeHermes(bus, held());
+    const { server: s, wsUrl } = await start(bus);
+    await s.load();
+    const sender = await connect(wsUrl, codec);
+    const watcher = await connect(wsUrl, codec);
+    for (const [c, id] of [[sender, 'sender'], [watcher, 'watcher']] as const) {
+      c.send({ t: 'hello', traderId: 'ALL', codec, clientId: id });
+      await c.until((m) => m.t === 'welcome');
+      c.send({ t: 'getRows', reqId: 1, req: rowsReq });
+      await c.until((m) => m.t === 'rows');
+    }
+
+    sender.send({ t: 'command', reqId: 10, orderId: 'T0000001', action: 'PAUSE' });
+    await sender.until((m) => m.t === 'ack' && m.reqId === 10);
+    const statusDelta = (m: ServerMsg): boolean =>
+      m.t === 'delta' && m.updates.some((u) => u.rows.some((r) => r.orderId === 'T0000001' && r.status === 'PAUSED'));
+    await watcher.until(statusDelta);
+    expect(sender.all.findIndex(statusDelta)).toBeGreaterThanOrEqual(0);
+    expect(sender.all.findIndex(statusDelta)).toBeLessThan(sender.all.findIndex((m) => m.t === 'ack'));
+    expect(watcher.all.some((m) => m.t === 'ack')).toBe(false);
+
+    sender.send({ t: 'command', reqId: 11, orderId: 'T0000001', action: 'RESUME' });
+    await sender.until((m) => m.t === 'ack' && m.reqId === 11);
+    await watcher.until((m) => m.t === 'delta' && m.updates.some((u) => u.rows.some((r) => r.orderId === 'T0000001' && r.status === 'LIVE')));
+  });
+
+  it('answers the fast pre-check without a round trip', async () => {
+    const bus = new MemoryBus();
+    const hermes = await fakeHermes(bus, held());
+    const { server: s, wsUrl } = await start(bus);
+    await s.load();
+    const c = await connect(wsUrl);
+    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'pre' });
+    await c.until((m) => m.t === 'welcome');
+    c.send({ t: 'command', reqId: 1, orderId: 'T0000010', action: 'CANCEL' });
+    await expect(c.until((m) => m.t === 'error' && m.reqId === 1)).resolves.toMatchObject({ code: 'INVALID_TRANSITION' });
+    c.send({ t: 'command', reqId: 2, orderId: 'NOPE', action: 'CANCEL' });
+    await expect(c.until((m) => m.t === 'error' && m.reqId === 2)).resolves.toMatchObject({ code: 'UNKNOWN_ORDER' });
+    expect(hermes.seen).toEqual([]);
+  });
+
+  it('passes hermes REJECT through as an error with its code', async () => {
+    const bus = new MemoryBus();
+    // Hermes does not hold T0000002, though the server's store does, so the server's pre-check passes and hermes rejects.
+    await fakeHermes(bus, held().filter((o) => o.orderId !== 'T0000002'));
+    const { server: s, wsUrl } = await start(bus);
+    await s.load();
+    const c = await connect(wsUrl);
+    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'rej' });
+    await c.until((m) => m.t === 'welcome');
+    c.send({ t: 'command', reqId: 3, orderId: 'T0000002', action: 'CANCEL' });
+    await expect(c.until((m) => m.t === 'error' && m.reqId === 3)).resolves.toMatchObject({ code: 'UNKNOWN_ORDER', message: 'not held' });
+  });
+
+  it('cancels an order and then refuses a second cancel from the pre-check', async () => {
+    const bus = new MemoryBus();
+    await fakeHermes(bus, held());
+    const { server: s, wsUrl } = await start(bus);
+    await s.load();
+    const c = await connect(wsUrl);
+    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'cx' });
+    await c.until((m) => m.t === 'welcome');
+    c.send({ t: 'command', reqId: 1, orderId: 'T0000003', action: 'CANCEL' });
+    await c.until((m) => m.t === 'ack' && m.reqId === 1);
+    c.send({ t: 'command', reqId: 2, orderId: 'T0000003', action: 'CANCEL' });
+    await expect(c.until((m) => m.t === 'error' && m.reqId === 2)).resolves.toMatchObject({ code: 'INVALID_TRANSITION' });
+  });
+
+  it('errors with INTERNAL when hermes never answers', async () => {
+    const bus = new MemoryBus();
+    await fakeHermes(bus, held(), { silent: true });
+    const repo = new InMemoryOrderRepository();
+    await repo.upsertMany(ROWS);
+    const s = await buildServer({ repo, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, writeBehindMs: 30, commandTimeoutMs: 150 });
+    server = s;
+    await s.app.listen({ port: 0, host: '127.0.0.1' });
+    await s.load();
+    const addr = s.app.server.address();
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    const c = await connect(`ws://127.0.0.1:${port}/ws`);
+    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'slow' });
+    await c.until((m) => m.t === 'welcome');
+    c.send({ t: 'command', reqId: 1, orderId: 'T0000001', action: 'PAUSE' });
+    await expect(c.until((m) => m.t === 'error' && m.reqId === 1)).resolves.toMatchObject({ code: 'INTERNAL', message: 'command timed out' });
+  });
+
+  it('forgets a pending command when the client disconnects', async () => {
+    const bus = new MemoryBus();
+    await fakeHermes(bus, held(), { silent: true });
+    const { server: s, wsUrl } = await start(bus);
+    await s.load();
+    const c = await connect(wsUrl);
+    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'gone' });
+    await c.until((m) => m.t === 'welcome');
+    c.send({ t: 'command', reqId: 1, orderId: 'T0000001', action: 'PAUSE' });
+    await vi.waitFor(() => expect(s.runtime()?.commands.size).toBe(1));
+    sockets.forEach((sock) => sock.close());
+    await vi.waitFor(() => expect(s.runtime()?.commands.size).toBe(0));
   });
 });

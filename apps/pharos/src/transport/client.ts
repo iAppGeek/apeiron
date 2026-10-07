@@ -1,4 +1,4 @@
-import type { CodecName, LoadPreset, Row, ServerMsg, SsrmRequest } from '@apeiron/logos';
+import type { CodecName, CommandAction, LoadPreset, Row, ServerMsg, SsrmRequest } from '@apeiron/logos';
 import type {
   ConnectionStatus,
   Failure,
@@ -57,6 +57,12 @@ export type BlotterClient = {
   setFilterValues(colId: string): Promise<string[]>;
   /** Asks the server to switch the mock middleware load preset; resolves when the server has published it. */
   control(preset: LoadPreset): Promise<void>;
+  /**
+   * Sends a Cancel, Pause or Resume for an order. Resolves on the server's ack, which arrives after the status
+   * change has been broadcast; rejects with a {@link RequestError} carrying the server's code (INVALID_TRANSITION,
+   * UNKNOWN_ORDER, INTERNAL for a timeout) or a transport code.
+   */
+  command(orderId: string, action: CommandAction): Promise<void>;
   on<E extends keyof ClientEvents>(event: E, handler: (payload: ClientEvents[E]) => void): () => void;
   dispose(): void;
 };
@@ -153,6 +159,11 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
 
     async control(preset: LoadPreset): Promise<void> {
       const msg = await request((reqId) => ({ t: 'control', reqId, preset }));
+      if (msg.t !== 'ack') throw new RequestError({ code: 'INTERNAL', message: `Unexpected reply: ${msg.t}` });
+    },
+
+    async command(orderId: string, action: CommandAction): Promise<void> {
+      const msg = await request((reqId) => ({ t: 'command', reqId, orderId, action }));
       if (msg.t !== 'ack') throw new RequestError({ code: 'INTERNAL', message: `Unexpected reply: ${msg.t}` });
     },
 

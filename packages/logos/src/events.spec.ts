@@ -8,6 +8,8 @@ import {
   parseOrderEvent,
   parsePriceTick,
   priceSubject,
+  makeCommandId,
+  REJECT_CODES,
 } from './events.js';
 import { sampleOrders } from './fixtures.js';
 import type { Order } from './order.js';
@@ -85,5 +87,30 @@ describe('control.state', () => {
     expect(parseLoadState({ preset: 'huge' }).ok).toBe(false);
     expect(parseLoadState({}).ok).toBe(false);
     expect(parseLoadState(null).ok).toBe(false);
+  });
+});
+
+describe('command correlation', () => {
+  it('builds command ids from the client id and request id', () => {
+    expect(makeCommandId('client-1', 7)).toBe('client-1:7');
+  });
+
+  it('lists the reject codes the schema accepts', () => {
+    expect(REJECT_CODES).toEqual(['INVALID_TRANSITION', 'UNKNOWN_ORDER']);
+  });
+
+  it('rejects malformed commands and REJECT events', () => {
+    const cmd = { orderId: 'ALG1', action: 'PAUSE', requestedBy: 'c', ts: 1, commandId: 'c:1' };
+    expect(parseOrderCommand({ ...cmd, orderId: '' }).ok).toBe(false);
+    expect(parseOrderCommand({ ...cmd, commandId: '' }).ok).toBe(false);
+    expect(parseOrderCommand({ orderId: 'ALG1', action: 'PAUSE' }).ok).toBe(false);
+    expect(parseOrderEvent({ type: 'REJECT', orderId: 'a', code: 'UNKNOWN_ORDER', message: 'm', ts: 1 }).ok).toBe(false);
+  });
+
+  it('accepts UPDATE with and without a commandId', () => {
+    const base = { type: 'UPDATE', order: { orderId: 'a', status: 'PAUSED' }, ts: 1 };
+    expect(parseOrderEvent(base).ok).toBe(true);
+    expect(parseOrderEvent({ ...base, commandId: 'c:1' }).ok).toBe(true);
+    expect(parseOrderEvent({ ...base, commandId: 5 }).ok).toBe(false);
   });
 });

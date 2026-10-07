@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { derivePriceFields, applyFill, pnlUsdOf, slippageBpsOf, transition } from './lifecycle.js';
+import {
+  derivePriceFields,
+  applyFill,
+  pnlUsdOf,
+  slippageBpsOf,
+  transition,
+  applyCommand,
+  availableCommands,
+  canApplyCommand,
+  canTransition,
+  COMMAND_TARGET,
+} from './lifecycle.js';
 import { sampleOrders } from './fixtures.js';
 import type { Order } from './order.js';
 
@@ -227,5 +238,52 @@ describe('derivePriceFields', () => {
   it('agrees with pnlUsdOf', () => {
     const order = liveOrder({ filledQty: 200_000, remainingQty: 800_000, avgFillPrice: 1.0801 });
     expect(derivePriceFields(order, { bid: 1.0809, ask: 1.0811 }, NOW).unrealisedPnlUsd).toBe(pnlUsdOf(order, 1.081));
+  });
+});
+
+describe('commands', () => {
+  const STATUSES = ['PENDING_START', 'LIVE', 'PAUSED', 'FILLED', 'CANCELLED'] as const;
+  const ACTIONS = ['CANCEL', 'PAUSE', 'RESUME'] as const;
+  const VALID: Record<(typeof STATUSES)[number], readonly (typeof ACTIONS)[number][]> = {
+    PENDING_START: ['CANCEL'],
+    LIVE: ['CANCEL', 'PAUSE'],
+    PAUSED: ['CANCEL', 'RESUME'],
+    FILLED: [],
+    CANCELLED: [],
+  };
+
+  it('maps each action to its target status', () => {
+    expect(COMMAND_TARGET).toEqual({ CANCEL: 'CANCELLED', PAUSE: 'PAUSED', RESUME: 'LIVE' });
+  });
+
+  it.each(STATUSES.flatMap((status) => ACTIONS.map((action) => [status, action] as const)))(
+    'status %s x action %s matches the Appendix E matrix',
+    (status, action) => {
+      const valid = VALID[status].includes(action);
+      expect(canApplyCommand(status, action)).toBe(valid);
+      const result = applyCommand(liveOrder({ status }), action, NOW);
+      expect(result.ok).toBe(valid);
+      if (result.ok) expect(result.changes).toMatchObject({ status: COMMAND_TARGET[action], lastUpdateTime: NOW });
+      else expect(result.code).toBe('INVALID_TRANSITION');
+    },
+  );
+
+  it('lists the available commands per status', () => {
+    for (const status of STATUSES) expect(availableCommands(status)).toEqual(VALID[status]);
+  });
+
+  it('explains an invalid command in the message', () => {
+    const result = applyCommand(liveOrder({ status: 'FILLED' }), 'CANCEL', NOW);
+    expect(result).toEqual({ ok: false, code: 'INVALID_TRANSITION', message: 'Cannot cancel an order that is FILLED' });
+  });
+
+  it('cancelling closes the order out', () => {
+    const result = applyCommand(liveOrder({ status: 'PAUSED', unrealisedPnlUsd: 12 }), 'CANCEL', NOW);
+    expect(result).toMatchObject({ ok: true, changes: { status: 'CANCELLED', completedAt: NOW, realisedPnlUsd: 12, unrealisedPnlUsd: 0 } });
+  });
+
+  it('exposes canTransition', () => {
+    expect(canTransition('LIVE', 'PAUSED')).toBe(true);
+    expect(canTransition('FILLED', 'LIVE')).toBe(false);
   });
 });

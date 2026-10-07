@@ -6,6 +6,7 @@ import {
   msgpackCodec,
   parseClientMsg,
   type ClientMsg,
+  type CommandAction,
   type Codec,
   type ErrorCode,
   type LoadPreset,
@@ -16,6 +17,7 @@ import type { ChangeSet } from './query/changeset.js';
 import type { ColumnarStore } from './store/columnar-store.js';
 import type { QueryEngine, RowsResult } from './query/engine.js';
 import type { View, ViewChanges } from './query/view.js';
+import type { CommandOutcome } from './live/commands.js';
 import { BackpressureGate, type BackpressureOptions } from './live/backpressure.js';
 import type { StatusSummary } from './live/counters.js';
 import type { ServerStats } from './live/system-stats.js';
@@ -32,6 +34,8 @@ export type LiveHooks = {
   register(session: ClientSession): void;
   unregister(session: ClientSession): void;
   setPreset(preset: LoadPreset): Promise<void>;
+  /** Pre-checks and publishes a command; `settle` is called once with how it ended. */
+  command(request: CommandRequest, settle: (outcome: CommandOutcome) => void): void;
   /** The preset hermes last reported on `control.state`, or null before it has. */
   preset(): LoadPreset | null;
   summary(traderId: string): StatusSummary;
@@ -40,6 +44,9 @@ export type LiveHooks = {
   backpressure: BackpressureOptions;
   summaryIntervalMs: number;
 };
+
+/** A trader command on its way to hermes. `owner` ties it to the session so it is forgotten when that closes. */
+export type CommandRequest = { owner: object; clientId: string; reqId: number; orderId: string; action: CommandAction };
 
 /** One flush tick as seen by a session. */
 export type FlushContext = { cs: ChangeSet; byView: ReadonlyMap<View, ViewChanges>; now: number; store: ColumnarStore };
@@ -219,7 +226,7 @@ export class ClientSession {
         this.onControl(msg);
         return;
       case 'command':
-        this.sendError(msg.reqId, 'NOT_IMPLEMENTED', `${msg.t} is not implemented yet`);
+        this.onCommand(msg);
         return;
     }
   }
@@ -264,6 +271,21 @@ export class ClientSession {
       this.tracker.record(result.value.track);
     }
     this.send({ t: 'rows', reqId: msg.reqId, rows, rowCount, ms: round(ms) });
+  }
+
+  private onCommand(msg: Extract<ClientMsg, { t: 'command' }>): void {
+    const live = this.deps.live?.();
+    if (live === null || live === undefined) {
+      this.sendError(msg.reqId, 'NOT_IMPLEMENTED', 'commands are not available without a message bus');
+      return;
+    }
+    live.command(
+      { owner: this, clientId: this.clientId, reqId: msg.reqId, orderId: msg.orderId, action: msg.action },
+      (outcome) => {
+        if (outcome.ok) this.send({ t: 'ack', reqId: msg.reqId });
+        else this.sendError(msg.reqId, outcome.code, outcome.message);
+      },
+    );
   }
 
   private onControl(msg: Extract<ClientMsg, { t: 'control' }>): void {
