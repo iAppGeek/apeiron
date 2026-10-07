@@ -83,6 +83,12 @@ jobs:
         run: curl -fsS localhost:4000/health && curl -fsSI localhost:8080/ | head -1
       - name: End-to-end tests
         run: pnpm e2e:ci
+      - name: Build the resilience images (web with test hooks)
+        run: docker compose --profile core --profile resilience build pharos-e2e
+      - name: Start toxiproxy and the test-hooks web
+        run: docker compose --profile core --profile resilience up -d --no-build --wait --wait-timeout 120 toxiproxy pharos-e2e
+      - name: Resilience smoke (S1 shortened, S3)
+        run: pnpm e2e:resilience:smoke
       - name: Upload the Playwright report
         if: failure()
         uses: actions/upload-artifact@v7
@@ -92,9 +98,17 @@ jobs:
             e2e/playwright-report
             e2e/test-results
           retention-days: 7
+      - name: Upload the resilience results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: resilience-results
+          path: e2e/results
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Container logs
         if: failure()
-        run: docker compose --profile core logs --no-color --tail 200
+        run: docker compose --profile core --profile resilience logs --no-color --tail 200
       - name: Stop the stack
         if: always()
-        run: docker compose --profile core --profile seed down -v
+        run: docker compose --profile core --profile seed --profile resilience down -v

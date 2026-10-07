@@ -200,6 +200,7 @@ export async function checkServerVsScreen(name: string, snapshot: PageSnapshot, 
   }
   let compared = 0;
   let runsRead = 0;
+  const mismatched: number[] = [];
   for (const rows of byRoute.values()) {
     const route = rows[0]?.groupKeys ?? [];
     const positioned = rows.every((r) => (route.length === 0 ? r.rowIndex : r.childIndex) !== null);
@@ -239,12 +240,25 @@ export async function checkServerVsScreen(name: string, snapshot: PageSnapshot, 
             continue;
           }
           const diffs = diffRecords(screen.data, server, {}, true);
-          if (diffs.length > 0) failures.add(describeDiffs(`row ${index} ${String(server['orderId'])}`, diffs));
+          if (diffs.length > 0) {
+            mismatched.push(index);
+            failures.add(describeDiffs(`row ${index} ${String(server['orderId'])}`, diffs));
+          }
         }
       }
     }
   }
   stats['leafRowsCompared'] = compared;
+  const indexes = snapshot.rows.flatMap((r) => (r.rowIndex === null ? [] : [r.rowIndex]));
+  if (indexes.length > 0) {
+    stats['loadedFrom'] = Math.min(...indexes);
+    stats['loadedTo'] = Math.max(...indexes);
+    stats['loadedBlocks'] = [...new Set(indexes.map((i) => Math.floor(i / 100)))].join(',');
+  }
+  if (mismatched.length > 0) {
+    stats['mismatchedRows'] = mismatched.length;
+    stats['mismatchedBlocks'] = [...new Set(mismatched.map((i) => Math.floor(i / 100)))].join(',');
+  }
   stats['runsRead'] = runsRead;
 
   // Group rows: childCount and aggregates, matched by key within their parent route.

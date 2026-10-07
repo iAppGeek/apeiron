@@ -95,3 +95,23 @@ export function createServerProbe(options: ServerProbeOptions = {}): ServerProbe
     },
   };
 }
+
+/** The value of one Prometheus counter line, for example `apeiron_backpressure_events_total{event="slow_consumer"}`; 0 if absent. */
+export function readCounter(metricsText: string, name: string, labels: Record<string, string> = {}): number {
+  let total = 0;
+  for (const line of metricsText.split('\n')) {
+    if (!line.startsWith(name) || line.startsWith('#')) continue;
+    const rest = line.slice(name.length);
+    if (rest[0] !== '{' && rest[0] !== ' ') continue;
+    const matches = Object.entries(labels).every(([k, v]) => line.includes(`${k}="${v}"`));
+    if (!matches) continue;
+    total += Number(line.slice(line.lastIndexOf(' ') + 1));
+  }
+  return total;
+}
+
+/** Fetches antikythera's `/metrics` and reads one counter. */
+export async function fetchCounter(name: string, labels: Record<string, string> = {}, api = 'http://127.0.0.1:4000'): Promise<number> {
+  const response = await fetch(`${api}/metrics`);
+  return readCounter(await response.text(), name, labels);
+}

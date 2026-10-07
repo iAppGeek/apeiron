@@ -221,6 +221,44 @@ describe('ClientTracker: adds, dirty routes and counts', () => {
   });
 });
 
+describe('ClientTracker: rows pushed down by many adds', () => {
+  it('keeps sending updates for rows the client still holds after more than MAX_ADDED_ROWS new orders landed above them', () => {
+    const w = world();
+    w.get(req());
+    const total = 700;
+    const created = makeOrders([{}, {}, {}, {}, ...Array.from({ length: total }, (_, i) => ({ createdAt: 100 + i, venue: 'EBS' as const, status: 'LIVE' as const }))]).slice(4);
+    for (const order of created) {
+      const out = applyOrders(w.store, w.engine, [order]);
+      w.collect(out.changes, out.cs);
+      w.tracker.build(w.store, 1);
+    }
+    // The four original rows are now at positions 700 to 703, still in the client's cache, so they must stay tracked.
+    const out = applyUpdates(w.store, w.engine, [{ orderId: 'T0000001', marketMid: 42 }]);
+    w.collect(out.changes, out.cs);
+    const delta = w.tracker.build(w.store, 2);
+    const updated = delta?.updates.flatMap((u) => u.rows.map((r) => r.orderId)) ?? [];
+    const refreshed = delta?.dirtyRoutes.length ?? 0;
+    expect(updated.includes('T0000001') || refreshed > 0).toBe(true);
+    expect(updated).toContain('T0000001');
+  });
+
+  it('asks the client to reload the route once adds outgrow what it can hold, instead of silently untracking rows', () => {
+    const w = world();
+    w.get(req());
+    const total = 2100;
+    const created = makeOrders([{}, {}, {}, {}, ...Array.from({ length: total }, (_, i) => ({ createdAt: 100 + i, venue: 'EBS' as const, status: 'LIVE' as const }))]).slice(4);
+    let firstDirty = -1;
+    for (const [i, order] of created.entries()) {
+      const out = applyOrders(w.store, w.engine, [order]);
+      w.collect(out.changes, out.cs);
+      const delta = w.tracker.build(w.store, 1);
+      if (firstDirty < 0 && (delta?.dirtyRoutes.length ?? 0) > 0) firstDirty = i;
+    }
+    expect(firstDirty).toBeGreaterThanOrEqual(1990);
+    expect(firstDirty).toBeLessThan(2010);
+  });
+});
+
 describe('ClientTracker: groups', () => {
   const grouped = (extra: Partial<SsrmRequest> = {}): SsrmRequest =>
     req({

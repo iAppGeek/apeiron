@@ -39,8 +39,12 @@ const emptyPending = (): Pending => ({
   srcTs: Infinity,
 });
 
-/** Most rows tracked in a route's top block through `adds` (a scrolled-away client does not accumulate forever). */
-const MAX_ADDED_ROWS = 500;
+/**
+ * Most rows tracked in a route's top block through `adds` (a scrolled-away client does not accumulate forever). It
+ * matches what the grid can hold for one route (20 cached blocks of 100 rows): rows beyond it have been pushed out
+ * of the client's cache by the new orders above them.
+ */
+const MAX_ADDED_ROWS = 2000;
 
 /**
  * What one client currently holds, and what changed under it. Mirrors the grid's block cache: each `getRows`
@@ -215,7 +219,11 @@ export class ClientTracker {
     if (block === undefined) return;
     for (const row of rows) this.refRow(row, block);
     block.rows = [...rows, ...block.rows];
+    if (block.rows.length <= MAX_ADDED_ROWS) return;
     while (block.rows.length > MAX_ADDED_ROWS) this.unrefRow(block.rows.pop() as number);
+    // Rows pushed off the end may still sit in the client's cache, now untracked and going stale. Have the client
+    // reload the route, which records what it really holds.
+    this.pending.dirty.set(routeKey, block.route);
   }
 
   /**

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createServerProbe, parseSnapshot } from './server-probe';
+import { createServerProbe, parseSnapshot, readCounter } from './server-probe';
 
 const health = { status: 'ok', rows: 10, live: { clients: 2, pendingEvents: 0 } };
 const lag = (events: number, ticks: number): unknown => ({ live: { eventsApplied: events, ticksApplied: ticks }, flush: { lastMs: 0.3 } });
@@ -50,5 +50,22 @@ describe('createServerProbe', () => {
     const unacked = probeWith([{ events: 5, pending: 0, ack: 3 }, { events: 5, pending: 0, ack: 3 }]);
     await unacked.isIdle();
     expect(await unacked.isIdle()).toBe(false);
+  });
+});
+
+describe('readCounter', () => {
+  const text = [
+    '# HELP apeiron_backpressure_events_total x',
+    '# TYPE apeiron_backpressure_events_total counter',
+    'apeiron_backpressure_events_total{event="soft_conflate"} 12',
+    'apeiron_backpressure_events_total{event="slow_consumer"} 3',
+    'apeiron_backpressure_events_total_other 99',
+  ].join('\n');
+
+  it('reads a labelled counter and ignores similarly named ones', () => {
+    expect(readCounter(text, 'apeiron_backpressure_events_total', { event: 'slow_consumer' })).toBe(3);
+    expect(readCounter(text, 'apeiron_backpressure_events_total', { event: 'soft_conflate' })).toBe(12);
+    expect(readCounter(text, 'apeiron_backpressure_events_total')).toBe(15);
+    expect(readCounter(text, 'missing')).toBe(0);
   });
 });

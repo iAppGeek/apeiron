@@ -120,7 +120,8 @@ export async function openView(browser: Browser, id: ViewId): Promise<ViewPage> 
     case 'V1':
       break;
     case 'V2':
-      await blotter.scrollDownRows(300_000);
+      // About row 300,000 of the 1M-row dataset; on a smaller one (CI seeds 200k) the same relative depth.
+      await blotter.scrollDownRows(Math.min(300_000, Math.floor((await blotter.statusRows()) * 0.3)));
       break;
     case 'V3': {
       await blotter.groupBy('status');
