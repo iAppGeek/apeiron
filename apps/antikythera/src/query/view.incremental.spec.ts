@@ -5,7 +5,8 @@ import { makeOrders, makeStore } from '../testing/orders.js';
 import { QueryEngine, type EngineOptions } from './engine.js';
 import { routeKeyOf } from './view.js';
 
-const opts: EngineOptions = { maxViews: 50, maxBytes: 1 << 30, maxBlockRows: 10_000 };
+/** These tests exercise patching itself, so views are patched even though nothing tracks them, and rebuilds happen inline. */
+const opts: EngineOptions = { maxViews: 50, maxBytes: 1 << 30, maxBlockRows: 10_000, patchUnsubscribed: true, deferRebuilds: false };
 
 const req = (extra: Partial<SsrmRequest> = {}): SsrmRequest => ({
   startRow: 0,

@@ -18,6 +18,7 @@ const server = await buildServer({
   viewCacheMaxBytes: config.viewCacheMaxBytes,
   maxBlockRows: config.maxBlockRows,
   loadBatchSize: config.loadBatchSize,
+  flushBudgetMs: config.flushBudgetMs,
 });
 
 const shutdown = async (): Promise<void> => {

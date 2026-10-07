@@ -25,6 +25,8 @@ type Pending = {
   dirty: Map<string, string[]>;
   counts: Map<string, string[]>;
   newAbove: number;
+  /** Earliest source-event ts among the changes folded in so far (Infinity when none carries one). */
+  srcTs: number;
 };
 
 const emptyPending = (): Pending => ({
@@ -34,6 +36,7 @@ const emptyPending = (): Pending => ({
   dirty: new Map(),
   counts: new Map(),
   newAbove: 0,
+  srcTs: Infinity,
 });
 
 /** Most rows tracked in a route's top block through `adds` (a scrolled-away client does not accumulate forever). */
@@ -72,6 +75,11 @@ export class ClientTracker {
 
   isTracking(routeKey: string): boolean {
     return this.routes.has(routeKey);
+  }
+
+  /** A view rebuild was deferred and has now run: every route the client tracks must be refreshed. */
+  markAllDirty(): void {
+    for (const [key, r] of this.routes) this.pending.dirty.set(key, r.route);
   }
 
   /** Whether any change is waiting to be sent. */
@@ -223,6 +231,7 @@ export class ClientTracker {
     const note = (row: number, routeKey: string, route: string[]): void => {
       const e = cs.entries.get(row);
       if (e === undefined || e.isNew || e.fields.size === 0) return;
+      p.srcTs = Math.min(p.srcTs, e.ts);
       let r = p.updates.get(routeKey);
       if (r === undefined) {
         r = { route, rows: new Map() };
@@ -244,7 +253,20 @@ export class ClientTracker {
       }
     }
     if (changes === undefined) return;
+    // Structure, counts and adds depend on the whole tick, so whatever this tick adds of them is owed to its
+    // earliest source event (rows the client does not hold are not part of its delta).
+    const signature = (): number => {
+      let n = p.dirty.size + p.counts.size + p.adds.length + p.newAbove;
+      for (const g of p.groupUpdates.values()) n += g.labels.size;
+      return n;
+    };
+    const before = signature();
+    this.collectStructure(changes, p);
+    if (signature() !== before) p.srcTs = Math.min(p.srcTs, cs.srcTs);
+  }
 
+  private collectStructure(changes: ViewChanges, p: Pending): void {
+    const view = this.currentView as View;
     if (changes.rebuilt) {
       for (const [key, r] of this.routes) p.dirty.set(key, r.route);
       return;
@@ -343,6 +365,8 @@ export class ClientTracker {
       t: 'delta',
       seq: ++this.sequence,
       serverTs: now,
+      // A change with no source event (a view refresh after a deferred rebuild) is as old as this send.
+      srcTs: Number.isFinite(p.srcTs) ? Math.min(p.srcTs, now) : now,
       updates,
       groupUpdates,
       adds,

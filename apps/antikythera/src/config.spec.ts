@@ -9,7 +9,7 @@ describe('loadConfig', () => {
       dbAdapter: 'mongo',
       port: 4000,
       logLevel: 'info',
-      flushMs: 100,
+      flushMs: 50,
       writeBehindMs: 500,
       maxTrackedBlocks: 100,
       loadPreset: 'medium',

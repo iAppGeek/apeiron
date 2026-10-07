@@ -61,6 +61,7 @@ export function mergeDeltas(a: DeltaMsg, b: DeltaMsg): DeltaMsg {
     t: 'delta',
     seq: b.seq,
     serverTs: Math.min(a.serverTs, b.serverTs),
+    srcTs: Math.min(a.srcTs, b.srcTs),
     updates,
     groupUpdates: [...groupRoutes.values()],
     adds,

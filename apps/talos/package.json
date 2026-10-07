@@ -1,0 +1,27 @@
+{
+  "name": "@apeiron/talos",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@apeiron/logos": "workspace:*",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@apeiron/eslint-config": "workspace:*",
+    "@apeiron/tsconfig": "workspace:*",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.2",
+    "eslint": "^10.12.0",
+    "typescript": "~6.0.3",
+    "vitest": "^5.0.3"
+  }
+}

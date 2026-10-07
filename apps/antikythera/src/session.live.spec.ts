@@ -2,6 +2,7 @@ import { jsonCodec, type ClientMsg, type LoadPreset, type Order, type ServerMsg,
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_BACKPRESSURE } from './live/backpressure.js';
 import { QueryEngine } from './query/engine.js';
+import type { SessionMetrics } from './metrics.js';
 import { ClientSession, type FlushContext, type LiveHooks } from './session.js';
 import { applyOrders, applyUpdates } from './testing/apply.js';
 import { makeOrders, makeStore } from './testing/orders.js';
@@ -30,7 +31,7 @@ type World = {
   flush: (changes: ReturnType<typeof applyUpdates>, now: number) => void;
 };
 
-function world(overrides: Partial<LiveHooks> = {}, withLive = true): World {
+function world(overrides: Partial<LiveHooks> = {}, withLive = true, metrics?: SessionMetrics): World {
   const store = makeStore([
     { traderId: 'T1', createdAt: 1, status: 'LIVE' },
     { traderId: 'T1', createdAt: 2, status: 'LIVE' },
@@ -63,6 +64,7 @@ function world(overrides: Partial<LiveHooks> = {}, withLive = true): World {
     live: () => (withLive ? live : null),
     log: { warn: vi.fn(), error: vi.fn() },
     now: () => 1234,
+    metrics,
   });
   session.handleFrame(json({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'c1' }));
   sent.length = 0;
@@ -312,5 +314,70 @@ describe('ClientSession backpressure', () => {
 
   it('uses sane default caps', () => {
     expect(DEFAULT_BACKPRESSURE.softBytes).toBeLessThan(DEFAULT_BACKPRESSURE.hardBytes);
+  });
+});
+
+const fakeMetrics = (): SessionMetrics & { [K in keyof SessionMetrics]: ReturnType<typeof vi.fn<SessionMetrics[K]>> } => ({
+  message: vi.fn(),
+  getRows: vi.fn(),
+  delta: vi.fn(),
+  eventAgeAtSend: vi.fn(),
+  error: vi.fn(),
+  backpressure: vi.fn(),
+});
+
+describe('ClientSession metrics', () => {
+  it('counts the messages in both directions by type and codec, with byte sizes', () => {
+    const metrics = fakeMetrics();
+    const w = world({}, true, metrics);
+    expect(metrics.message).toHaveBeenCalledWith('out', 'welcome', 'json', expect.any(Number));
+    expect(metrics.message).toHaveBeenCalledWith('in', 'hello', 'json', expect.any(Number));
+    w.session.handleFrame(json({ t: 'getRows', reqId: 1, req: req({ rowGroupCols: [{ id: 'status', field: 'status' }] }) }));
+    expect(metrics.message).toHaveBeenCalledWith('in', 'getRows', 'json', json({ t: 'getRows', reqId: 1, req: req({ rowGroupCols: [{ id: 'status', field: 'status' }] }) }).length);
+    expect(metrics.message).toHaveBeenCalledWith('out', 'rows', 'json', expect.any(Number));
+    expect(metrics.getRows).toHaveBeenCalledWith({ ms: expect.any(Number), built: true, grouped: true });
+  });
+
+  it('records invalid frames, error codes and delta sizes', () => {
+    const metrics = fakeMetrics();
+    const w = world({}, true, metrics);
+    w.session.handleFrame('not json');
+    w.session.handleFrame(json({ t: 'getRows', reqId: 1 } as unknown as ClientMsg));
+    expect(metrics.message).toHaveBeenCalledWith('in', 'invalid', 'json', expect.any(Number));
+    expect(metrics.error).toHaveBeenCalledWith('BAD_FRAME');
+    expect(metrics.error).toHaveBeenCalledWith('BAD_MESSAGE');
+    getRows(w);
+    w.flush(applyUpdates(w.store, w.engine, [{ orderId: 'T0000002', marketMid: 1 }]), 2_000);
+    expect(metrics.delta).toHaveBeenCalledTimes(1);
+    expect(metrics.message).toHaveBeenCalledWith('out', 'delta', 'json', metrics.delta.mock.calls[0]?.[0]);
+  });
+
+  it('counts a held-back flush as soft conflation and a closed client as a slow consumer', () => {
+    const metrics = fakeMetrics();
+    const w = world({}, true, metrics);
+    getRows(w);
+    w.connection.bufferedAmount = 5_000;
+    w.flush(idle(w), 2_000);
+    w.flush(idle(w), 2_100);
+    expect(metrics.backpressure.mock.calls.filter(([e]) => e === 'soft_conflate')).toHaveLength(2);
+    expect(metrics.backpressure).not.toHaveBeenCalledWith('slow_consumer');
+    w.connection.bufferedAmount = 20_000;
+    w.flush(idle(w), 2_200);
+    expect(metrics.backpressure).toHaveBeenCalledWith('slow_consumer');
+  });
+
+  it('reports the age of the earliest source event when a delta is sent, and puts it in the delta', () => {
+    const metrics = fakeMetrics();
+    const w = world({}, true, metrics);
+    getRows(w);
+    const out = applyUpdates(w.store, w.engine, []);
+    const row = w.store.rowIndexOf('T0000002') as number;
+    const { changed, prev } = w.store.updateRow(row, { marketMid: 3 });
+    out.cs.noteUpdate(row, changed, prev, 1_000);
+    w.flush(out, 1_100);
+    const delta = w.sent.find((m) => m.t === 'delta');
+    expect(delta).toMatchObject({ t: 'delta', srcTs: 1_000 });
+    // The session clock reads 1234, so the event was 234 ms old when the delta went out.
+    expect(metrics.eventAgeAtSend).toHaveBeenCalledWith(0.234);
   });
 });

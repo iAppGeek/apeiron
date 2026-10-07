@@ -1,7 +1,7 @@
 import { MemoryBus, type Order, type OrderEvent, type PriceTick } from '@apeiron/logos';
 import { InMemoryOrderRepository } from '@apeiron/mnemosyne';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { QueryEngine } from '../query/engine.js';
+import { QueryEngine, type EngineOptions } from '../query/engine.js';
 import { ClientSession } from '../session.js';
 import { ColumnarStore } from '../store/columnar-store.js';
 import { makeOrders } from '../testing/orders.js';
@@ -34,14 +34,14 @@ type Rig = {
   orders: Order[];
 };
 
-async function rig(options: { bus?: MemoryBus; repo?: InMemoryOrderRepository; rows?: Partial<Order>[] } = {}): Promise<Rig> {
+async function rig(options: { bus?: MemoryBus; repo?: InMemoryOrderRepository; rows?: Partial<Order>[]; engine?: Partial<EngineOptions>; flushBudgetMs?: number } = {}): Promise<Rig> {
   const bus = options.bus ?? new MemoryBus();
   const repo = options.repo ?? new InMemoryOrderRepository();
   const orders = makeOrders(options.rows ?? [{ ...LIVE }, { ...LIVE, traderId: 'T2' }, { ...LIVE, status: 'FILLED' }]);
   if (options.repo === undefined) await repo.upsertMany(orders);
   const store = new ColumnarStore({ capacity: 16 });
   for await (const batch of repo.loadAll()) store.appendBatch(batch);
-  const engine = new QueryEngine(store, { maxViews: 16, maxBytes: 1 << 26, maxBlockRows: 10_000 });
+  const engine = new QueryEngine(store, { maxViews: 16, maxBytes: 1 << 26, maxBlockRows: 10_000, ...options.engine });
   const runtime = new LiveRuntime({
     store,
     engine,
@@ -52,6 +52,7 @@ async function rig(options: { bus?: MemoryBus; repo?: InMemoryOrderRepository; r
     writeBehindMs: 500,
     maxTrackedBlocks: 20,
     retryMs: 1_000,
+    flushBudgetMs: options.flushBudgetMs,
   });
   return { bus, repo, store, engine, runtime, orders };
 }
@@ -302,6 +303,64 @@ describe('LiveRuntime', () => {
     });
     await vi.advanceTimersByTimeAsync(100);
     expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ err: expect.any(Error) }), 'session flush failed');
+    await r.runtime.stop();
+  });
+});
+
+describe('LiveRuntime deferred view maintenance', () => {
+  it('rebuilds a view that a tick could not patch after the tick, then tells its clients to refresh every route', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig({ engine: { structuralRebuildThreshold: 0 } });
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const c = client(r.runtime, r.engine);
+    c.ask();
+    c.sent.length = 0;
+    const view = [...r.engine.views()][0];
+    expect(view?.refs).toBe(1);
+
+    // createdAt is the default sort key, so this is a structural change.
+    await r.bus.publish('orders.events', update(r.orders[0]?.orderId ?? '', { createdAt: 5 }));
+    await vi.advanceTimersByTimeAsync(110);
+    expect(view?.rebuildPending).toBe(false);
+    expect(r.engine.stats().rebuilds).toBe(1);
+    await vi.advanceTimersByTimeAsync(100);
+    const dirty = c.sent.find((m) => m.t === 'delta' && m.dirtyRoutes.length > 0);
+    expect(dirty).toMatchObject({ dirtyRoutes: [[]] });
+    await r.runtime.stop();
+  });
+
+  it('rebuilds a pending view at most once a second', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig({ engine: { structuralRebuildThreshold: 0 } });
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const c = client(r.runtime, r.engine);
+    c.ask();
+    for (let i = 0; i < 6; i++) {
+      await r.bus.publish('orders.events', update(r.orders[0]?.orderId ?? '', { createdAt: 100 + i }));
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(r.engine.stats().rebuilds).toBeLessThanOrEqual(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.engine.stats().rebuilds).toBeLessThanOrEqual(2);
+    expect(r.engine.stats().rebuilds).toBeGreaterThanOrEqual(1);
+    await r.runtime.stop();
+  });
+
+  it('with no flush budget, views carry their changes and are patched once the budget allows', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig({ flushBudgetMs: 0 });
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const c = client(r.runtime, r.engine);
+    c.ask();
+    await r.bus.publish('orders.events', update(r.orders[0]?.orderId ?? '', { createdAt: 7 }));
+    await vi.advanceTimersByTimeAsync(100);
+    const view = [...r.engine.views()][0];
+    expect(view!.appliedSeq).toBeLessThan(r.engine.tickSeq);
+    expect(r.engine.stats().lastApply.deferred).toBe(1);
+    expect(r.engine.hasDeferredWork()).toBe(true);
     await r.runtime.stop();
   });
 });

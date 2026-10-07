@@ -2,7 +2,7 @@ import { AckPolicy, DeliverPolicy } from '@nats-io/jetstream';
 import { nanos } from '@nats-io/transport-node';
 
 /** How long a delivered message may stay unacked before JetStream redelivers it. */
-export const ACK_WAIT_MS = 30_000;
+export const ACK_WAIT_MS = 60_000;
 export const MAX_ACK_PENDING = 20_000;
 
 export type DurableConsumerSpec = { stream: string; durable: string; subject: string };

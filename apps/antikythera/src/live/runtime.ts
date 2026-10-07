@@ -14,6 +14,7 @@ import {
   type LoadPreset,
 } from '@apeiron/logos';
 import type { OrderRepository } from '@apeiron/mnemosyne';
+import type { RuntimeMetrics } from '../metrics.js';
 import type { QueryEngine } from '../query/engine.js';
 import type { View, ViewChanges } from '../query/view.js';
 import type { LiveHooks, ClientSession, CommandRequest } from '../session.js';
@@ -50,6 +51,9 @@ export type LiveRuntimeOptions = {
   commandTimeoutMs?: number;
   /** Wait between attempts to attach to the streams (hermes creates them, so they may not exist yet). */
   retryMs?: number;
+  metrics?: RuntimeMetrics;
+  /** Most time one flush may spend patching views before the rest wait for the next tick (default 40 ms). */
+  flushBudgetMs?: number;
 };
 
 export type FlushStats = {
@@ -86,6 +90,7 @@ export class LiveRuntime implements LiveHooks {
   private timers: ReturnType<typeof setInterval>[] = [];
   private flushing = false;
   private refreshing = false;
+  private rebuilding = false;
   private attachTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private attached = false;
@@ -93,7 +98,7 @@ export class LiveRuntime implements LiveHooks {
 
   constructor(private readonly options: LiveRuntimeOptions) {
     this.live = new LiveStore(options.store, options.log);
-    this.writeBehind = new WriteBehind(this.live, options.repo, options.log, options.writeBehindMs);
+    this.writeBehind = new WriteBehind(this.live, options.repo, options.log, options.writeBehindMs, options.metrics);
     this.commands = new CommandCorrelator(options.commandTimeoutMs);
     this.maxTrackedBlocks = options.maxTrackedBlocks;
     this.backpressure = options.backpressure ?? DEFAULT_BACKPRESSURE;
@@ -107,6 +112,13 @@ export class LiveRuntime implements LiveHooks {
 
   get clientCount(): number {
     return this.sessions.size;
+  }
+
+  /** Clients that have said hello, by negotiated codec. */
+  clientsByCodec(): { json: number; msgpack: number } {
+    const counts = { json: 0, msgpack: 0 };
+    for (const s of this.sessions) counts[s.codecName === 'msgpack' ? 'msgpack' : 'json']++;
+    return counts;
   }
 
   /** Builds the live indexes from the loaded store, starts the loops, and attaches to the bus (retrying until the streams exist). */
@@ -167,7 +179,13 @@ export class LiveRuntime implements LiveHooks {
       return;
     }
     const commandId = makeCommandId(request.clientId, request.reqId);
-    if (!this.commands.register(commandId, request.owner, settle)) {
+    const { metrics } = this.options;
+    const started = performance.now();
+    const timed = (outcome: CommandOutcome): void => {
+      metrics?.command(outcome.ok ? 'ok' : outcome.code, (performance.now() - started) / 1000);
+      settle(outcome);
+    };
+    if (!this.commands.register(commandId, request.owner, timed)) {
       settle({ ok: false, code: 'BAD_REQUEST', message: `Command ${commandId} is already in progress` });
       return;
     }
@@ -178,6 +196,7 @@ export class LiveRuntime implements LiveHooks {
       ts: Date.now(),
       commandId,
     };
+    metrics?.ingest('command');
     this.options.bus.publish(SUBJECTS.ordersCommands, payload).catch((error: unknown) => {
       this.options.log.error({ err: error, commandId }, 'failed to publish order command');
       this.commands.resolve(commandId, { ok: false, code: 'INTERNAL', message: 'Could not send the command' });
@@ -210,7 +229,14 @@ export class LiveRuntime implements LiveHooks {
     try {
       const now = Date.now();
       const cs = this.live.flush(now);
-      const changes: ViewChanges[] = cs.size > 0 ? this.options.engine.applyChanges(cs) : [];
+      const age = this.live.lastFlushAgeMs;
+      if (age !== null) this.options.metrics?.eventAge(age / 1000);
+      const engine = this.options.engine;
+      let changes: ViewChanges[] = [];
+      if (cs.size > 0 || engine.hasDeferredWork()) {
+        changes = engine.applyChanges(cs, this.options.flushBudgetMs ?? 40);
+        this.options.metrics?.views(engine.stats().lastApply);
+      }
       const byView = new Map<View, ViewChanges>(changes.map((c): [View, ViewChanges] => [c.view, c]));
       for (const session of [...this.sessions]) {
         try {
@@ -224,6 +250,7 @@ export class LiveRuntime implements LiveHooks {
       this.appliedCommands = [];
       for (const commandId of applied) this.commands.resolve(commandId, { ok: true });
       const ms = performance.now() - t0;
+      this.options.metrics?.flush(ms / 1000);
       const s = this.flushStats;
       s.flushes++;
       s.lastMs = ms;
@@ -232,11 +259,42 @@ export class LiveRuntime implements LiveHooks {
       s.lastChanges = cs.size;
       s.totalChanges += cs.size;
       s.lastViews = changes.length;
+      this.scheduleRebuilds();
     } catch (error) {
       this.options.log.error({ err: error }, 'flush failed');
     } finally {
       this.flushing = false;
     }
+  }
+
+  // ---- deferred view rebuilds
+
+  /**
+   * Views a tick could not patch (too many structural changes) are rebuilt after the tick's deltas have gone out,
+   * each at most once a second and one per event-loop turn, so the loop stays responsive. The clients that track a
+   * rebuilt view are told to refresh every route they hold.
+   */
+  private scheduleRebuilds(): void {
+    if (this.rebuilding || this.stopped || this.options.engine.takeRebuild() === null) return;
+    this.rebuilding = true;
+    void (async (): Promise<void> => {
+      try {
+        for (;;) {
+          await yieldToLoop();
+          if (this.stopped) return;
+          const view = this.options.engine.takeRebuild();
+          if (view === null) return;
+          const t0 = performance.now();
+          this.options.engine.rebuildView(view);
+          this.options.metrics?.rebuild((performance.now() - t0) / 1000);
+          for (const session of this.sessions) session.onViewRebuilt(view);
+        }
+      } catch (error) {
+        this.options.log.error({ err: error }, 'deferred view rebuild failed');
+      } finally {
+        this.rebuilding = false;
+      }
+    })();
   }
 
   // ---- string ranks
@@ -274,7 +332,9 @@ export class LiveRuntime implements LiveHooks {
     try {
       const prices = await bus.subscribe(SUBJECTS.pricesWildcard, (payload) => {
         const parsed = parsePriceTick(payload);
-        if (parsed.ok) this.live.enqueueTick(parsed.value);
+        if (!parsed.ok) return;
+        this.live.enqueueTick(parsed.value);
+        this.options.metrics?.ingest('price');
       });
       this.subscriptions.push(prices);
       const state = await bus.subscribe(SUBJECTS.controlState, (payload) => {
@@ -292,6 +352,7 @@ export class LiveRuntime implements LiveHooks {
             return;
           }
           const event = parsed.value;
+          this.options.metrics?.ingest('order');
           this.live.enqueueEvent(event, ack);
           this.correlate(event);
         },

@@ -1,10 +1,14 @@
 import type { OrderRepository } from '@apeiron/mnemosyne';
+import type { RuntimeMetrics } from '../metrics.js';
 import type { LiveStore } from './live-store.js';
 
 export type WriteBehindLogger = {
   warn(obj: Record<string, unknown>, msg: string): void;
   error(obj: Record<string, unknown>, msg: string): void;
 };
+
+/** Orders per Mongo upsert call within one write-behind pass. */
+export const WRITE_CHUNK = 1_000;
 
 export type WriteBehindStats = { passes: number; ordersWritten: number; failures: number; lastMs: number };
 
@@ -25,6 +29,7 @@ export class WriteBehind {
     private readonly repo: OrderRepository,
     private readonly log: WriteBehindLogger,
     private readonly intervalMs: number,
+    private readonly metrics?: Pick<RuntimeMetrics, 'writeBehind'>,
   ) {}
 
   start(): void {
@@ -61,9 +66,14 @@ export class WriteBehind {
     }
     const start = performance.now();
     try {
-      await this.repo.upsertMany(batch.orders);
+      // In chunks, yielding between them, so persisting a large backlog never holds the event loop.
+      for (let i = 0; i < batch.orders.length; i += WRITE_CHUNK) {
+        await this.repo.upsertMany(batch.orders.slice(i, i + WRITE_CHUNK));
+        if (i + WRITE_CHUNK < batch.orders.length) await new Promise<void>((resolve) => setImmediate(resolve));
+      }
     } catch (error) {
       this.stats.failures++;
+      this.metrics?.writeBehind({ batchSize: batch.orders.length, seconds: (performance.now() - start) / 1000, ok: false });
       this.log.error({ err: error, orders: batch.orders.length }, 'write-behind failed, will retry');
       this.live.restoreWriteBatch(batch);
       return;
@@ -71,6 +81,7 @@ export class WriteBehind {
     this.stats.passes++;
     this.stats.ordersWritten += batch.orders.length;
     this.stats.lastMs = performance.now() - start;
+    this.metrics?.writeBehind({ batchSize: batch.orders.length, seconds: this.stats.lastMs / 1000, ok: true });
     batch.ack?.();
   }
 }

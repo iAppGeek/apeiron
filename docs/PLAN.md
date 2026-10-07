@@ -189,7 +189,7 @@ Atlas M0 (512MB storage) can't hold 1M × 50 columns, and DocumentDB isn't fully
 **POC targets:**
 - getRows p95 < 50ms
 - sort/filter/group change on 1M rows < 300ms
-- tick-to-screen p95 < 150ms
+- tick-to-screen p95 < 150ms, **end to end (CP-4 ruling)**: from the source event's `ts` (hermes price tick or order event) to the client receiving the delta, measured with `delta.srcTs`. The browser render (about 5–10ms) is reported separately. Gated with 50 clients over the whole run, including the stress window.
 - event-loop lag p99 < 50ms
 - server RSS < 2GB with 50 clients
 - 60fps scrolling
@@ -284,7 +284,9 @@ Atlas M0 (512MB storage) can't hold 1M × 50 columns, and DocumentDB isn't fully
 | `DB_ADAPTER` | `mongo` |
 | `SEED_ROWS` | `1000000` |
 | `SEED` | `42` |
-| `FLUSH_MS` | `100` |
+| `FLUSH_MS` | `50` (CP-4: was 100. At 50ms, event age at flush p95 fell from 192ms to 78ms under 50 clients plus stress, for about 4 points more median CPU) |
+| `FLUSH_BUDGET_MS` | `40` (phase 7, the time budget per flush) |
+| `MONGO_CACHE_GB` | `1` (WiredTiger cache cap, so a shared 6GB Docker VM doesn't swap; raise it on the 16GB remote box) |
 | `WRITE_BEHIND_MS` | `500` |
 | `MAX_TRACKED_BLOCKS` | `100` |
 | `LOAD_PRESET` | `medium` (or `stress`) |
@@ -398,6 +400,7 @@ type ServerMsg =
       updates: { route: string[]; rows: (Partial<Order> & { orderId: string })[] }[];
       groupUpdates: { route: string[]; rows: Row[] }[];
       adds: { route: string[]; addIndex: number; rows: Order[] }[];
+      srcTs: number;             // CP-4: earliest source-event ts (hermes) folded into this tick, for true end-to-end latency
       dirtyRoutes: string[][];
       rowCounts: { route: string[]; rowCount: number }[];   // CP-1: was a single rowCount; per route, only tracked routes whose count changed
       newAbove: number }                                      // root route only

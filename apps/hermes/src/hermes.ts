@@ -14,6 +14,7 @@ import {
   type OrderEvent,
 } from '@apeiron/logos';
 import type { Logger } from './log.js';
+import type { HermesMetrics } from './metrics.js';
 import { PriceFeed, startingMids } from './price-feed.js';
 import { TICKS_PER_SECOND } from './presets.js';
 import { Simulator, nextSeqFrom } from './simulator.js';
@@ -29,6 +30,7 @@ export type HermesOptions = {
   seed: number;
   stepMs: number;
   now?: () => number;
+  metrics?: HermesMetrics;
 };
 
 export type HermesStatus = {
@@ -80,12 +82,18 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
     return bus
       .publish(subject, payload)
       .then(() => {
-        if (kind === 'event') eventsPublished++;
-        else ticksPublished++;
+        if (kind === 'event') {
+          eventsPublished++;
+          options.metrics?.event((payload as OrderEvent).type);
+        } else {
+          ticksPublished++;
+          options.metrics?.tick();
+        }
         return true;
       })
       .catch((error: unknown) => {
         publishErrors++;
+        options.metrics?.publishError();
         if (publishErrors === 1 || publishErrors % 1000 === 0) log.warn({ err: error, publishErrors }, 'publish failed');
         return false;
       })
@@ -160,6 +168,7 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
       lastEventPublish = null;
       simulator.command(command, t);
       commandsHandled++;
+      options.metrics?.commandHandled();
       // Acknowledge only once the answering event is on the stream; otherwise the command is redelivered.
       void (lastEventPublish ?? Promise.resolve(true)).then((published) => {
         if (published) ack();
@@ -187,10 +196,7 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
     simulator.step(t, dt);
   }, options.stepMs);
 
-  return {
-    simulator,
-    feed,
-    status: (): HermesStatus => ({
+  const status = (): HermesStatus => ({
       status: stopped ? 'stopped' : 'ok',
       preset: simulator.preset,
       live: simulator.liveCount,
@@ -200,7 +206,16 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
       ticksPublished,
       publishErrors,
       inflight,
-    }),
+    });
+  options.metrics?.bind(() => {
+    const s = status();
+    return { preset: s.preset, live: s.live, pending: s.pending, inflight: s.inflight };
+  });
+
+  return {
+    simulator,
+    feed,
+    status,
     stop: async (): Promise<void> => {
       stopped = true;
       clearInterval(timer);

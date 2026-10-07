@@ -14,7 +14,7 @@ const req = (r: Partial<SsrmRequest> = {}): SsrmRequest => ({
   filterModel: null,
   ...r,
 });
-const opts = { maxViews: 8, maxBytes: 10_000_000, maxBlockRows: 1_000 };
+const opts = { maxViews: 8, maxBytes: 10_000_000, maxBlockRows: 1_000, patchUnsubscribed: true, deferRebuilds: false };
 
 function rowsOk(engine: QueryEngine, trader: string, r: SsrmRequest): RowsResult {
   const res = engine.getRows(trader, r);

@@ -212,3 +212,52 @@ describe('LiveStore write batches', () => {
     expect(done).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('LiveStore.lastFlushAgeMs', () => {
+  it('is the age of the oldest queued event or tick, and null when nothing was applied', () => {
+    const { live, store } = setup([{ ...LIVE_EURUSD }]);
+    const id = store.orderAt(0).orderId;
+    expect(live.lastFlushAgeMs).toBeNull();
+    live.flush(1_000);
+    expect(live.lastFlushAgeMs).toBeNull();
+    live.enqueueEvent({ type: 'UPDATE', order: { orderId: id, numFills: 1 }, ts: 900 }, ack);
+    live.enqueueTick({ pair: 'EURUSD', bid: 1.08, ask: 1.0802, ts: 950 });
+    live.flush(1_000);
+    expect(live.lastFlushAgeMs).toBe(100);
+    live.enqueueTick({ pair: 'EURUSD', bid: 1.08, ask: 1.0802, ts: 2_000 });
+    live.flush(1_500);
+    expect(live.lastFlushAgeMs).toBe(0);
+  });
+});
+
+describe('LiveStore source timestamps', () => {
+  it('stamps each changed row with the source event or price tick behind it', () => {
+    const { live, store } = setup([{ ...LIVE_EURUSD }, { ...LIVE_EURUSD, orderQty: 5 }]);
+    const [first, second] = [store.orderAt(0).orderId, store.orderAt(1).orderId];
+    live.enqueueEvent({ type: 'UPDATE', order: { orderId: first, numFills: 1 }, ts: 900 }, ack);
+    live.enqueueTick({ pair: 'EURUSD', bid: 1.09, ask: 1.0902, ts: 950 });
+    const cs = live.flush(1_000);
+    // The first row was touched by the event (900) and the tick (950); the second only by the tick.
+    expect(cs.entries.get(0)?.ts).toBe(900);
+    expect(cs.entries.get(1)?.ts).toBe(950);
+    expect(cs.srcTs).toBe(900);
+    expect(second).toBeDefined();
+  });
+
+  it('does not blame an event-driven repricing on an older price tick', () => {
+    const { live, store } = setup([{ ...LIVE_EURUSD }]);
+    live.enqueueTick({ pair: 'EURUSD', bid: 1.09, ask: 1.0902, ts: 100 });
+    live.flush(200);
+    live.enqueueEvent({ type: 'UPDATE', order: { orderId: store.orderAt(0).orderId, filledQty: 900_000, remainingQty: 100_000 }, ts: 950 }, ack);
+    const cs = live.flush(1_000);
+    expect(cs.entries.get(0)?.ts).toBe(950);
+  });
+
+  it('stamps appended rows with their event', () => {
+    const { live, store } = setup([{ ...LIVE_EURUSD }]);
+    const fresh = makeOrders([{ ...LIVE_EURUSD, createdAt: 99_999 }])[0] as Order;
+    live.enqueueEvent({ type: 'NEW', order: { ...fresh, orderId: 'NEW-1' }, ts: 777 }, ack);
+    const cs = live.flush(1_000);
+    expect(cs.entries.get(store.size - 1)).toMatchObject({ isNew: true, ts: 777 });
+  });
+});

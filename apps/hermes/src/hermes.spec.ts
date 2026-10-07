@@ -2,6 +2,7 @@ import { MemoryBus, makeCommandId, parseLoadState, parseOrderEvent, parsePriceTi
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startHermes, type Hermes } from './hermes.js';
 import { createLogger } from './log.js';
+import { HermesMetrics } from './metrics.js';
 import { SEED_NOW, currentOrders } from './testing.js';
 
 const log = createLogger('error', () => undefined);
@@ -13,7 +14,7 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function start(bus: MemoryBus, overrides: { maxOrderId?: string | null; seed?: number } = {}): Promise<Hermes> {
+async function start(bus: MemoryBus, overrides: { maxOrderId?: string | null; seed?: number; metrics?: HermesMetrics } = {}): Promise<Hermes> {
   const hermes = await startHermes({
     bus,
     log,
@@ -22,6 +23,7 @@ async function start(bus: MemoryBus, overrides: { maxOrderId?: string | null; se
     maxOrderId: overrides.maxOrderId ?? 'ALG00100000',
     seed: overrides.seed ?? 1,
     stepMs: 100,
+    metrics: overrides.metrics,
   });
   running = hermes;
   return hermes;
@@ -51,6 +53,19 @@ describe('startHermes', () => {
       expect(m.subject).toBe('orders.events');
       expect(parseOrderEvent(m.payload).ok).toBe(true);
     }
+  });
+
+  it('reports published events and ticks, LIVE count and the preset to its metrics', async () => {
+    vi.useFakeTimers({ now: SEED_NOW + 2 * 86_400_000 });
+    const metrics = new HermesMetrics();
+    const hermes = await start(new MemoryBus(), { metrics });
+    await vi.advanceTimersByTimeAsync(3_000);
+    const text = await metrics.render();
+    const value = (series: string): number => Number(text.split('\n').find((l) => l.startsWith(`${series} `))?.split(' ')[1]);
+    expect(value('hermes_price_ticks_total')).toBeGreaterThanOrEqual(PAIRS.length * 8);
+    expect(value('hermes_events_published_total{type="UPDATE"}')).toBeGreaterThan(100);
+    expect(value('hermes_live_orders')).toBe(hermes.status().live);
+    expect(value('hermes_preset{preset="medium"}')).toBe(1);
   });
 
   it('continues order ids above maxOrderId', async () => {

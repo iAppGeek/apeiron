@@ -16,7 +16,7 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   /** Used from phase 5; optional until then. */
   NATS_URL: z.url({ protocol: /^nats$/ }).optional(),
-  FLUSH_MS: posInt('100'),
+  FLUSH_MS: posInt('50'),
   WRITE_BEHIND_MS: posInt('500'),
   MAX_TRACKED_BLOCKS: posInt('100'),
   LOAD_PRESET: z.enum(['medium', 'stress']).default('medium'),
@@ -28,6 +28,8 @@ const envSchema = z.object({
   LOAD_BATCH_SIZE: posInt('200'),
   /** Largest `endRow - startRow` a client may request. */
   MAX_BLOCK_ROWS: posInt('5000'),
+  /** Most ms one flush spends patching views; views not reached carry their changes into the next tick. */
+  FLUSH_BUDGET_MS: posInt('40'),
 });
 
 export type AntikytheraConfig = {
@@ -47,6 +49,7 @@ export type AntikytheraConfig = {
   viewCacheMaxBytes: number;
   maxBlockRows: number;
   loadBatchSize: number;
+  flushBudgetMs: number;
 };
 
 export function loadConfig(env: Record<string, string | undefined>): AntikytheraConfig {
@@ -73,5 +76,6 @@ export function loadConfig(env: Record<string, string | undefined>): Antikythera
     viewCacheMaxBytes: e.VIEW_CACHE_MAX_MB * 1024 * 1024,
     maxBlockRows: e.MAX_BLOCK_ROWS,
     loadBatchSize: e.LOAD_BATCH_SIZE,
+    flushBudgetMs: e.FLUSH_BUDGET_MS,
   };
 }

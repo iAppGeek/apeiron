@@ -200,7 +200,7 @@ describe('createAppController', () => {
 
     const handler = vi.fn();
     controller.setDeltaHandler(handler);
-    const delta: ServerMsg = { t: 'delta', seq: 1, serverTs: 1, updates: [], groupUpdates: [], adds: [], dirtyRoutes: [], rowCounts: [], newAbove: 0 };
+    const delta: ServerMsg = { t: 'delta', seq: 1, serverTs: 1, srcTs: 1, updates: [], groupUpdates: [], adds: [], dirtyRoutes: [], rowCounts: [], newAbove: 0 };
     emitMessage(client, delta);
     expect(handler).toHaveBeenCalledWith(delta);
     emitMessage(client, { t: 'ack', reqId: 1 });
@@ -228,10 +228,12 @@ describe('createAppController', () => {
   });
 
   describe('live metrics', () => {
-    const delta = (serverTs: number): ServerMsg => ({
+    /** `srcTs` is when the source event happened; the delta was stamped (and sent) 1 ms later. */
+    const delta = (srcTs: number): ServerMsg => ({
       t: 'delta',
       seq: 1,
-      serverTs,
+      serverTs: srcTs + 1,
+      srcTs,
       updates: [],
       groupUpdates: [],
       adds: [],
@@ -253,6 +255,18 @@ describe('createAppController', () => {
       clock.t += 100;
       client.handlers.stats?.({ msgsIn: 5, msgsOut: 1, deltasIn: 5, rttMs: 1, clockOffsetMs: 0 });
       expect(useAppStore.getState()).toMatchObject({ latencyP50Ms: 30, latencyP95Ms: 100, deltasPerSec: 5 });
+    });
+
+    it('measures from the source event (srcTs), not from when the server stamped the delta', () => {
+      const client = makeClient();
+      const clock = { t: 10_000 };
+      const controller = createAppController(client, { now: () => clock.t });
+      controller.start('ws://x/ws');
+      controller.setDeltaHandler(() => undefined);
+      // Sourced 90 ms ago, but the flush only stamped it 10 ms ago: the trader waited 90 ms.
+      emitMessage(client, { ...(delta(clock.t - 90) as Extract<ServerMsg, { t: 'delta' }>), serverTs: clock.t - 10 });
+      client.handlers.stats?.({ msgsIn: 0, msgsOut: 0, deltasIn: 1, rttMs: 1, clockOffsetMs: 0 });
+      expect(useAppStore.getState().latencyP50Ms).toBe(90);
     });
 
     it('corrects the latency for the clock offset the transport estimated', () => {

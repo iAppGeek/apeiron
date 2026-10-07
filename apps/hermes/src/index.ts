@@ -4,15 +4,18 @@ import { loadConfig } from './config.js';
 import { closeServer, startHealthServer } from './health.js';
 import { startHermes, type Hermes } from './hermes.js';
 import { createLogger } from './log.js';
+import { HermesMetrics } from './metrics.js';
 
 const config = loadConfig(process.env);
 const log = createLogger(config.logLevel);
 
+const metrics = new HermesMetrics();
 let hermes: Hermes | null = null;
 const health = await startHealthServer(
   config.healthPort,
   () => hermes?.status() ?? { status: 'starting' },
   () => hermes !== null,
+  metrics,
 );
 
 const repo = await MongoOrderRepository.connect({ url: config.mongoUrl, db: config.mongoDb });
@@ -33,6 +36,7 @@ hermes = await startHermes({
   maxOrderId,
   seed: config.seed ?? Date.now() % 2 ** 31,
   stepMs: config.stepMs,
+  metrics,
 });
 log.info({ preset: config.loadPreset }, 'hermes started');
 
