@@ -1,0 +1,12 @@
+{
+  "extends": "@apeiron/tsconfig/node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM"],
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["tests", "support", "playwright.config.ts"]
+}

@@ -1,0 +1,33 @@
+#!/bin/bash
+# First-boot setup for the Apeiron test box (Amazon Linux 2023, arm64). The SSM agent is preinstalled.
+set -euxo pipefail
+
+dnf install -y docker git
+systemctl enable --now docker
+
+# Compose v2 plugin (not in the AL2023 repositories): pinned release, checksum verified.
+COMPOSE_VERSION=v5.6.0
+plugin_dir=/usr/local/lib/docker/cli-plugins
+mkdir -p "$plugin_dir"
+base="https://github.com/docker/compose/releases/download/$COMPOSE_VERSION"
+curl -fsSL -o "$plugin_dir/docker-compose" "$base/docker-compose-linux-aarch64"
+expected="$(curl -fsSL "$base/docker-compose-linux-aarch64.sha256" | cut -d' ' -f1)"
+echo "$expected  $plugin_dir/docker-compose" | sha256sum -c -
+chmod +x "$plugin_dir/docker-compose"
+
+# Compose files come from git; the images come from the registry.
+git clone --quiet "${git_url}" /opt/apeiron
+git -C /opt/apeiron checkout --quiet "${git_ref}"
+
+# Grafana's admin password is generated here and never leaves the box (read it over SSM when needed).
+umask 077
+cat > /opt/apeiron/.env.remote <<ENV
+REGISTRY=${registry}
+TAG=${image_tag}
+AWS_REGION=${region}
+MONGO_CACHE_GB=${mongo_cache_gb}
+WEB_BIND=0.0.0.0
+GRAFANA_BIND=${grafana_bind}
+GRAFANA_ADMIN_PASSWORD=$(openssl rand -hex 12)
+ENV
+touch /opt/apeiron/.bootstrapped

@@ -2,7 +2,7 @@
 export type AnchorApi = {
   getFirstDisplayedRowIndex(): number;
   getVerticalPixelRange(): { top: number; bottom: number };
-  getDisplayedRowAtIndex(index: number): { rowHeight?: number | null } | undefined;
+  getDisplayedRowAtIndex(index: number): { rowHeight?: number | null; id?: string | undefined } | undefined;
   ensureIndexVisible(index: number, position?: 'top' | 'bottom' | 'middle' | null): void;
 };
 

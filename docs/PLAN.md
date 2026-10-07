@@ -598,3 +598,90 @@ docker compose --profile core --profile monitoring up --build   # full container
 - New orders appear on top, and the badge works when scrolled down.
 - Cancel on a LIVE order changes its status.
 - Grafana shows CPU, memory and event-loop lag within targets during the 50-client load test.
+
+---
+
+## Status & handoff (as of 2026-10-07): read this first if you are picking the work up
+
+### Progress
+| Phase | State | PR / tag | Review |
+|---|---|---|---|
+| 1 Scaffold, 2 Data | ✅ merged | #1, #2 / `cp-1` | `docs/checkpoints/CP-1-review.md` |
+| 3 Engine | ✅ merged | #3 / `cp-2` | `CP-2-review.md` |
+| 4 Grid, 5a Live server, 5b Live client | ✅ merged | #4, #5, #6 / `cp-3` | `PHASE-4-review.md`, `PHASE-5A-review.md`, `CP-3-review.md` |
+| 6 Actions | ✅ merged | #7 | `PHASE-6-review.md` |
+| 7 Observability + load test | ✅ merged | #8 / `cp-4` | `CP-4-diagnosis.md`, `CP-4-review.md` |
+| 8 Ship | 🟡 about 95%: CP-5 fixes F1–F8 in progress, then merge | #9 / `cp-5` | `CP-5-review.md` |
+| 9 Resilience suite (Appendix G) | ⏳ next, not started | (none yet) | CP-6 |
+| 10 Demo pack (Opus) | ⏳ after CP-6 | (none yet) | (none) |
+
+**Working process:**
+- **Sonnet agents** implement one phase per branch and open a PR without merging it. At a checkpoint they tag `cp-N` and write `docs/checkpoints/CP-N.md`.
+- **Opus reviews:** clean-worktree checks, independent verification, `CP-N-review.md`. Contract changes go into this plan.
+- **Sonnet** then applies the fixes and squash-merges.
+- **Rules for everyone:**
+  - Always use the latest stable versions, and record any exceptions.
+  - Follow the user's CLAUDE.md: TypeScript strict, no `any`, explicit return types, `.spec.ts` beside the source, `vi.*` mocks only, no TODO comments.
+  - The commit and PR attribution lines are required.
+
+### Decisions log (binding; detail in the review files and the appendices above)
+- **Architecture:** server-side SSRM (grouping needed), AG Grid Enterprise 36 with the watermark accepted, Fastify + `ws` with a pluggable codec, NATS JetStream bus, Mongo-only adapter (Oracle/KDB interface and docs only), pnpm + Turborepo, everything in containers.
+- **Names:** Apeiron, with codename packages: pharos, antikythera, hermes, gaia, talos, logos, mnemosyne, plus `iris` (NATS adapter, added in phase 5a).
+- **CP-1:**
+  - versions: TypeScript 6.0.x (7 blocked by typescript-eslint), `mongo:9.0`, `nats:2.15-alpine`;
+  - null semantics: NaN in typed arrays, nulls sort smallest, only blank/notBlank match null;
+  - price decimals follow the pair (`pairDecimals`);
+  - per-route `rowCounts`, and the `control` message;
+  - hermes starts its price walk from the seeded mids and reconciles stale orders; `SEED_RESET`.
+- **CP-2:**
+  - date filters are UTC-day granular; `inRange` is inclusive;
+  - `count` = `childCount`;
+  - full error-code list;
+  - the phase 5 view-maintenance requirements: no global invalidation, string ranks kept off the hot path, ascending IDs.
+- **Phase 5:**
+  - events carry absolute values and are idempotent;
+  - the server acks after persisting;
+  - delta semantics: adds before updates; one view tracked per client;
+  - hermes paces fills per order.
+- **CP-3:** frames are self-describing (text = JSON, binary = msgpack), which fixed a codec-switch bug; the load preset is shown via `control.state`.
+- **CP-4:**
+  - fixed the flush-loop death spiral: untracked views go stale, rebuilds are deferred, the flush has a 40ms budget, and skipped ticks share one log;
+  - **tick-to-screen is end to end**, measured via `delta.srcTs`;
+  - `FLUSH_MS` is 50;
+  - `MONGO_CACHE_GB` is 1 on 6GB hosts;
+  - the connect-storm cold burst is reported separately.
+- **CP-5 / user (2026-10-07): AWS work paused** once the CP-5 fixes are done. Nothing is deployed. Terraform and the `remote-*` scripts are validated but **untested on real AWS**. Before a first deploy:
+  - choose GHCR (public packages) or ECR;
+  - protect the GitHub `release` environment;
+  - run `scripts/remote-up.sh` yourself (it costs about $0.16/hr).
+- **User additions:** the resilience suite (phase 9, Appendix G), then the demo pack (phase 10): E2E run, Chrome DevTools UI validation and screenshots, user guide, technical overview, benchmarks, and a presentation for the dev team.
+
+### Headline results so far (CP-4 final: 50 clients × 300s, stress 120–180s)
+| Measure | Result |
+|---|---|
+| Tick-to-screen p95 | 65ms (json) / 62.5ms (msgpack), end to end |
+| getRows warm p95 | 18ms |
+| View change p95 | 38ms |
+| Event-loop lag p99 | 19–23ms |
+| RSS | about 1.1GB |
+| Command ack p95 | 66ms |
+| msgpack vs json | about 11% fewer bytes, same latency |
+
+The browser holds 103–120 FPS, the anchor holds deep in the grid, and E2E passes 18/18.
+
+### Environment state
+- **Local stack:** `docker compose --profile core --profile monitoring up -d`.
+  - Ports: web on :8080, API on :4000, Grafana on :3001, Prometheus on :9090.
+  - `scripts/loadtest-reset.sh` re-seeds and resets JetStream.
+  - Docker VM: about 6GB.
+- **Repo:** `iAppGeek/apeiron` (public). The git remote is HTTPS with a repo-local `gh` credential helper.
+
+### Open items / next steps
+1. Phase 8: apply CP-5 F1–F8, get CI green, squash-merge PR #9.
+2. Phase 9: build Appendix G. Fix the client and server heartbeat (half-open detection) first. Then CP-6.
+3. Phase 10 (Opus): local E2E, the DevTools pass and screenshots, `docs/USER-GUIDE.md`, `docs/TESTING.md` (including the resilience scenarios), and the presentation deck.
+4. Known limitations to carry into the docs:
+   - non-default-sort anchoring can drift about 1 row on the first refresh after scrolling;
+   - a connect storm of 50 cold views queues for about 0.2–0.4s;
+   - rare single event-loop stalls of 200–350ms show in the max figure;
+   - AWS is untested.

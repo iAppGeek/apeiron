@@ -49,6 +49,7 @@ export function DevMenu({ codec, preset, presetPending, disabled, onCodecChange,
       <button
         type="button"
         className="button"
+        data-testid="dev-menu-button"
         aria-haspopup="true"
         aria-expanded={open}
         onClick={() => {

@@ -63,6 +63,8 @@ export type DeltaApplier = {
 
 export const REFRESH_INTERVAL_MS = 1000;
 export const SWEEP_INTERVAL_MS = 100;
+/** How far past the rows counted since the last refresh an order may move and still be followed. */
+export const ANCHOR_SLACK_ROWS = 25;
 
 /**
  * Applies live `delta` messages to the SSRM grid (Appendix C, "Delta semantics"):
@@ -80,8 +82,21 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
   const timers = options.timers ?? realTimers;
   const sweepIntervalMs = options.sweepIntervalMs ?? SWEEP_INTERVAL_MS;
 
+  /** The order at the top of the viewport just before the root route refreshes. */
+  let snapshot: { rowId: string; topRow: number } | null = null;
+  /** The server's latest root row count, and the count the grid's rows last matched (after the previous refresh). */
+  let rootCount: number | null = null;
+  let settledCount: number | null = null;
+
+  const takeSnapshot = (): void => {
+    const topRow = readTopRow(api, options.topRowProbe);
+    const rowId = topRow > 0 ? api.getDisplayedRowAtIndex(topRow)?.id : undefined;
+    snapshot = typeof rowId === 'string' ? { rowId, topRow } : null;
+  };
+
   const refresh = createRouteDebouncer(
     (route) => {
+      if (route.length === 0) takeSnapshot();
       api.refreshServerSide({ route, purge: false });
     },
     options.refreshIntervalMs ?? REFRESH_INTERVAL_MS,
@@ -161,6 +176,31 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
     }
   };
 
+  /**
+   * After a background refresh, finds where the order the user was reading has gone and scrolls to it. The server's
+   * `newAbove` counts rows above the start of the last root block it was asked for, and a refresh ends by
+   * re-requesting block 0, so it undercounts there; the order's own new index is exact. A move much larger than the
+   * rows that arrived since the previous refresh (plus a little slack for deltas still in flight) is a reordering,
+   * for example a sort on a ticking column, and says nothing about where the user was, so it is left alone.
+   * Returns false when the order is not loaded or moved too far, so the caller falls back to `newAbove`.
+   */
+  const anchorOnOrder = (before: { rowId: string; topRow: number }, settled: number | null): boolean => {
+    const rowIndex = api.getRowNode(before.rowId)?.rowIndex;
+    if (typeof rowIndex !== 'number') return false;
+    // Before the first count is known, the server's own newAbove is the best figure there is.
+    const grew = rootCount !== null && settled !== null ? Math.max(0, rootCount - settled) : pendingShift;
+    const moved = rowIndex - before.topRow;
+    // The order reordered far more than the arrivals explain: it says nothing about where the user was, so the
+    // server's newAbove (kept in pendingShift) decides instead.
+    if (Math.abs(moved) > grew + ANCHOR_SLACK_ROWS) return false;
+    const counted = pendingShift;
+    pendingShift = 0;
+    if (moved === 0) return true;
+    api.ensureIndexVisible(rowIndex, 'top');
+    if (moved > counted) options.onNewAbove?.(moved - counted);
+    return true;
+  };
+
   return {
     apply(delta): ApplyStats {
       const stats: ApplyStats = { rowsUpdated: 0, rowsAdded: 0, skipped: 0, rootRowCount: null };
@@ -176,6 +216,7 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
         if (route.length === 0) {
           if (options.canSetRowCount?.() ?? true) api.setRowCount(rowCount);
           stats.rootRowCount = rowCount;
+          rootCount = rowCount;
         }
       }
 
@@ -195,7 +236,13 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
     },
 
     onStoreRefreshed(route): void {
-      if (pendingShift === 0 || (route !== undefined && route.length > 0)) return;
+      if (route !== undefined && route.length > 0) return;
+      const before = snapshot;
+      snapshot = null;
+      const settled = settledCount;
+      settledCount = rootCount;
+      if (before !== null && anchorOnOrder(before, settled)) return;
+      if (pendingShift === 0) return;
       const shift = pendingShift;
       pendingShift = 0;
       const top = readTopRow(api, options.topRowProbe);
@@ -206,6 +253,9 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       ticks.clear();
       refresh.reset();
       pendingShift = 0;
+      snapshot = null;
+      rootCount = null;
+      settledCount = null;
       if (sweepTimer !== null) timers.clearTimeout(sweepTimer);
       sweepTimer = null;
     },

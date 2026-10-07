@@ -39,7 +39,9 @@ class FakeGrid implements DeltaGridApi {
   ensureIndexVisible = vi.fn();
   getFirstDisplayedRowIndex = vi.fn(() => 0);
   getVerticalPixelRange = vi.fn(() => ({ top: this.scrollTop, bottom: this.scrollTop + 600 }));
-  getDisplayedRowAtIndex = vi.fn(() => ({ rowHeight: this.rowHeight }));
+  /** Id of the order at the top of the viewport, when a test wants the applier to anchor on it. */
+  topId: string | undefined = undefined;
+  getDisplayedRowAtIndex = vi.fn(() => ({ rowHeight: this.rowHeight, id: this.topId }));
   getRowNode = vi.fn((id: string): IRowNode | undefined => this.nodes.get(id));
 
   idOf(row: Data): string {
@@ -427,6 +429,124 @@ describe('createDeltaApplier', () => {
     });
 
     describe('when the new rows come with a background refresh (the Appendix F path)', () => {
+      /** An order the user is reading at row `row`, which the grid will later report at another index. */
+      const reading = (grid: FakeGrid, id: string, row: number): void => {
+        grid.scrollTop = row * 28;
+        grid.topId = id;
+        grid.node(id, { orderId: id });
+      };
+      const moveTo = (grid: FakeGrid, id: string, rowIndex: number): void => {
+        (grid.nodes.get(id) as { rowIndex?: number }).rowIndex = rowIndex;
+      };
+
+      it('anchors on the order being read when newAbove undercounts (the refresh ends on block 0)', () => {
+        const { grid, applier, onNewAbove } = setup();
+        reading(grid, 'X', 200);
+        applier.apply(delta({ rowCounts: [{ route: [], rowCount: 1000 }] }));
+        applier.onStoreRefreshed([]);
+        applier.apply(delta({ newAbove: 1, dirtyRoutes: [[]], rowCounts: [{ route: [], rowCount: 1005 }] }));
+        expect(onNewAbove).toHaveBeenCalledTimes(1);
+        expect(onNewAbove).toHaveBeenLastCalledWith(1);
+
+        moveTo(grid, 'X', 205);
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).toHaveBeenCalledWith(205, 'top');
+        // The badge was already told about 1 row from newAbove; it learns about the other 4.
+        expect(onNewAbove).toHaveBeenLastCalledWith(4);
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not follow an order that moved without any rows arriving (a sort on a ticking column)', () => {
+        const { grid, applier, onNewAbove } = setup();
+        reading(grid, 'X', 200);
+        applier.apply(delta({ rowCounts: [{ route: [], rowCount: 1000 }] }));
+        applier.onStoreRefreshed([]);
+        applier.apply(delta({ dirtyRoutes: [[]], rowCounts: [{ route: [], rowCount: 1000 }] }));
+        moveTo(grid, 'X', 700);
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).not.toHaveBeenCalled();
+        expect(onNewAbove).not.toHaveBeenCalled();
+      });
+
+      it('follows the order a little past the rows counted, for deltas still in flight', () => {
+        const { grid, applier } = setup();
+        reading(grid, 'X', 200);
+        applier.apply(delta({ rowCounts: [{ route: [], rowCount: 1000 }] }));
+        applier.onStoreRefreshed([]);
+        applier.apply(delta({ dirtyRoutes: [[]], rowCounts: [{ route: [], rowCount: 1004 }] }));
+        moveTo(grid, 'X', 205);
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).toHaveBeenCalledWith(205, 'top');
+      });
+
+      it('follows an order that moved up a few rows (rows left above it)', () => {
+        const { grid, applier, onNewAbove } = setup();
+        reading(grid, 'X', 200);
+        applier.apply(delta({ rowCounts: [{ route: [], rowCount: 1000 }] }));
+        applier.onStoreRefreshed([]);
+        applier.apply(delta({ dirtyRoutes: [[]], rowCounts: [{ route: [], rowCount: 1000 }] }));
+        moveTo(grid, 'X', 198);
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).toHaveBeenCalledWith(198, 'top');
+        expect(onNewAbove).not.toHaveBeenCalled();
+      });
+
+      it('falls back to newAbove when the order moved far more than the arrivals explain (a ticking sort with inserts above)', () => {
+        const { grid, applier, onNewAbove } = setup();
+        reading(grid, 'X', 200);
+        applier.apply(delta({ rowCounts: [{ route: [], rowCount: 1000 }] }));
+        applier.onStoreRefreshed([]);
+        applier.apply(delta({ newAbove: 3, dirtyRoutes: [[]], rowCounts: [{ route: [], rowCount: 1003 }] }));
+        expect(onNewAbove).toHaveBeenLastCalledWith(3);
+        moveTo(grid, 'X', 700);
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).toHaveBeenCalledTimes(1);
+        expect(grid.ensureIndexVisible).toHaveBeenCalledWith(203, 'top');
+      });
+
+      it('does nothing for a reordered order when no rows arrived either', () => {
+        const { grid, applier } = setup();
+        reading(grid, 'X', 200);
+        applier.apply(delta({ rowCounts: [{ route: [], rowCount: 1000 }] }));
+        applier.onStoreRefreshed([]);
+        applier.apply(delta({ dirtyRoutes: [[]], rowCounts: [{ route: [], rowCount: 1000 }] }));
+        moveTo(grid, 'X', 700);
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).not.toHaveBeenCalled();
+      });
+
+      it('counts the rows that arrived over several deltas since the previous refresh', () => {
+        const { grid, applier } = setup();
+        reading(grid, 'X', 200);
+        applier.apply(delta({ rowCounts: [{ route: [], rowCount: 1000 }] }));
+        applier.onStoreRefreshed([]);
+        for (let count = 1001; count <= 1005; count += 1) {
+          applier.apply(delta({ rowCounts: [{ route: [], rowCount: count }], dirtyRoutes: count === 1005 ? [[]] : [] }));
+        }
+        moveTo(grid, 'X', 205);
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).toHaveBeenCalledWith(205, 'top');
+      });
+
+      it('falls back to newAbove when the order is not loaded after the refresh', () => {
+        const { grid, applier } = setup();
+        reading(grid, 'X', 200);
+        applier.apply(delta({ newAbove: 4, dirtyRoutes: [[]] }));
+        grid.nodes.delete('X');
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).toHaveBeenCalledWith(204, 'top');
+      });
+
+      it('takes no snapshot at the top of the grid', () => {
+        const { grid, applier } = setup();
+        reading(grid, 'X', 0);
+        applier.apply(delta({ dirtyRoutes: [[]], newAbove: 2 }));
+        moveTo(grid, 'X', 2);
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).not.toHaveBeenCalled();
+      });
+
       it('waits for the root store to refresh, then moves by newAbove from where the viewport is by then', () => {
         const { grid, applier, onNewAbove } = setup();
         grid.scrollTop = 200 * 28;

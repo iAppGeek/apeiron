@@ -113,7 +113,7 @@ services:
       dockerfile: infra/docker/web.Dockerfile
     image: ${REGISTRY:-local}/apeiron/pharos:${TAG:-dev}
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${WEB_BIND:-127.0.0.1}:8080:8080"
     depends_on:
       antikythera:
         condition: service_healthy
@@ -159,7 +159,7 @@ services:
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/apeiron-blotter-server.json
     ports:
-      - "127.0.0.1:3001:3000"
+      - "${GRAFANA_BIND:-127.0.0.1}:3001:3000"
     volumes:
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
