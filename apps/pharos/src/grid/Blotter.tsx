@@ -38,6 +38,7 @@ import { GRID_MODULES } from './modules';
 import { buildContextMenuItems, orderTargetOf } from './order-actions';
 import { createPendingCommands } from './pending-commands';
 import { createTickTracker } from './tick-tracker';
+import { installTestHooks, noteDelta, notePurge } from '../testing/hooks-gate';
 import { readFirstVisibleRow } from './viewport-probe';
 
 export type BlotterProps = {
@@ -159,14 +160,21 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       canSetRowCount: () => api.getRowGroupColumns().length === 0,
     });
     applier.current = live;
-    controller.setDeltaHandler((delta) => live.apply(delta));
+    const removeHooks = installTestHooks(api);
+    controller.setDeltaHandler((delta) => {
+      const stats = live.apply(delta);
+      noteDelta(stats);
+      return stats;
+    });
     // A purge starts over: forget previous values, pending refreshes and the new-orders badge, then reload.
     controller.setPurge(() => {
+      notePurge();
       live.reset();
       useAppStore.getState().clearNewOrders();
       api.refreshServerSide({ purge: true });
     });
     return (): void => {
+      removeHooks();
       controller.setPurge(null);
       controller.setDeltaHandler(null);
       live.dispose();
