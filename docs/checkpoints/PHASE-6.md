@@ -52,7 +52,7 @@ New tests: logos transition x command matrix (15 combinations), command ids and 
 ## Live verification (Medium preset, rebuilt containers, real Playwright clicks)
 | Step | Result |
 |---|---|
-| Filter status = LIVE; Pause a LIVE order | Right-click, Pause order. Independent watcher socket: click at t, `status: PAUSED` update at t+29ms (first attempt, ALG01061479) and +? ms for ALG01064390 (click 753723 -> PAUSED 753752). |
+| Filter status = LIVE; Pause a LIVE order | Right-click, Pause order. Independent watcher socket: click to the `status: PAUSED` update: 85ms for ALG01061479, 29ms for ALG01064390. |
 | Fills stop for 10s | ALG01061479: last fill (filledQty 1,293,000) before the pause, then no fill update for the 32s it stayed paused. ALG01064390: PAUSED for 11.5s with zero fill updates. |
 | Resume | ALG01064390: click at 765250, `LIVE` at 765268 (18ms); fills resumed at +4.9s (filledQty 131,000 then 285,000, 462,000, 618,000). Resume update carried the new `endTime`. |
 | Cancel with confirm | Cancel order opens "Confirm: cancel ALG01063571"; confirming made it CANCELLED (row left the LIVE/PAUSED filter, CANCELLED count rose). |
