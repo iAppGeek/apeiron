@@ -73,7 +73,7 @@ exactly, group keys, `childCount` and order exactly, aggregates within `1e-6 + 1
 ## Verification
 
 Commands: `pnpm lint && pnpm typecheck && pnpm test && pnpm build` all green locally (logos 131 tests, mnemosyne 35, iris 9 plus 2 integration tests that need `NATS_URL` and passed against the compose NATS,
-hermes 43, antikythera 36 files and over 350 tests, gaia 25, pharos 159).
+hermes 43, antikythera 352 tests in 36 files, gaia 25, pharos 159).
 
 ### Live figures (full `core` stack incl. hermes, one client, this laptop under Docker)
 
