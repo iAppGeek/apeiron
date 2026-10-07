@@ -42,6 +42,8 @@ export type DeltaApplierOptions = {
   onNewAbove?: (count: number) => void;
   /** Reads the first row the user can see straight from the rendered rows, when the host can. */
   topRowProbe?: () => number | null;
+  /** AG Grid refuses `setRowCount` while rows are grouped (error 28); the host says when it may be called. Default always. */
+  canSetRowCount?: () => boolean;
   timers?: Timers;
   /** Each route is refreshed at most once per this long. Default 1000ms. */
   refreshIntervalMs?: number;
@@ -69,8 +71,8 @@ export const SWEEP_INTERVAL_MS = 100;
  *    (the async transaction API is never used: stacked partials would merge against stale data and lose fields);
  * 3. group-row aggregates on the parent route;
  * 4. dirty routes refreshed with `purge: false`, at most once per second per route;
- * 5. the root row count. AG Grid 36 can only set the count of the root store (`api.setRowCount`), so counts of
- *    other routes rely on the transactions and the dirty-route refresh that accompanies a changed count.
+ * 5. the root row count. AG Grid 36 can only set the count of the root store (`api.setRowCount`), and not while rows
+ *    are grouped, so other counts rely on the transactions and the dirty-route refresh that accompanies a changed count.
  * Then it keeps the viewport still if new rows landed above it.
  */
 export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
@@ -172,7 +174,7 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       for (const route of delta.dirtyRoutes) refresh.request(route);
       for (const { route, rowCount } of delta.rowCounts) {
         if (route.length === 0) {
-          api.setRowCount(rowCount);
+          if (options.canSetRowCount?.() ?? true) api.setRowCount(rowCount);
           stats.rootRowCount = rowCount;
         }
       }

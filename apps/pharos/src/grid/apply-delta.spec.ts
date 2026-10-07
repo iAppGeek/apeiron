@@ -291,6 +291,13 @@ describe('createDeltaApplier', () => {
       expect(stats.rootRowCount).toBe(1_000_100);
     });
 
+    it('does not set the count while the host says it cannot (grouped rows), but still reports it', () => {
+      const { grid, applier } = setup({ canSetRowCount: () => false });
+      const stats = applier.apply(delta({ rowCounts: [{ route: [], rowCount: 21 }] }));
+      expect(grid.setRowCount).not.toHaveBeenCalled();
+      expect(stats.rootRowCount).toBe(21);
+    });
+
     it('reports no root count when the delta has none', () => {
       const { grid, applier } = setup();
       expect(applier.apply(delta()).rootRowCount).toBeNull();

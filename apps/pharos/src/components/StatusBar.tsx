@@ -74,7 +74,7 @@ export function StatusBar(props: StatusBarProps): ReactElement {
       <Item label="RTT" value={orDash(props.rttMs, (n) => `${integer.format(n)} ms`)} testId="status-rtt" />
       <Item label="FPS" value={orDash(props.fps, (n) => integer.format(n))} testId="status-fps" />
       <Item
-        label="Latency p50/p95"
+        label="Tick-to-screen p50/p95"
         value={latency === null ? '—' : `${integer.format(latency.p50)} / ${integer.format(latency.p95)} ms`}
         testId="status-latency"
       />

@@ -112,6 +112,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
         useAppStore.getState().addNewOrders(count);
       },
       topRowProbe: probe,
+      canSetRowCount: () => api.getRowGroupColumns().length === 0,
     });
     applier.current = live;
     controller.setDeltaHandler((delta) => live.apply(delta));

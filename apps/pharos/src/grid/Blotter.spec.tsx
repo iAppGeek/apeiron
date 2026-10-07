@@ -202,6 +202,15 @@ describe('Blotter', () => {
     expect(options.groupRowId(['EURUSD'], { status: 'LIVE' })).toBe('G:EURUSD|LIVE');
   });
 
+  it('lets the applier set the row count only while rows are not grouped', () => {
+    const { client } = makeClient();
+    render(<Blotter client={client} controller={makeController().controller} />);
+    const options = vi.mocked(createDeltaApplier).mock.calls[0]?.[0] as DeltaApplierOptions;
+    expect(options.canSetRowCount?.()).toBe(true);
+    api.getRowGroupColumns.mockReturnValue([{ getColDef: () => ({ field: 'pair' }) }]);
+    expect(options.canSetRowCount?.()).toBe(false);
+  });
+
   it('tells the applier when a store has refreshed', () => {
     const { client } = makeClient();
     render(<Blotter client={client} controller={makeController().controller} />);

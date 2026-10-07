@@ -68,7 +68,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); font
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .status-bar {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 18px; min-height: 30px; padding: 4px 16px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; min-height: 30px; padding: 4px 16px;
   background: var(--panel); border-top: 1px solid var(--border); font-size: 12px;
 }
 .status-item { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
