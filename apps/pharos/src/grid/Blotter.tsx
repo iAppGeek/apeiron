@@ -196,7 +196,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       : null;
 
   return (
-    <div className="blotter" ref={root}>
+    <div className="blotter" ref={root} data-testid="blotter">
       <AgGridProvider modules={GRID_MODULES}>
         <AgGridReact
           theme={theme}
@@ -226,7 +226,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       </AgGridProvider>
       <NewOrdersBadgeConnected api={api} />
       {overlay !== null && (
-        <div className="overlay" role="status">
+        <div className="overlay" role="status" data-testid="blotter-overlay">
           <div className="overlay-card">
             <span className="spinner" aria-hidden="true" />
             {overlay}

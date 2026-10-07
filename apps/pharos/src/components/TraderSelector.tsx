@@ -16,6 +16,7 @@ export function TraderSelector({ traders, value, disabled, switching, onChange }
       <span className="field-label">Trader</span>
       <select
         className="select"
+        data-testid="trader-select"
         value={value}
         disabled={disabled}
         onChange={(event) => {
