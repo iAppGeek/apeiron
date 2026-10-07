@@ -97,6 +97,15 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); font
 .chip-filled { color: var(--accent); background: rgba(56, 189, 248, 0.12); border-color: rgba(56, 189, 248, 0.35); }
 .chip-cancelled { color: var(--muted); background: rgba(132, 147, 171, 0.12); border-color: rgba(132, 147, 171, 0.35); }
 
+.chip-busy { opacity: 0.6; }
+.chip-spinner {
+  display: inline-block; width: 9px; height: 9px; margin-left: 6px; vertical-align: -1px;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: chip-spin 0.8s linear infinite;
+}
+@keyframes chip-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .chip-spinner { animation-duration: 3s; } }
+
 .side-buy { color: var(--green); font-weight: 600; }
 .side-sell { color: var(--red); font-weight: 600; }
 .switching { color: var(--amber); font-size: 12px; }

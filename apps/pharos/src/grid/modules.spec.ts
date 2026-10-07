@@ -1,4 +1,4 @@
-import { ServerSideRowModelModule, SetFilterModule } from 'ag-grid-enterprise';
+import { ClipboardModule, ContextMenuModule, ServerSideRowModelModule, SetFilterModule } from 'ag-grid-enterprise';
 import {
   DateFilterModule,
   HighlightChangesModule,
@@ -23,6 +23,10 @@ describe('GRID_MODULES', () => {
     for (const m of [HighlightChangesModule, RowApiModule, ScrollApiModule, RenderApiModule]) {
       expect(GRID_MODULES).toContain(m);
     }
+  });
+
+  it('registers the context menu and the clipboard that its copy items need', () => {
+    for (const m of [ContextMenuModule, ClipboardModule]) expect(GRID_MODULES).toContain(m);
   });
 
   it('has no duplicates', () => {

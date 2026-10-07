@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppController } from '../state/app-controller';
 import { resetAppStore, useAppStore } from '../state/app-store';
 import type { BlotterClient, ClientEvents } from '../transport/client';
+import { RequestError } from '../transport/client';
 import { createDeltaApplier, type DeltaApplier, type DeltaApplierOptions } from './apply-delta';
 import { Blotter } from './Blotter';
 
@@ -16,6 +17,8 @@ type FakeApi = {
   getFirstDisplayedRowIndex: ReturnType<typeof vi.fn>;
   getDisplayedRowAtIndex: ReturnType<typeof vi.fn>;
   getRowGroupColumns: ReturnType<typeof vi.fn>;
+  getRowNode: ReturnType<typeof vi.fn>;
+  refreshCells: ReturnType<typeof vi.fn>;
 };
 
 const grid = vi.hoisted(() => ({ props: null as Record<string, unknown> | null, api: null as unknown }));
@@ -57,6 +60,7 @@ const makeClient = (): { client: BlotterClient; handlers: Handlers; off: ReturnT
     },
     getRows: vi.fn(),
     setFilterValues: vi.fn(),
+    command: vi.fn(() => Promise.resolve()),
   } as unknown as BlotterClient;
   return { client, handlers, off };
 };
@@ -84,6 +88,8 @@ describe('Blotter', () => {
       getFirstDisplayedRowIndex: vi.fn(() => 0),
       getDisplayedRowAtIndex: vi.fn(() => ({ rowHeight: 28 })),
       getRowGroupColumns: vi.fn(() => []),
+      getRowNode: vi.fn((id: string) => ({ id })),
+      refreshCells: vi.fn(),
     };
     grid.api = api;
     grid.props = null;
@@ -261,6 +267,100 @@ describe('Blotter', () => {
       render(<Blotter client={client} controller={makeController().controller} />);
       (grid.props?.['onBodyScroll'] as (e: { direction: string }) => void)({ direction: 'vertical' });
       expect(api.getVerticalPixelRange).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('order actions', () => {
+    type Items = ((string | { name?: string; disabled?: boolean; action?: () => void; subMenu?: { action?: () => void }[] })[]);
+    const menuFor = (node: unknown): Items => (grid.props?.['getContextMenuItems'] as (p: { node: unknown }) => Items)({ node });
+    const leaf = (status: string): unknown => ({ group: false, data: { orderId: 'ALG1', status } });
+    const item = (items: Items, name: string): { name?: string; disabled?: boolean; action?: () => void; subMenu?: { action?: () => void }[] } =>
+      items.find((i) => typeof i !== 'string' && i.name === name) as never;
+    const isPending = (): boolean => (grid.props?.['context'] as { isPending: (id: string) => boolean }).isPending('ALG1');
+
+    it('shows the order actions, enabled by the row status, on a leaf row', () => {
+      const { client } = makeClient();
+      render(<Blotter client={client} controller={makeController().controller} />);
+      const live = menuFor(leaf('LIVE'));
+      expect([item(live, 'Cancel order').disabled, item(live, 'Pause order').disabled, item(live, 'Resume order').disabled]).toEqual([false, false, true]);
+      const filled = menuFor(leaf('FILLED'));
+      expect([item(filled, 'Cancel order').disabled, item(filled, 'Pause order').disabled, item(filled, 'Resume order').disabled]).toEqual([true, true, true]);
+      expect(live).toContain('copy');
+    });
+
+    it('gives group rows no order actions', () => {
+      const { client } = makeClient();
+      render(<Blotter client={client} controller={makeController().controller} />);
+      expect(menuFor({ group: true, data: { childCount: 3 } })).toEqual(['copy', 'copyWithHeaders']);
+      expect(menuFor(null)).toEqual(['copy', 'copyWithHeaders']);
+    });
+
+    it('sends Pause at once and shows the row as in progress until the ack arrives', async () => {
+      const { client } = makeClient();
+      let ack: () => void = () => undefined;
+      vi.mocked(client.command).mockImplementation(() => new Promise<void>((resolve) => (ack = resolve)));
+      render(<Blotter client={client} controller={makeController().controller} />);
+      expect(isPending()).toBe(false);
+      act(() => item(menuFor(leaf('LIVE')), 'Pause order').action?.());
+      expect(client.command).toHaveBeenCalledExactlyOnceWith('ALG1', 'PAUSE');
+      expect(isPending()).toBe(true);
+      expect(api.refreshCells).toHaveBeenLastCalledWith({ rowNodes: [{ id: 'ALG1' }], columns: ['status'], force: true });
+      api.refreshCells.mockClear();
+      await act(async () => {
+        ack();
+        await Promise.resolve();
+      });
+      expect(isPending()).toBe(false);
+      expect(api.refreshCells).toHaveBeenCalledTimes(1);
+      expect(useAppStore.getState().toasts).toEqual([]);
+    });
+
+    it('does not send Cancel until the confirmation is chosen', () => {
+      const { client } = makeClient();
+      render(<Blotter client={client} controller={makeController().controller} />);
+      const cancel = item(menuFor(leaf('LIVE')), 'Cancel order');
+      expect(cancel.action).toBeUndefined();
+      expect(client.command).not.toHaveBeenCalled();
+      act(() => cancel.subMenu?.[0]?.action?.());
+      expect(client.command).toHaveBeenCalledExactlyOnceWith('ALG1', 'CANCEL');
+    });
+
+    it('toasts a human message when the server refuses, and clears the in-progress state', async () => {
+      const { client } = makeClient();
+      vi.mocked(client.command).mockRejectedValue(
+        new RequestError({ code: 'INVALID_TRANSITION', message: 'Cannot cancel an order that is FILLED' }),
+      );
+      render(<Blotter client={client} controller={makeController().controller} />);
+      await act(async () => {
+        item(menuFor(leaf('LIVE')), 'Pause order').action?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(useAppStore.getState().toasts).toEqual([
+        expect.objectContaining({ kind: 'error', text: 'Pause failed for ALG1: Cannot cancel an order that is FILLED.' }),
+      ]);
+      expect(isPending()).toBe(false);
+    });
+
+    it('toasts an internal error for a failure that is not a RequestError', async () => {
+      const { client } = makeClient();
+      vi.mocked(client.command).mockRejectedValue(new Error('boom'));
+      render(<Blotter client={client} controller={makeController().controller} />);
+      await act(async () => {
+        item(menuFor(leaf('PAUSED')), 'Resume order').action?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(useAppStore.getState().toasts[0]?.text).toContain('Resume failed for ALG1');
+    });
+
+    it('skips the redraw when the order row is not loaded', () => {
+      const { client } = makeClient();
+      vi.mocked(client.command).mockReturnValue(new Promise<void>(() => undefined));
+      api.getRowNode.mockReturnValue(undefined);
+      render(<Blotter client={client} controller={makeController().controller} />);
+      act(() => item(menuFor(leaf('LIVE')), 'Pause order').action?.());
+      expect(api.refreshCells).not.toHaveBeenCalled();
     });
   });
 });

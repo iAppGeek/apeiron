@@ -1,3 +1,4 @@
+import type { CommandAction } from '@apeiron/logos';
 import type { FailureCode } from '../transport/messages';
 
 /** A short, user-facing explanation for every failure the transport or server can report. */
@@ -45,4 +46,27 @@ export function describeFailure(code: FailureCode, serverMessage?: string): stri
 /** Failures the datasource waits out instead of reporting: the server or the link is not ready yet. */
 export function isRetryable(code: FailureCode): boolean {
   return code === 'NOT_READY' || code === 'DISCONNECTED';
+}
+
+const VERB: Record<CommandAction, string> = { CANCEL: 'Cancel', PAUSE: 'Pause', RESUME: 'Resume' };
+
+/**
+ * The toast text for a command that failed. It names the action and the order, then explains the server code:
+ * a refused transition quotes the server's own reason (it names the order's current status), and anything else
+ * uses the generic message for that code.
+ */
+export function describeCommandFailure(code: FailureCode, action: CommandAction, orderId: string, serverMessage?: string): string {
+  const head = `${VERB[action]} failed for ${orderId}`;
+  switch (code) {
+    case 'INVALID_TRANSITION':
+      return `${head}: ${serverMessage ? `${serverMessage}.` : 'that action is not allowed in the order’s current state.'}`;
+    case 'UNKNOWN_ORDER':
+      return `${head}: the order is no longer active (it may have completed).`;
+    case 'INTERNAL':
+      return serverMessage === 'command timed out'
+        ? `${head}: the middleware did not answer in time. Check the order before retrying.`
+        : `${head}: ${describeFailure(code, serverMessage)}`;
+    default:
+      return `${head}: ${describeFailure(code, serverMessage)}`;
+  }
 }

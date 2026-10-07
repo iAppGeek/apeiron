@@ -1,16 +1,25 @@
-import { COLUMNS } from '@apeiron/logos';
-import type { BodyScrollEvent, GridApi, GridReadyEvent, StoreRefreshedEvent } from 'ag-grid-community';
+import { COLUMNS, type CommandAction } from '@apeiron/logos';
+import type {
+  BodyScrollEvent,
+  DefaultMenuItem,
+  GetContextMenuItemsParams,
+  GridApi,
+  GridReadyEvent,
+  MenuItemDef,
+  StoreRefreshedEvent,
+} from 'ag-grid-community';
 import { AgGridProvider, AgGridReact } from 'ag-grid-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { NewOrdersBadge } from '../components/NewOrdersBadge';
 import type { AppController } from '../state/app-controller';
 import { useAppStore } from '../state/app-store';
-import type { BlotterClient } from '../transport/client';
+import { RequestError, type BlotterClient } from '../transport/client';
 import { ROW_BUFFER, readTopRow } from './anchor';
 import { createDeltaApplier, type DeltaApplier } from './apply-delta';
 import { buildColumnDefs } from './column-defs';
 import { createDatasource } from './datasource';
-import { describeFailure } from './errors';
+import type { BlotterContext } from './cell-renderers';
+import { describeCommandFailure, describeFailure } from './errors';
 import { fetchFilterValues } from './filter-values';
 import { computeRowId, getRowId } from './get-row-id';
 import {
@@ -26,6 +35,8 @@ import {
   theme,
 } from './grid-options';
 import { GRID_MODULES } from './modules';
+import { buildContextMenuItems, orderTargetOf } from './order-actions';
+import { createPendingCommands } from './pending-commands';
 import { createTickTracker } from './tick-tracker';
 import { readFirstVisibleRow } from './viewport-probe';
 
@@ -58,6 +69,8 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
   const root = useRef<HTMLDivElement>(null);
   const probe = useCallback((): number | null => readFirstVisibleRow(root.current), []);
   const ticks = useMemo(() => createTickTracker({ holdMs: TICK_HOLD_MS, now: wallClock }), []);
+  const pending = useMemo(() => createPendingCommands(), []);
+  const gridContext = useMemo<BlotterContext>(() => ({ isPending: (orderId) => pending.has(orderId) }), [pending]);
   const welcomed = useAppStore((s) => s.welcomed);
   const notReady = useAppStore((s) => s.notReady);
   const status = useAppStore((s) => s.status);
@@ -69,6 +82,37 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
         tickDirection: (rowId, field) => ticks.direction(rowId, field),
       }),
     [client, ticks],
+  );
+
+  // Redraw the status cell of an order when a command on it starts or finishes.
+  useEffect(() => {
+    if (api === null) return undefined;
+    return pending.subscribe((orderId) => {
+      const node = api.getRowNode(orderId);
+      if (node !== undefined) api.refreshCells({ rowNodes: [node], columns: ['status'], force: true });
+    });
+  }, [api, pending]);
+
+  const runCommand = useCallback(
+    (orderId: string, action: CommandAction): void => {
+      pending.begin(orderId);
+      client
+        .command(orderId, action)
+        .catch((error: unknown) => {
+          const failure =
+            error instanceof RequestError ? { code: error.code, message: error.message } : { code: 'INTERNAL' as const, message: '' };
+          useAppStore.getState().pushToast('error', describeCommandFailure(failure.code, action, orderId, failure.message));
+        })
+        .finally(() => {
+          pending.end(orderId);
+        });
+    },
+    [client, pending],
+  );
+
+  const getContextMenuItems = useCallback(
+    (params: GetContextMenuItemsParams): (DefaultMenuItem | MenuItemDef)[] => buildContextMenuItems(orderTargetOf(params.node), runCommand),
+    [runCommand],
   );
 
   const onGridReady = useCallback((event: GridReadyEvent) => {
@@ -175,6 +219,8 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
           onStoreRefreshed={onStoreRefreshed}
           onBodyScroll={onBodyScroll}
           sideBar={sideBar}
+          context={gridContext}
+          getContextMenuItems={getContextMenuItems}
           onGridReady={onGridReady}
         />
       </AgGridProvider>

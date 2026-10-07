@@ -20,6 +20,36 @@ describe('StatusChip', () => {
     expect(chip).toHaveClass('chip', cls);
   });
 
+  describe('in-progress indicator', () => {
+    const renderWith = (context: unknown, data: unknown): void => {
+      render(<StatusChip {...({ value: 'LIVE', context, data } as CustomCellRendererProps)} />);
+    };
+
+    it('dims the chip and shows a spinner while a command on the order is pending', () => {
+      renderWith({ isPending: (id: string) => id === 'ALG1' }, { orderId: 'ALG1' });
+      const chip = screen.getByText('LIVE');
+      expect(chip).toHaveClass('chip-busy');
+      expect(chip).toHaveAttribute('aria-busy', 'true');
+      expect(screen.getByTestId('command-pending')).toBeInTheDocument();
+    });
+
+    it('is plain for other orders, and without a context or data', () => {
+      renderWith({ isPending: () => false }, { orderId: 'ALG2' });
+      expect(screen.getByText('LIVE')).not.toHaveClass('chip-busy');
+      expect(screen.queryByTestId('command-pending')).toBeNull();
+    });
+
+    it.each([
+      [undefined, { orderId: 'A' }],
+      [{ isPending: () => true }, undefined],
+      [{ isPending: () => true }, { orderId: 5 }],
+      [{ isPending: 'nope' }, { orderId: 'A' }],
+    ])('ignores a malformed context or data (%#)', (context, data) => {
+      renderWith(context, data);
+      expect(screen.queryByTestId('command-pending')).toBeNull();
+    });
+  });
+
   it('renders unknown statuses as plain text', () => {
     renderChip('WEIRD');
     expect(screen.getByText('WEIRD')).not.toHaveClass('chip');

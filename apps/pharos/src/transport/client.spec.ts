@@ -158,6 +158,35 @@ describe('createBlotterClient', () => {
     await expect(p).rejects.toMatchObject({ code: 'INTERNAL' });
   });
 
+  it('command posts a command request and resolves on ack', async () => {
+    const w = makeWorker();
+    const p = createBlotterClient(w).command('ALG00000001', 'PAUSE');
+    expect(w.posted.at(-1)).toMatchObject({ kind: 'request', msg: { t: 'command', orderId: 'ALG00000001', action: 'PAUSE' } });
+    const reqId = lastRequestId(w);
+    w.reply({ kind: 'response', reqId, ok: true, msg: { t: 'ack', reqId } });
+    await expect(p).resolves.toBeUndefined();
+  });
+
+  it('command rejects with the server code and message', async () => {
+    const w = makeWorker();
+    const p = createBlotterClient(w).command('ALG00000001', 'CANCEL');
+    const reqId = lastRequestId(w);
+    w.reply({ kind: 'response', reqId, ok: false, code: 'INVALID_TRANSITION', message: 'Cannot cancel an order that is FILLED' });
+    await expect(p).rejects.toMatchObject({ code: 'INVALID_TRANSITION', message: 'Cannot cancel an order that is FILLED' });
+  });
+
+  it('command rejects on an unexpected reply and when the client is disposed', async () => {
+    const w = makeWorker();
+    const client = createBlotterClient(w);
+    const odd = client.command('A', 'RESUME');
+    const reqId = lastRequestId(w);
+    w.reply({ kind: 'response', reqId, ok: true, msg: { t: 'filterValues', reqId, values: [] } });
+    await expect(odd).rejects.toMatchObject({ code: 'INTERNAL' });
+    const pending = client.command('A', 'RESUME');
+    client.dispose();
+    await expect(pending).rejects.toMatchObject({ code: 'DISCONNECTED' });
+  });
+
   it('delivers the close code of an unexpected close', () => {
     const w = makeWorker();
     const client = createBlotterClient(w);
