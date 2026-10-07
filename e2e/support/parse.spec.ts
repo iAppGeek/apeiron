@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isMonotonic, isTextSorted, parseGroupCount, parseLeadingCount, parseNumber } from './parse';
+import { hasSettled, isMonotonic, isTextSorted, parseGroupCount, parseLeadingCount, parseNumber } from './parse';
 
 describe('parseNumber', () => {
   it('reads thousands separators and decimals', () => {
@@ -51,5 +51,22 @@ describe('isTextSorted', () => {
     expect(isTextSorted(['alice', 'Ben', 'chloe'], 'asc')).toBe(true);
     expect(isTextSorted(['chloe', 'Ben', 'alice'], 'desc')).toBe(true);
     expect(isTextSorted(['b', 'a'], 'asc')).toBe(false);
+  });
+});
+
+describe('hasSettled', () => {
+  it('needs enough readings', () => {
+    expect(hasSettled([5, 5], 3, 0)).toBe(false);
+    expect(hasSettled([5, 5, 5], 3, 0)).toBe(true);
+  });
+
+  it('only looks at the most recent readings', () => {
+    expect(hasSettled([90, 10, 10, 11], 3, 1)).toBe(true);
+    expect(hasSettled([10, 10, 40], 3, 1)).toBe(false);
+  });
+
+  it('never settles on NaN or an empty window', () => {
+    expect(hasSettled([Number.NaN, Number.NaN, Number.NaN], 3, 1)).toBe(false);
+    expect(hasSettled([1], 0, 1)).toBe(false);
   });
 });

@@ -133,3 +133,16 @@ Node 25.8 locally (containers `node:24-slim`), pnpm 10.33.0, TypeScript ~6.0.3, 
 - Plain-HTTP access to the box; Grafana only via SSM port forward.
 - `remote-up.sh` runs `docker compose pull` of the monitoring images from Docker Hub on the box (rate limits apply to anonymous pulls).
 - CI e2e builds the images with no layer cache (about 3 minutes total today).
+
+## CP-5 fixes (after review: APPROVE WITH FIXES)
+
+- **F1** `remote-up.sh`: the remote script waits (up to 15 minutes) for `$BOX_DIR/.bootstrapped` before `cd`.
+- **F2** Terraform gets `registry_kind` (`ghcr` default, or `ecr`) and `ghcr_owner` (`iappgeek`); the box's registry follows them (plan output: `registry = "ghcr.io/iappgeek"`), `registry` still overrides. `remote-up.sh --registry-kind`. `docs/hosting.md` states that GHCR packages must be public for a token-less pull; nothing in the repo changes package visibility.
+- **F3** The OIDC trust is `repo:<repo>:environment:release` only. `images.yml` build and merge jobs declare `environment: ${{ kind == 'ecr' && 'release' || null }}`, so GHCR runs declare none. `docs/hosting.md` explains protecting the `release` environment (deployment branches and tags: `main`, `v*`). The `|| null` form is untested for ECR runs (they need AWS); the GHCR path was exercised by CI/dispatch syntax checks only after this change, see the images run noted below.
+- **F4** The seed count is parsed with `grep -Eo '^[0-9]+$'`; an unreadable value prints mongosh's output and fails.
+- **F5** `anchorOnOrder` returns false when the order moved more than the arrivals explain, so the `newAbove` fallback (and its badge count) applies. Unit test: ticking sort with inserts above (`falls back to newAbove ...`), plus the no-arrivals case.
+- **F6** `waitForTimeout` removed from `e2e/support/blotter.ts`: column reveal waits for the header, resting offset and row-count settling poll until three readings agree.
+- **F7** `ssm_run` gives up after `timeout + 120 s` or 5 consecutive polling errors.
+- **F8** The settling rule is a pure `hasSettled` in `e2e/support/parse.ts`, with tests (11 unit tests in the e2e package).
+
+Verification after the fixes: `pnpm lint && typecheck && test && build` pass; `terraform fmt -check`, `validate` pass and the read-only plan still shows 21 to add; `shellcheck scripts/*.sh` clean; full `pnpm e2e` against the 1M stack: 18 passed (49 s). No AWS resource was created or modified.

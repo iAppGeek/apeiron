@@ -63,18 +63,27 @@ wait_ssm_online() {
   die "SSM agent on $INSTANCE_ID did not come online (last status: ${status:-none})"
 }
 
-# Runs a shell script on the box over SSM and streams its output when it finishes.
+# Runs a shell script on the box over SSM and prints its output when it finishes.
+# Gives up after the script's own timeout plus two minutes, or after 5 AWS API errors in a row.
 # Usage: ssm_run <timeout-seconds> <script>
 ssm_run() {
-  local timeout="$1" script="$2" params id status="" out
+  local timeout="$1" script="$2" params id status="" out errors=0 deadline
+  deadline=$((SECONDS + timeout + 120))
   params="$(jq -n --arg c "$script" --arg t "$timeout" '{commands: [$c], executionTimeout: [$t]}')"
   id="$(aws_ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
     --comment "apeiron remote script" --parameters "$params" \
     --query 'Command.CommandId' --output text)"
   while :; do
+    [ "$SECONDS" -lt "$deadline" ] || die "remote command $id did not finish within $((timeout + 120))s (check it in the SSM console)"
     sleep 4
-    status="$(aws_ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE_ID" \
-      --query 'Status' --output text 2>/dev/null || echo Pending)"
+    if status="$(aws_ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE_ID" \
+      --query 'Status' --output text 2>/dev/null)"; then
+      errors=0
+    else
+      errors=$((errors + 1))
+      [ "$errors" -lt 5 ] || die "5 consecutive errors polling SSM command $id; check your credentials and network"
+      continue
+    fi
     case "$status" in
       Pending | InProgress | Delayed) ;;
       *) break ;;

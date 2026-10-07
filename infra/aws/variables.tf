@@ -44,8 +44,25 @@ variable "create_github_oidc_provider" {
   default     = true
 }
 
+variable "registry_kind" {
+  description = "Where the box pulls images from: \"ghcr\" (default, matches the Images workflow default) or \"ecr\" (set REGISTRY_KIND=ecr in the repository too). GHCR packages must be public for the box to pull them without a token."
+  type        = string
+  default     = "ghcr"
+
+  validation {
+    condition     = contains(["ghcr", "ecr"], var.registry_kind)
+    error_message = "registry_kind must be \"ghcr\" or \"ecr\"."
+  }
+}
+
+variable "ghcr_owner" {
+  description = "GitHub owner (lower case) of the GHCR packages, used when registry_kind is ghcr."
+  type        = string
+  default     = "iappgeek"
+}
+
 variable "registry" {
-  description = "Registry the box pulls images from, without a trailing slash. Empty means this stack's own ECR registry; use \"ghcr.io/iappgeek\" for GHCR."
+  description = "Explicit registry host and owner, without a trailing slash. Overrides registry_kind and ghcr_owner when set."
   type        = string
   default     = ""
 }

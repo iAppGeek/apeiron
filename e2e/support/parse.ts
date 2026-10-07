@@ -38,3 +38,11 @@ export function isTextSorted(values: readonly string[], direction: 'asc' | 'desc
     return direction === 'asc' ? value >= previous : value <= previous;
   });
 }
+
+/** True when the last `needed` readings all lie within `tolerance` of the latest one (a value has stopped moving). */
+export function hasSettled(readings: readonly number[], needed: number, tolerance: number): boolean {
+  if (needed < 1 || readings.length < needed) return false;
+  const recent = readings.slice(-needed);
+  const latest = recent[recent.length - 1] ?? Number.NaN;
+  return recent.every((value) => Math.abs(value - latest) <= tolerance);
+}

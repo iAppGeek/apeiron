@@ -1,5 +1,5 @@
 import { expect, type Locator, type Page } from '@playwright/test';
-import { parseLeadingCount, parseNumber } from './parse';
+import { hasSettled, parseLeadingCount, parseNumber } from './parse';
 
 export type TopRow = { rowId: string; offset: number };
 
@@ -102,7 +102,8 @@ export class Blotter {
       await this.scroller.evaluate((el) => {
         el.scrollLeft += 600;
       });
-      await this.page.waitForTimeout(50);
+      // Columns render on the next frame after a scroll: wait for this one's header, not for a fixed time.
+      await header.waitFor({ state: 'attached', timeout: 500 }).catch(() => undefined);
     }
     await expect(header).toHaveCount(1);
   }
@@ -166,26 +167,24 @@ export class Blotter {
   }
 
   /**
-   * Where an order sits in the viewport once it has stopped moving: two reads 300 ms apart agree. Between background
+   * Where an order sits in the viewport once it has stopped moving: three reads 150 ms apart agree. Between background
    * refreshes (once a second) a view that is anchored does not move at all, so this finds the resting position and
    * skips the frame in which new rows have landed and the viewport has not yet been moved back over the order.
    */
   async restingOffset(rowId: string): Promise<number> {
-    let resting = Number.NaN;
+    const reads: number[] = [];
     await expect
       .poll(
         async () => {
-          const first = await this.offsetOf(rowId);
-          await this.page.waitForTimeout(300);
-          const second = await this.offsetOf(rowId);
-          if (first === null || second === null || Math.abs(first - second) > 1) return false;
-          resting = second;
-          return true;
+          const offset = await this.offsetOf(rowId);
+          if (offset === null) reads.length = 0;
+          else reads.push(offset);
+          return hasSettled(reads, 3, 1);
         },
-        { message: `the order ${rowId} to rest in the viewport`, intervals: [0] },
+        { message: `the order ${rowId} to rest in the viewport`, intervals: [150] },
       )
       .toBe(true);
-    return resting;
+    return reads[reads.length - 1] ?? Number.NaN;
   }
 
   /** Scrolls the grid body down by a number of rows and waits until orders have loaded and rendered there. */
@@ -275,19 +274,16 @@ export class Blotter {
 
   /** Waits for the status-bar count to stop changing for a moment (a view change has landed). */
   async waitUntilSettled(): Promise<void> {
-    let last = -1;
-    let stable = 0;
+    const reads: number[] = [];
     await expect
       .poll(
         async () => {
-          const now = await this.statusRows();
-          stable = now === last ? stable + 1 : 0;
-          last = now;
-          return stable;
+          reads.push(await this.statusRows());
+          return hasSettled(reads, 3, 0);
         },
         { intervals: [150], message: 'the row count to settle' },
       )
-      .toBeGreaterThanOrEqual(2);
+      .toBe(true);
   }
 
   async chooseTrader(name: string): Promise<void> {

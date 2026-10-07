@@ -4,7 +4,7 @@ data "aws_ssm_parameter" "al2023_arm64" {
 }
 
 locals {
-  registry = var.registry != "" ? var.registry : local.ecr_registry
+  registry = var.registry != "" ? var.registry : (var.registry_kind == "ecr" ? local.ecr_registry : "ghcr.io/${var.ghcr_owner}")
 }
 
 resource "aws_instance" "box" {

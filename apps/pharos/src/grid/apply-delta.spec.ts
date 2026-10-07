@@ -492,12 +492,25 @@ describe('createDeltaApplier', () => {
         expect(onNewAbove).not.toHaveBeenCalled();
       });
 
-      it('leaves alone an order that moved far more than the arrivals explain', () => {
+      it('falls back to newAbove when the order moved far more than the arrivals explain (a ticking sort with inserts above)', () => {
+        const { grid, applier, onNewAbove } = setup();
+        reading(grid, 'X', 200);
+        applier.apply(delta({ rowCounts: [{ route: [], rowCount: 1000 }] }));
+        applier.onStoreRefreshed([]);
+        applier.apply(delta({ newAbove: 3, dirtyRoutes: [[]], rowCounts: [{ route: [], rowCount: 1003 }] }));
+        expect(onNewAbove).toHaveBeenLastCalledWith(3);
+        moveTo(grid, 'X', 700);
+        applier.onStoreRefreshed([]);
+        expect(grid.ensureIndexVisible).toHaveBeenCalledTimes(1);
+        expect(grid.ensureIndexVisible).toHaveBeenCalledWith(203, 'top');
+      });
+
+      it('does nothing for a reordered order when no rows arrived either', () => {
         const { grid, applier } = setup();
         reading(grid, 'X', 200);
         applier.apply(delta({ rowCounts: [{ route: [], rowCount: 1000 }] }));
         applier.onStoreRefreshed([]);
-        applier.apply(delta({ dirtyRoutes: [[]], rowCounts: [{ route: [], rowCount: 1003 }] }));
+        applier.apply(delta({ dirtyRoutes: [[]], rowCounts: [{ route: [], rowCount: 1000 }] }));
         moveTo(grid, 'X', 700);
         applier.onStoreRefreshed([]);
         expect(grid.ensureIndexVisible).not.toHaveBeenCalled();

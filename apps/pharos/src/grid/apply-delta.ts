@@ -182,7 +182,7 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
    * re-requesting block 0, so it undercounts there; the order's own new index is exact. A move much larger than the
    * rows that arrived since the previous refresh (plus a little slack for deltas still in flight) is a reordering,
    * for example a sort on a ticking column, and says nothing about where the user was, so it is left alone.
-   * Returns false when the order is not loaded, so the caller falls back to `newAbove`.
+   * Returns false when the order is not loaded or moved too far, so the caller falls back to `newAbove`.
    */
   const anchorOnOrder = (before: { rowId: string; topRow: number }, settled: number | null): boolean => {
     const rowIndex = api.getRowNode(before.rowId)?.rowIndex;
@@ -190,9 +190,12 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
     // Before the first count is known, the server's own newAbove is the best figure there is.
     const grew = rootCount !== null && settled !== null ? Math.max(0, rootCount - settled) : pendingShift;
     const moved = rowIndex - before.topRow;
+    // The order reordered far more than the arrivals explain: it says nothing about where the user was, so the
+    // server's newAbove (kept in pendingShift) decides instead.
+    if (Math.abs(moved) > grew + ANCHOR_SLACK_ROWS) return false;
     const counted = pendingShift;
     pendingShift = 0;
-    if (moved === 0 || Math.abs(moved) > grew + ANCHOR_SLACK_ROWS) return true;
+    if (moved === 0) return true;
     api.ensureIndexVisible(rowIndex, 'top');
     if (moved > counted) options.onNewAbove?.(moved - counted);
     return true;

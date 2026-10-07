@@ -55,7 +55,7 @@ resource "aws_iam_instance_profile" "instance" {
   role        = aws_iam_role.instance.name
 }
 
-# --- GitHub Actions: OIDC provider and a push-only role trusted for tags v* and the main branch --------------
+# --- GitHub Actions: OIDC provider and a push-only role trusted only for the `release` environment ---------
 
 data "aws_iam_openid_connect_provider" "github" {
   count = var.create_github_oidc_provider ? 0 : 1
@@ -85,14 +85,12 @@ data "aws_iam_policy_document" "github_assume" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
-    # Version tags, and runs started by hand (workflow_dispatch) on main.
+    # Only jobs that declare the GitHub environment `release`. Protect that environment (deployment branches and
+    # tags: main and v*) so that is the only way to reach this role; see docs/hosting.md.
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "repo:${var.github_repo}:ref:refs/tags/v*",
-        "repo:${var.github_repo}:ref:refs/heads/main",
-      ]
+      values   = ["repo:${var.github_repo}:environment:release"]
     }
   }
 }

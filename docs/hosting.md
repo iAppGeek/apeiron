@@ -99,7 +99,7 @@ laptop ──(AWS CLI + SSM)──▶ EC2 t4g.xlarge, Amazon Linux 2023 arm64, 3
 | Security group | inbound **only** from `allowed_cidr`, on 8080 (and 3001 if `expose_grafana`); **no SSH** |
 | ECR repositories | `apeiron/<service>` for the five services, scan on push, lifecycle policy keeps the last 10 images |
 | Instance role | `AmazonSSMManagedInstanceCore` plus ECR pull scoped to those repositories |
-| GitHub OIDC provider and push role | trusted only for `repo:<github_repo>:ref:refs/tags/v*` and `repo:<github_repo>:ref:refs/heads/main`; ECR push scoped to those repositories |
+| GitHub OIDC provider and push role | trusted only for jobs that declare the GitHub environment `release` (`repo:<github_repo>:environment:release`); ECR push scoped to those repositories |
 
 The default VPC and one of its public subnets are used. State is **local** (`infra/aws/terraform.tfstate`, git-ignored).
 
@@ -109,7 +109,8 @@ randomly generated Grafana admin password that never leaves the box).
 
 Variables (`infra/aws/variables.tf`): `region` (default `eu-west-2`), `allowed_cidr` (required, your public IP as
 `x.x.x.x/32`; `0.0.0.0/0` is rejected), `instance_type` (`t4g.xlarge`), `github_repo` (`iAppGeek/apeiron`), and a few
-more (`volume_size_gb`, `expose_grafana`, `create_github_oidc_provider`, `registry`).
+more (`volume_size_gb`, `expose_grafana`, `create_github_oidc_provider`, `registry_kind`, `ghcr_owner`, `registry`).
+`registry_kind` is `ghcr` by default, matching the Images workflow, so the box pulls `ghcr.io/<ghcr_owner>/apeiron/<service>`; set it to `ecr` (and `REGISTRY_KIND=ecr` in GitHub) to use the stack's own ECR repositories.
 
 ### First `remote-up`
 
@@ -127,7 +128,7 @@ the web URL when the stack is healthy.
 
 Nothing is created until you answer Terraform's prompt; the scripts never apply by themselves. Useful options:
 `--tag sha-abc1234` (deploy one specific build), `--ref <git ref>` (compose files from a branch or tag),
-`--registry ghcr.io/iappgeek`, `--seed-rows 200000`, `--allowed-cidr`, `--apply` (re-run Terraform after your IP changes).
+`--registry-kind ecr`, `--registry ghcr.io/iappgeek`, `--seed-rows 200000`, `--allowed-cidr`, `--apply` (re-run Terraform after your IP changes).
 
 ### A normal session
 
@@ -191,7 +192,7 @@ The registry is chosen by a **repository variable**, `REGISTRY_KIND`:
 
 | | GHCR (default) | ECR |
 |---|---|---|
-| Set up | nothing | `terraform apply`, then set variables `REGISTRY_KIND=ecr` and `AWS_ROLE_ARN=<github_role_arn output>` (optionally `AWS_REGION`) |
+| Set up | nothing | `terraform apply` with `registry_kind=ecr`, create and protect the `release` environment (below), then set variables `REGISTRY_KIND=ecr` and `AWS_ROLE_ARN=<github_role_arn output>` (optionally `AWS_REGION`) |
 | Auth from the workflow | the built-in `GITHUB_TOKEN` with `packages: write` | GitHub OIDC: `aws-actions/configure-aws-credentials` assumes `AWS_ROLE_ARN`; no stored keys |
 | Cost | free for public packages | about $0.10/GB-month |
 | Auth from the box | none if the packages are public | the instance role (ECR pull), `aws ecr get-login-password` |
@@ -200,9 +201,10 @@ The registry is chosen by a **repository variable**, `REGISTRY_KIND`:
 ECR is used only when `REGISTRY_KIND=ecr` **and** `AWS_ROLE_ARN` is set; otherwise the workflow falls back to GHCR with a
 warning.
 
-With GHCR, packages created by a workflow start out private. After the first run, open each package's settings on GitHub
-and set its visibility to **public** (or the box cannot pull without a token). Then deploy with
-`scripts/remote-up.sh --registry ghcr.io/iappgeek`. Compose reads the image name as
+With GHCR, packages created by a workflow start out private. **The box pulls without credentials, so the packages must be
+public**: after the first run, open each package's settings on GitHub and change its visibility. That is your decision (it
+changes what your GitHub account exposes) and nothing in this repository does it. Because GHCR is the default registry,
+`scripts/remote-up.sh` then needs no extra flag. Compose reads the image name as
 `${REGISTRY}/apeiron/<service>:${TAG}`, so a local `docker compose up --build` still builds from source.
 
 Check a published manifest:
