@@ -25,6 +25,9 @@ export type Options = {
   switchEvery: number;
   /** Leave out the slow consumer and the codec switcher. */
   noSpecial: boolean;
+  /** Leave out only the slow consumer / only the codec switcher. */
+  noSlow: boolean;
+  noSwitcher: boolean;
   /** Seconds the slow consumer waits before it stops reading. */
   slowAt: number;
   help: boolean;
@@ -47,6 +50,8 @@ export const USAGE = `Usage: talos [options]
   --switch-every <s>   codec switcher period (default 20)
   --slow-at <s>        when the slow consumer stops reading (default 20% into the run, at least 10s)
   --no-special         no slow consumer, codec switcher or stress window
+  --no-slow            leave out only the slow consumer
+  --no-switcher        leave out only the codec switcher
   -h, --help
 `;
 
@@ -80,6 +85,8 @@ export function parseOptions(argv: readonly string[]): Options {
       'switch-every': { type: 'string' },
       'slow-at': { type: 'string' },
       'no-special': { type: 'boolean' },
+      'no-slow': { type: 'boolean' },
+      'no-switcher': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -103,6 +110,8 @@ export function parseOptions(argv: readonly string[]): Options {
     stressFor: num('stress-for', values['stress-for'], 60, 0),
     switchEvery: num('switch-every', values['switch-every'], 20, 1),
     noSpecial: values['no-special'] === true,
+    noSlow: values['no-slow'] === true,
+    noSwitcher: values['no-switcher'] === true,
     slowAt: num('slow-at', values['slow-at'], Math.max(10, duration * 0.2), 0),
     help: values.help === true,
   };

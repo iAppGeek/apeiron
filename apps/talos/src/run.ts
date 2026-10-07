@@ -60,7 +60,7 @@ export async function runLoadTest(options: Options, deps: RunDeps): Promise<Repo
   generatorLag.enable();
 
   const phases = stressPhases(options);
-  const plans = planClients({ clients: options.clients, codec: options.codec, seed: options.seed, special: !options.noSpecial, nowMs });
+  const plans = planClients({ clients: options.clients, codec: options.codec, seed: options.seed, special: !options.noSpecial, nowMs, slow: !options.noSlow, switcher: !options.noSwitcher });
   const all: TalosClient[] = [];
   let seenPreset: LoadPreset | null = null;
 

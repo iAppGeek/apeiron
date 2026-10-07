@@ -1,14 +1,19 @@
 import { COLUMN_BY_FIELD, type OrderField, type Row, type SsrmRequest } from '@apeiron/logos';
 import type { ColumnarStore } from '../store/columnar-store.js';
-import type { ChangeSet } from './changeset.js';
+import { ChangeSet } from './changeset.js';
 import { fail, ok, type Result } from './errors.js';
 import { TRADER_ALL } from './filter.js';
 import { normalizeRequest, type NormalizedQuery } from './request.js';
 import { RowBuf } from './row-buf.js';
 import { ViewCache, type ViewCacheOptions, type ViewCacheStats } from './view-cache.js';
-import { View, routeKeyOf, type ViewChanges } from './view.js';
+import { STRUCTURAL_REBUILD_THRESHOLD, View, routeKeyOf, type ViewChanges } from './view.js';
 
 export const SET_FILTER_VALUE_CAP = 5_000;
+
+/** A view behind by more rows than this many times its rebuild threshold is rebuilt rather than patched. */
+const CARRY_REBUILD_FACTOR = 4;
+
+type LoggedTick = { seq: number; cs: ChangeSet; grown: ReadonlySet<OrderField> };
 
 export type EngineOptions = ViewCacheOptions & {
   /** Largest `endRow - startRow` a client may request. */
@@ -69,6 +74,9 @@ export class QueryEngine {
   private readonly identity = RowBuf.empty();
   private lastApply: ApplyStats = { patched: 0, deferred: 0, unsubscribed: 0, pendingRebuild: 0, stale: 0 };
   private rebuildCount = 0;
+  private seq = 0;
+  private log: LoggedTick[] = [];
+  private behind = 0;
 
   constructor(
     private readonly store: ColumnarStore,
@@ -90,6 +98,10 @@ export class QueryEngine {
     if (view === undefined) {
       view = this.buildView(q);
       this.cache.set(q.viewKey, view);
+    } else if (view.stale) {
+      this.syncIdentity();
+      view.rebuild();
+      view.appliedSeq = this.seq;
     }
     const block = view.getBlock(q.groupKeys, q.startRow, q.endRow);
     this.cache.rebalance(q.viewKey);
@@ -115,6 +127,9 @@ export class QueryEngine {
     this.syncIdentity();
     this.refreshFilterValues(cs, grown);
     const t0 = performance.now();
+    // The tick goes into a shared log. A view that cannot be patched now simply stays behind (costing nothing), and
+    // when it is next patched the ticks it missed are merged once and shared by every view that missed the same ones.
+    if (cs.size > 0 || grown.size > 0) this.log.push({ seq: ++this.seq, cs, grown });
     const stats: ApplyStats = { patched: 0, deferred: 0, unsubscribed: 0, pendingRebuild: 0, stale: 0 };
     const active: View[] = [];
     for (const view of this.cache.values()) {
@@ -132,27 +147,71 @@ export class QueryEngine {
     }
     // The views the most clients are watching go first; a view skipped for several ticks goes ahead of them.
     active.sort((a, b) => Number(b.deferredTicks >= 3) - Number(a.deferredTicks >= 3) || b.refs - a.refs);
+    const threshold = this.options.structuralRebuildThreshold ?? STRUCTURAL_REBUILD_THRESHOLD;
+    const merged = new Map<number, { cs: ChangeSet; grown: Set<OrderField> } | null>();
     const out: ViewChanges[] = [];
+    this.behind = 0;
     for (const view of active) {
+      if (view.appliedSeq >= this.seq) continue;
       if (performance.now() - t0 >= budgetMs) {
-        view.defer(cs, grown);
+        view.deferredTicks++;
         stats.deferred++;
+        this.behind++;
         continue;
       }
-      out.push(view.applyChanges(cs, grown));
+      let pending = merged.get(view.appliedSeq);
+      if (pending === undefined) {
+        pending = this.mergeSince(view.appliedSeq, threshold * CARRY_REBUILD_FACTOR);
+        merged.set(view.appliedSeq, pending);
+      }
+      if (pending === null && view.deferRebuilds) {
+        // Too far behind for a patch to pay: rebuild instead (between ticks, throttled).
+        view.rebuildPending = true;
+        stats.pendingRebuild++;
+        continue;
+      }
+      const tick = pending ?? this.mergeSince(view.appliedSeq, Infinity);
+      out.push(view.applyChanges(tick?.cs ?? cs, tick?.grown ?? grown));
+      view.appliedSeq = this.seq;
       if (view.rebuildPending) stats.pendingRebuild++;
       else stats.patched++;
     }
     for (const view of this.cache.values()) if (view.stale) stats.stale++;
+    this.pruneLog(active);
     this.lastApply = stats;
     this.cache.rebalance('');
     return out;
   }
 
-  /** True while some view carries changes it has not patched in, so a flush with an empty ChangeSet still has work. */
+  /** The union of every logged tick after `seq`, or null when it holds more rows than `limit`. */
+  private mergeSince(seq: number, limit: number): { cs: ChangeSet; grown: Set<OrderField> } | null {
+    const ticks = this.log.filter((t) => t.seq > seq);
+    if (ticks.length === 1) return { cs: (ticks[0] as LoggedTick).cs, grown: new Set((ticks[0] as LoggedTick).grown) };
+    const cs = new ChangeSet();
+    const grown = new Set<OrderField>();
+    for (const t of ticks) {
+      cs.merge(t.cs);
+      for (const f of t.grown) grown.add(f);
+      if (cs.size > limit) return null;
+    }
+    return { cs, grown };
+  }
+
+  /** Drops logged ticks that every maintained view has already applied. */
+  private pruneLog(active: readonly View[]): void {
+    let oldest = this.seq;
+    for (const v of active) if (!v.rebuildPending) oldest = Math.min(oldest, v.appliedSeq);
+    if (this.log.length > 0 && (this.log[0] as LoggedTick).seq <= oldest) this.log = this.log.filter((t) => t.seq > oldest);
+  }
+
+  /** Number of ticks logged so far (views record the last one they reflect). */
+  get tickSeq(): number {
+    return this.seq;
+  }
+
+  /** True while some maintained view is behind the latest tick, so a flush with an empty ChangeSet still has work. */
   hasDeferredWork(): boolean {
-    for (const view of this.cache.values()) if (view.hasCarry) return true;
-    return false;
+    return this.behind > 0;
   }
 
   /**
@@ -176,6 +235,7 @@ export class QueryEngine {
   rebuildView(view: View, now = Date.now()): void {
     this.syncIdentity();
     view.rebuild();
+    view.appliedSeq = this.seq;
     view.lastRebuildAt = now;
     this.rebuildCount++;
     this.cache.rebalance('');
@@ -189,7 +249,10 @@ export class QueryEngine {
   /** Rebuilds every cached view from the store (used when an append breaks ascending `orderId` order). */
   rebuildAll(): void {
     this.syncIdentity();
-    for (const view of this.cache.values()) view.rebuild();
+    for (const view of this.cache.values()) {
+      view.rebuild();
+      view.appliedSeq = this.seq;
+    }
   }
 
   views(): IterableIterator<View> {
@@ -238,7 +301,9 @@ export class QueryEngine {
 
   private buildView(q: NormalizedQuery): View {
     this.syncIdentity();
-    return new View(this.store, q, this.identity, q.viewKey, this.options.structuralRebuildThreshold);
+    const view = new View(this.store, q, this.identity, q.viewKey, this.options.structuralRebuildThreshold);
+    view.appliedSeq = this.seq;
+    return view;
   }
 
   private syncIdentity(): void {

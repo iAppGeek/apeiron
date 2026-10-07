@@ -36,6 +36,11 @@ describe('parseOptions', () => {
     expect(() => parseOptions(['--nope'])).toThrow();
   });
 
+  it('can leave out the slow consumer or the codec switcher alone', () => {
+    expect(parseOptions(['--no-slow'])).toMatchObject({ noSlow: true, noSwitcher: false, noSpecial: false });
+    expect(parseOptions(['--no-switcher'])).toMatchObject({ noSlow: false, noSwitcher: true });
+  });
+
   it('reads help', () => {
     expect(parseOptions(['-h']).help).toBe(true);
   });

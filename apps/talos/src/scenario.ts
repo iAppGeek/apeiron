@@ -247,11 +247,11 @@ export function pickScrollTarget(rng: Rng, view: ViewSpec, knowledge: ViewKnowle
  * Who the clients are. Role, trader and starting view are fixed by the seed; client 0 also controls the stress
  * window, client 1 is the slow consumer and client 2 the codec switcher (when there are at least four clients).
  */
-export function planClients(options: { clients: number; codec: CodecChoice; seed: number; special: boolean; nowMs: number }): ClientPlan[] {
+export function planClients(options: { clients: number; codec: CodecChoice; seed: number; special: boolean; nowMs: number; slow?: boolean; switcher?: boolean }): ClientPlan[] {
   const plans: ClientPlan[] = [];
   for (let index = 0; index < options.clients; index++) {
     const rng = clientRng(options.seed, index);
-    const roles: ClientRole = !options.special || options.clients < 4 ? 'normal' : index === 1 ? 'slow' : index === 2 ? 'switcher' : 'normal';
+    const roles: ClientRole = !options.special || options.clients < 4 ? 'normal' : index === 1 && options.slow !== false ? 'slow' : index === 2 && options.switcher !== false ? 'switcher' : 'normal';
     const codec: CodecName = options.codec === 'both' ? (index % 2 === 0 ? 'json' : 'msgpack') : options.codec;
     plans.push({
       index,

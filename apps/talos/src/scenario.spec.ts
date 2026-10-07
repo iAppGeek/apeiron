@@ -28,6 +28,13 @@ describe('planClients', () => {
     expect(plan({ clients: 3 }).every((c) => c.role === 'normal')).toBe(true);
   });
 
+  it('can drop the slow consumer or the switcher alone', () => {
+    expect(plan({ slow: false }).some((c) => c.role === 'slow')).toBe(false);
+    expect(plan({ slow: false }).some((c) => c.role === 'switcher')).toBe(true);
+    expect(plan({ switcher: false }).some((c) => c.role === 'switcher')).toBe(false);
+    expect(plan({ switcher: false }).some((c) => c.role === 'slow')).toBe(true);
+  });
+
   it('alternates codecs for both, otherwise uses the chosen one', () => {
     expect(plan({ codec: 'both' }).map((c) => c.codec).slice(0, 4)).toEqual(['json', 'msgpack', 'json', 'msgpack']);
     expect(plan({ codec: 'msgpack' }).every((c) => c.codec === 'msgpack')).toBe(true);

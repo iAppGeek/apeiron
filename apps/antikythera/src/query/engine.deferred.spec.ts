@@ -142,7 +142,7 @@ describe('flush budget', () => {
     cs1.noteUpdate(store.rowIndexOf('T0000001') as number, r1.changed, r1.prev);
     expect(engine.applyChanges(cs1, 0)).toHaveLength(0);
     expect(engine.stats().lastApply.deferred).toBe(1);
-    expect(view?.hasCarry).toBe(true);
+    expect(view!.appliedSeq).toBeLessThan(engine.tickSeq);
     expect(engine.hasDeferredWork()).toBe(true);
     expect(ids(engine, BY_QTY)).toEqual(['T0000001', 'T0000002', 'T0000003']);
 
@@ -153,7 +153,7 @@ describe('flush budget', () => {
     const r3 = store.updateRow(store.rowIndexOf('T0000002') as number, { orderQty: 0 });
     cs2.noteUpdate(store.rowIndexOf('T0000002') as number, r3.changed, r3.prev);
     expect(engine.applyChanges(cs2)).toHaveLength(1);
-    expect(view?.hasCarry).toBe(false);
+    expect(view!.appliedSeq).toBe(engine.tickSeq);
     expect(engine.hasDeferredWork()).toBe(false);
     expect(qty(engine, BY_QTY)).toEqual([0, 1, 3]);
   });
@@ -203,18 +203,49 @@ describe('flush budget', () => {
     expect(order).toEqual(['qty', 'created']);
   });
 
-  it('turns a carry that has grown far past the threshold into a pending rebuild', () => {
+  it('turns a view that fell too far behind for a patch to pay into a pending rebuild', () => {
     const { store, engine } = setup({ structuralRebuildThreshold: 0 });
     subscribe(engine, BY_QTY);
     const view = [...engine.views()][0];
-    const cs = new ChangeSet();
-    for (let i = 0; i < 3; i++) {
-      const row = i;
-      const r = store.updateRow(row, { orderQty: 100 + i });
-      cs.noteUpdate(row, r.changed, r.prev);
-    }
-    engine.applyChanges(cs, 0);
+    const tick = (n: number): ChangeSet => {
+      const cs = new ChangeSet();
+      const r = store.updateRow(n, { orderQty: 100 + n });
+      cs.noteUpdate(n, r.changed, r.prev);
+      return cs;
+    };
+    engine.applyChanges(tick(0), 0);
+    expect(view?.rebuildPending).toBe(false);
+    engine.applyChanges(tick(1));
     expect(view?.rebuildPending).toBe(true);
-    expect(view?.hasCarry).toBe(false);
+    engine.rebuildView(view!, Date.now() + 5_000);
+    expect(ids(engine, BY_QTY)).toEqual(['T0000003', 'T0000001', 'T0000002']);
+  });
+
+  it('deferring costs nothing per view: the missed ticks are merged once and shared by every view that missed them', () => {
+    const { store, engine } = setup();
+    for (const r of [BY_QTY, req(), req({ sortModel: [{ colId: 'orderQty', sort: 'desc' }] })]) subscribe(engine, r);
+    const merges: number[] = [];
+    const orig = ChangeSet.prototype.merge;
+    ChangeSet.prototype.merge = function (this: ChangeSet, later: ChangeSet): void {
+      merges.push(later.size);
+      return orig.call(this, later);
+    };
+    try {
+      const tick = (n: number, qtyValue: number): ChangeSet => {
+        const cs = new ChangeSet();
+        const r = store.updateRow(n, { orderQty: qtyValue });
+        cs.noteUpdate(n, r.changed, r.prev);
+        return cs;
+      };
+      engine.applyChanges(tick(0, 11), 0);
+      engine.applyChanges(tick(1, 12), 0);
+      expect(merges).toEqual([]);
+      engine.applyChanges(tick(2, 13));
+      // Three ticks missed by three views: merged once (three merges), not three times.
+      expect(merges).toHaveLength(3);
+      expect(ids(engine, BY_QTY)).toEqual(['T0000001', 'T0000002', 'T0000003']);
+    } finally {
+      ChangeSet.prototype.merge = orig;
+    }
   });
 });

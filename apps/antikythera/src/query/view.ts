@@ -1,6 +1,6 @@
 import { COLUMN_BY_FIELD, type OrderField, type Row } from '@apeiron/logos';
 import type { ColumnarStore } from '../store/columnar-store.js';
-import { ChangeSet, maskOf, type FieldMask } from './changeset.js';
+import { maskOf, type ChangeSet, type FieldMask } from './changeset.js';
 import { compileFilter, filterRows, type Predicate } from './filter.js';
 import {
   buildGroupLevel,
@@ -19,8 +19,6 @@ const DAY_MS = 86_400_000;
 /** Above this many structural changes in one tick a view is rebuilt instead of patched (Appendix D). */
 export const STRUCTURAL_REBUILD_THRESHOLD = 5_000;
 
-/** A view that carries more changed rows than this many times its rebuild threshold is rebuilt rather than patched. */
-const CARRY_REBUILD_FACTOR = 4;
 
 /** The parts of a query that define a view (everything except the block range and group keys). */
 export type ViewSpec = Pick<NormalizedQuery, 'sort' | 'groupCols' | 'valueCols' | 'filter' | 'traderId'>;
@@ -132,9 +130,8 @@ export class View {
   deferredTicks = 0;
   /** When true, a tick over the rebuild threshold marks the view `rebuildPending` instead of rebuilding inside `applyChanges`. */
   deferRebuilds = false;
-  /** Changes from ticks the view was too busy to patch, merged into one ChangeSet. */
-  private carry: ChangeSet | null = null;
-  private carryGrown = new Set<OrderField>();
+  /** Sequence number of the last engine tick this view reflects (set by the engine). */
+  appliedSeq = 0;
   private root!: RouteNode;
   private ownsRoot = true;
   private preds: Predicate[] = [];
@@ -239,22 +236,10 @@ export class View {
   rebuild(): void {
     this.stale = false;
     this.rebuildPending = false;
-    this.carry = null;
-    this.carryGrown = new Set();
     this.deferredTicks = 0;
     this.lastRebuildAt = Date.now();
     this.build();
     this.bytes = this.measure();
-  }
-
-  /** Whether changes from skipped ticks are waiting to be patched in. */
-  get hasCarry(): boolean {
-    return this.carry !== null;
-  }
-
-  /** Rows carried over from skipped ticks. */
-  get carrySize(): number {
-    return this.carry?.size ?? 0;
   }
 
   /**
@@ -265,28 +250,9 @@ export class View {
     if (this.stale) return;
     this.stale = true;
     this.rebuildPending = false;
-    this.carry = null;
-    this.carryGrown = new Set();
     this.root = { rows: RowBuf.empty() };
     this.ownsRoot = true;
     this.bytes = 0;
-  }
-
-  /**
-   * Skips this tick for lack of time: the tick's changes are folded into one pending ChangeSet that the next
-   * `applyChanges` patches in together with that tick's own (exact, because the first old value of each field
-   * wins). A carry that has grown past the point where a patch pays becomes a pending rebuild instead.
-   */
-  defer(cs: ChangeSet, grown: ReadonlySet<OrderField>): void {
-    this.deferredTicks++;
-    if (this.carry === null) this.carry = new ChangeSet();
-    this.carry.merge(cs);
-    for (const f of grown) this.carryGrown.add(f);
-    if (this.carry.size > this.rebuildThreshold * CARRY_REBUILD_FACTOR && this.deferRebuilds) {
-      this.carry = null;
-      this.carryGrown = new Set();
-      this.rebuildPending = true;
-    }
   }
 
   /**
@@ -296,13 +262,6 @@ export class View {
    */
   applyChanges(cs: ChangeSet, grown: ReadonlySet<OrderField>): ViewChanges {
     const changes: ViewChanges = { view: this, rebuilt: false, routes: new Map(), removedRoutes: [] };
-    if (this.carry !== null) {
-      this.carry.merge(cs);
-      cs = this.carry;
-      grown = new Set([...this.carryGrown, ...grown]);
-      this.carry = null;
-      this.carryGrown = new Set();
-    }
     this.deferredTicks = 0;
     try {
       this.patch(cs, grown, changes);

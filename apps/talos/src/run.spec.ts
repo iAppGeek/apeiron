@@ -21,6 +21,8 @@ const BASE: Options = {
   stressFor: 30,
   switchEvery: 20,
   noSpecial: false,
+  noSlow: false,
+  noSwitcher: false,
   slowAt: 10,
   help: false,
 };

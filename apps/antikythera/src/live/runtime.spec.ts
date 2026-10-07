@@ -358,7 +358,7 @@ describe('LiveRuntime deferred view maintenance', () => {
     await r.bus.publish('orders.events', update(r.orders[0]?.orderId ?? '', { createdAt: 7 }));
     await vi.advanceTimersByTimeAsync(100);
     const view = [...r.engine.views()][0];
-    expect(view?.hasCarry).toBe(true);
+    expect(view!.appliedSeq).toBeLessThan(r.engine.tickSeq);
     expect(r.engine.stats().lastApply.deferred).toBe(1);
     expect(r.engine.hasDeferredWork()).toBe(true);
     await r.runtime.stop();

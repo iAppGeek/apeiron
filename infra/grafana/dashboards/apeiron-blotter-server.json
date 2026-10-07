@@ -87,7 +87,8 @@
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ]
     },
@@ -147,7 +148,8 @@
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ]
     },
@@ -207,7 +209,8 @@
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ]
     },
@@ -267,7 +270,8 @@
           "legendFormat": "{{preset}}",
           "refId": "A",
           "editorMode": "code",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ]
     },
@@ -327,7 +331,8 @@
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ]
     },
@@ -387,7 +392,8 @@
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ]
     },
@@ -447,7 +453,8 @@
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ]
     },
@@ -508,7 +515,8 @@
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ]
     },
@@ -1777,19 +1785,195 @@
     },
     {
       "id": 27,
+      "type": "timeseries",
+      "title": "Views per flush: patched, deferred, skipped",
+      "description": "What each flush did with the cached views. unsubscribed: no client tracks the view, so it is not patched. deferred: flush budget (40 ms) spent, changes carried to the next tick. pending_rebuild: waiting for a deferred rebuild.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (outcome) (rate(apeiron_flush_views_total{job=\"antikythera\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "apeiron_views_stale{job=\"antikythera\"}",
+          "legendFormat": "stale views",
+          "refId": "B",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "apeiron_views_rebuild_pending{job=\"antikythera\"}",
+          "legendFormat": "rebuild pending",
+          "refId": "C",
+          "editorMode": "code",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Deferred view rebuilds",
+      "description": "Rebuilds run between ticks, at most once a second per view and one per event-loop turn.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 44,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(apeiron_view_rebuild_duration_seconds_bucket{job=\"antikythera\"}[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(apeiron_view_rebuild_duration_seconds_bucket{job=\"antikythera\"}[$__rate_interval])))",
+          "legendFormat": "p99",
+          "refId": "B",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(apeiron_view_rebuild_duration_seconds_count{job=\"antikythera\"}[$__rate_interval])",
+          "legendFormat": "rebuilds/s",
+          "refId": "C",
+          "editorMode": "code",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 29,
       "type": "row",
       "title": "Ingest, write-behind and view cache",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 45,
+        "y": 52,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 28,
+      "id": 30,
       "type": "timeseries",
       "title": "Ingest rate",
       "description": "Events ingested by antikythera per second: price ticks, order events, client commands.",
@@ -1799,7 +1983,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 53,
         "w": 6,
         "h": 8
       },
@@ -1858,7 +2042,7 @@
       ]
     },
     {
-      "id": 29,
+      "id": 31,
       "type": "timeseries",
       "title": "Write-behind",
       "description": "Orders waiting to be persisted, and the batch size of each Mongo upsert.",
@@ -1868,7 +2052,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 46,
+        "y": 53,
         "w": 6,
         "h": 8
       },
@@ -1957,7 +2141,7 @@
       ]
     },
     {
-      "id": 30,
+      "id": 32,
       "type": "timeseries",
       "title": "Write-behind latency",
       "description": "Mongo upsert time per batch.",
@@ -1967,7 +2151,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 46,
+        "y": 53,
         "w": 6,
         "h": 8
       },
@@ -2034,7 +2218,7 @@
       ]
     },
     {
-      "id": 31,
+      "id": 33,
       "type": "timeseries",
       "title": "Ingest queue and live rows",
       "description": "",
@@ -2044,7 +2228,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 46,
+        "y": 53,
         "w": 6,
         "h": 8
       },
@@ -2111,7 +2295,7 @@
       ]
     },
     {
-      "id": 32,
+      "id": 34,
       "type": "timeseries",
       "title": "View cache size",
       "description": "Views held, and the index memory they use (bytes, right axis in the legend).",
@@ -2121,7 +2305,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 54,
+        "y": 61,
         "w": 6,
         "h": 8
       },
@@ -2188,7 +2372,7 @@
       ]
     },
     {
-      "id": 33,
+      "id": 35,
       "type": "timeseries",
       "title": "View cache hits and misses",
       "description": "",
@@ -2198,7 +2382,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 54,
+        "y": 61,
         "w": 6,
         "h": 8
       },
@@ -2276,7 +2460,7 @@
       ]
     },
     {
-      "id": 34,
+      "id": 36,
       "type": "timeseries",
       "title": "Backpressure events",
       "description": "soft_conflate: a delta was held back for a client over the soft cap. slow_consumer: a client was closed.",
@@ -2286,7 +2470,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 54,
+        "y": 61,
         "w": 6,
         "h": 8
       },
@@ -2342,7 +2526,7 @@
       ]
     },
     {
-      "id": 35,
+      "id": 37,
       "type": "timeseries",
       "title": "Errors sent to clients",
       "description": "",
@@ -2352,7 +2536,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 54,
+        "y": 61,
         "w": 6,
         "h": 8
       },
@@ -2408,20 +2592,20 @@
       ]
     },
     {
-      "id": 36,
+      "id": 38,
       "type": "row",
       "title": "Hermes (mock middleware)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 63,
+        "y": 70,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 37,
+      "id": 39,
       "type": "timeseries",
       "title": "LIVE orders and preset",
       "description": "LIVE and pending orders; the dashed-in step shows when the stress preset is active.",
@@ -2431,7 +2615,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 64,
+        "y": 71,
         "w": 8,
         "h": 8
       },
@@ -2509,7 +2693,7 @@
       ]
     },
     {
-      "id": 38,
+      "id": 40,
       "type": "timeseries",
       "title": "Events published/s by type",
       "description": "",
@@ -2519,7 +2703,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 64,
+        "y": 71,
         "w": 8,
         "h": 8
       },
@@ -2578,7 +2762,7 @@
       ]
     },
     {
-      "id": 39,
+      "id": 41,
       "type": "timeseries",
       "title": "Price ticks/s, commands/s, publish errors/s",
       "description": "",
@@ -2588,7 +2772,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 64,
+        "y": 71,
         "w": 8,
         "h": 8
       },
