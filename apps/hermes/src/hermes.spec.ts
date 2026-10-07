@@ -1,4 +1,4 @@
-import { MemoryBus, parseLoadState, parseOrderEvent, parsePriceTick, PAIRS, type OrderEvent, type PriceTick } from '@apeiron/logos';
+import { MemoryBus, makeCommandId, parseLoadState, parseOrderEvent, parsePriceTick, PAIRS, type OrderCommand, type OrderEvent, type PriceTick } from '@apeiron/logos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startHermes, type Hermes } from './hermes.js';
 import { createLogger } from './log.js';
@@ -131,5 +131,85 @@ describe('startHermes', () => {
     expect(bus.streamLog('ORDERS').length).toBe(before);
     expect(hermes.status().status).toBe('stopped');
     running = null;
+  });
+});
+
+describe('order commands', () => {
+  const eventsFor = (bus: MemoryBus, commandId: string): OrderEvent[] =>
+    bus
+      .streamLog('ORDERS')
+      .filter((m) => m.subject === 'orders.events')
+      .map((m) => m.payload as OrderEvent)
+      .filter((e) => 'commandId' in e && e.commandId === commandId);
+
+  const cmd = (orderId: string, action: OrderCommand['action'], reqId: number, ts = SEED_NOW): OrderCommand => ({
+    orderId,
+    action,
+    requestedBy: 'client-1',
+    ts,
+    commandId: makeCommandId('client-1', reqId),
+  });
+
+  const liveOrderId = (): string => currentOrders().find((o) => o.status === 'LIVE')?.orderId as string;
+
+  it('answers a valid command with an UPDATE carrying the command id and absolute values', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const hermes = await start(bus);
+    const id = liveOrderId();
+    await bus.publish('orders.commands', cmd(id, 'PAUSE', 1));
+    const [event] = eventsFor(bus, 'client-1:1');
+    expect(event).toMatchObject({ type: 'UPDATE', order: { orderId: id, status: 'PAUSED' } });
+    expect(hermes.simulator.order(id)?.status).toBe('PAUSED');
+    expect(hermes.status().commandsHandled).toBe(1);
+  });
+
+  it('answers an invalid transition and an unknown order with REJECT', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    await start(bus);
+    await bus.publish('orders.commands', cmd(liveOrderId(), 'RESUME', 2));
+    await bus.publish('orders.commands', cmd('ALG00000001', 'CANCEL', 3));
+    expect(eventsFor(bus, 'client-1:2')[0]).toMatchObject({ type: 'REJECT', code: 'INVALID_TRANSITION' });
+    expect(eventsFor(bus, 'client-1:3')[0]).toMatchObject({ type: 'REJECT', code: 'UNKNOWN_ORDER' });
+  });
+
+  it('acknowledges a command only after publishing its answer', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const hermes = await start(bus);
+    await bus.publish('orders.commands', cmd(liveOrderId(), 'PAUSE', 4));
+    await vi.advanceTimersByTimeAsync(10);
+    await hermes.stop();
+    running = null;
+    const replayed: unknown[] = [];
+    await bus.consume({ stream: 'ORDERS', durable: 'hermes-commands', subject: 'orders.commands' }, (p) => void replayed.push(p));
+    expect(replayed).toEqual([]);
+  });
+
+  it('leaves the command unacknowledged when the answer cannot be published', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    await start(bus);
+    const original = bus.publish.bind(bus);
+    vi.spyOn(bus, 'publish').mockImplementation((subject, payload) =>
+      subject === 'orders.events' ? Promise.reject(new Error('nats down')) : original(subject, payload),
+    );
+    await bus.publish('orders.commands', cmd(liveOrderId(), 'PAUSE', 5));
+    await vi.advanceTimersByTimeAsync(10);
+    const replayed: unknown[] = [];
+    await bus.consume({ stream: 'ORDERS', durable: 'hermes-commands', subject: 'orders.commands' }, (p) => void replayed.push(p));
+    expect(replayed).toHaveLength(1);
+  });
+
+  it('drops invalid and stale commands without answering', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const hermes = await start(bus);
+    const before = hermes.status().commandsHandled;
+    await bus.publish('orders.commands', { orderId: 'x', action: 'DELETE' });
+    await bus.publish('orders.commands', cmd(liveOrderId(), 'PAUSE', 6, SEED_NOW - 31_000));
+    expect(eventsFor(bus, 'client-1:6')).toEqual([]);
+    expect(hermes.status().commandsHandled).toBe(before);
   });
 });

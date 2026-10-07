@@ -12,7 +12,7 @@ import {
   type CurrencyPair,
   type Order,
 } from './order.js';
-import type { CommandAction, LoadPreset, ParseResult } from './protocol.js';
+import { COMMAND_ACTIONS, type CommandAction, type LoadPreset, type ParseResult } from './protocol.js';
 
 /** NATS subjects and JetStream names (Appendix C). */
 export const SUBJECTS = {
@@ -32,6 +32,10 @@ export const priceSubject = (pair: CurrencyPair): string => `prices.${pair}`;
 export type PriceTick = { pair: CurrencyPair; bid: number; ask: number; ts: number };
 
 export type RejectCode = 'INVALID_TRANSITION' | 'UNKNOWN_ORDER';
+export const REJECT_CODES = ['INVALID_TRANSITION', 'UNKNOWN_ORDER'] as const satisfies readonly RejectCode[];
+
+/** The id that ties a client request to the events it causes: `"<clientId>:<reqId>"`. */
+export const makeCommandId = (clientId: string, reqId: number): string => `${clientId}:${reqId}`;
 
 /**
  * `orders.events` payloads. Every field value is absolute and post-change, never an increment, so
@@ -133,7 +137,7 @@ export const orderEventSchema: z.ZodType<OrderEvent> = z.discriminatedUnion('typ
     type: z.literal('REJECT'),
     commandId: z.string(),
     orderId: z.string(),
-    code: z.enum(['INVALID_TRANSITION', 'UNKNOWN_ORDER']),
+    code: z.enum(REJECT_CODES),
     message: z.string(),
     ts: num,
   }),
@@ -145,7 +149,7 @@ export const loadStateSchema: z.ZodType<LoadState> = z.object({ preset: z.enum([
 
 export const orderCommandSchema: z.ZodType<OrderCommand> = z.object({
   orderId: z.string().min(1),
-  action: z.enum(['CANCEL', 'PAUSE', 'RESUME']),
+  action: z.enum(COMMAND_ACTIONS),
   requestedBy: z.string(),
   ts: num,
   commandId: z.string().min(1),

@@ -3,7 +3,8 @@ import type { Order, OrderStatus, TraderInfo } from './order.js';
 
 export type CodecName = 'json' | 'msgpack';
 export type LoadPreset = 'medium' | 'stress';
-export type CommandAction = 'CANCEL' | 'PAUSE' | 'RESUME';
+export const COMMAND_ACTIONS = ['CANCEL', 'PAUSE', 'RESUME'] as const;
+export type CommandAction = (typeof COMMAND_ACTIONS)[number];
 
 /** Subset of AG Grid's `IServerSideGetRowsRequest` that the server supports. */
 export type SsrmRequest = {
@@ -141,7 +142,7 @@ export const clientMsgSchema: z.ZodType<ClientMsg> = z.discriminatedUnion('t', [
     t: z.literal('command'),
     reqId: nonNegInt,
     orderId: z.string().min(1),
-    action: z.enum(['CANCEL', 'PAUSE', 'RESUME']),
+    action: z.enum(COMMAND_ACTIONS),
   }),
   z.object({ t: z.literal('control'), reqId: nonNegInt, preset: z.enum(['medium', 'stress']) }),
   z.object({ t: z.literal('ping'), ts: z.number() }),

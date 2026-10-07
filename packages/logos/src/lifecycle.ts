@@ -1,3 +1,4 @@
+import type { CommandAction } from './protocol.js';
 import { PAIR_BY_NAME, type Order, type OrderStatus, type Side } from './order.js';
 
 const roundTo = (value: number, decimals: number): number => {
@@ -79,6 +80,31 @@ const ALLOWED: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
   CANCELLED: [],
 };
 
+/** The status each command moves an order to. */
+export const COMMAND_TARGET: Readonly<Record<CommandAction, OrderStatus>> = {
+  CANCEL: 'CANCELLED',
+  PAUSE: 'PAUSED',
+  RESUME: 'LIVE',
+};
+
+/** Whether the lifecycle allows going from one status to another (ignores order quantities). */
+export const canTransition = (from: OrderStatus, to: OrderStatus): boolean => ALLOWED[from].includes(to);
+
+/** The statuses each command may start from. RESUME is narrower than the lifecycle: PENDING_START to LIVE is the clock's job, not a trader's. */
+const COMMAND_FROM: Readonly<Record<CommandAction, readonly OrderStatus[]>> = {
+  CANCEL: ['PENDING_START', 'LIVE', 'PAUSED'],
+  PAUSE: ['LIVE'],
+  RESUME: ['PAUSED'],
+};
+
+/** Whether a command is valid for an order in `status`: CANCEL from LIVE, PAUSED or PENDING_START; PAUSE from LIVE; RESUME from PAUSED. */
+export const canApplyCommand = (status: OrderStatus, action: CommandAction): boolean =>
+  COMMAND_FROM[action].includes(status) && canTransition(status, COMMAND_TARGET[action]);
+
+/** The commands valid for an order in `status`. */
+export const availableCommands = (status: OrderStatus): CommandAction[] =>
+  (Object.keys(COMMAND_TARGET) as CommandAction[]).filter((a) => canApplyCommand(status, a));
+
 export type TransitionResult =
   | { ok: true; changes: Partial<Order> }
   | { ok: false; code: 'INVALID_TRANSITION'; message: string };
@@ -147,4 +173,13 @@ export function derivePriceFields(order: PriceDerivationInput, quote: PriceQuote
   if (order.avgFillPrice !== null) changes.slippageBps = slippageBpsOf(order, order.avgFillPrice);
   if (isOpen(order.status)) changes.unrealisedPnlUsd = pnlUsdOf(order, marketMid);
   return changes;
+}
+
+/** Applies a command through {@link transition}: the absolute changed fields, or INVALID_TRANSITION. */
+export function applyCommand(order: Order, action: CommandAction, now: number): TransitionResult {
+  const to = COMMAND_TARGET[action];
+  if (!canApplyCommand(order.status, action)) {
+    return { ok: false, code: 'INVALID_TRANSITION', message: `Cannot ${action.toLowerCase()} an order that is ${order.status}` };
+  }
+  return transition(order, to, now);
 }

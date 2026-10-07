@@ -1,5 +1,8 @@
 import {
+  CONSUMERS,
+  STREAMS,
   SUBJECTS,
+  parseOrderCommand,
   mulberry32,
   parseLoadControl,
   type LoadState,
@@ -34,6 +37,7 @@ export type HermesStatus = {
   live: number;
   pending: number;
   eventsPublished: number;
+  commandsHandled: number;
   ticksPublished: number;
   publishErrors: number;
   inflight: number;
@@ -41,6 +45,9 @@ export type HermesStatus = {
 
 /** How often hermes repeats `control.state`, so a server that starts later learns the preset within this long. */
 export const STATE_INTERVAL_MS = 5_000;
+
+/** A command older than this when hermes sees it is dropped: the server has already timed it out. */
+export const COMMAND_MAX_AGE_MS = 30_000;
 
 /** Publishes beyond this many unacknowledged messages are held back until the backlog drains. */
 export const MAX_INFLIGHT = 20_000;
@@ -67,22 +74,27 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
   let inflight = 0;
   let stopped = false;
 
-  const publish = (subject: string, payload: unknown, kind: 'event' | 'tick'): void => {
+  /** Resolves true once the broker has the message, false if the publish failed. Never rejects. */
+  const publish = (subject: string, payload: unknown, kind: 'event' | 'tick'): Promise<boolean> => {
     inflight++;
-    bus
+    return bus
       .publish(subject, payload)
       .then(() => {
         if (kind === 'event') eventsPublished++;
         else ticksPublished++;
+        return true;
       })
       .catch((error: unknown) => {
         publishErrors++;
         if (publishErrors === 1 || publishErrors % 1000 === 0) log.warn({ err: error, publishErrors }, 'publish failed');
+        return false;
       })
       .finally(() => {
         inflight--;
       });
   };
+
+  let lastEventPublish: Promise<boolean> | null = null;
 
   const simulator = new Simulator({
     rng,
@@ -90,12 +102,14 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
     preset: options.preset,
     current: options.current,
     startSeq: nextSeqFrom(options.maxOrderId),
-    emit: (event: OrderEvent): void => publish(SUBJECTS.ordersEvents, event, 'event'),
+    emit: (event: OrderEvent): void => {
+      lastEventPublish = publish(SUBJECTS.ordersEvents, event, 'event');
+    },
   });
 
   // Prices first, so reconciliation fills and new orders use the starting levels.
   const publishTicks = (): void => {
-    for (const tick of feed.tick(now())) publish(priceSubject(tick.pair), tick, 'tick');
+    for (const tick of feed.tick(now())) void publish(priceSubject(tick.pair), tick, 'tick');
   };
   publishTicks();
 
@@ -126,6 +140,33 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
     publishState();
   });
 
+  let commandsHandled = 0;
+  const commands = await bus.consume(
+    { stream: STREAMS.orders, durable: CONSUMERS.hermesCommands, subject: SUBJECTS.ordersCommands },
+    (payload, _subject, ack) => {
+      const parsed = parseOrderCommand(payload);
+      if (!parsed.ok) {
+        log.warn({ error: parsed.error }, 'dropped invalid order command');
+        ack();
+        return;
+      }
+      const command = parsed.value;
+      const t = now();
+      if (t - command.ts > COMMAND_MAX_AGE_MS) {
+        log.warn({ commandId: command.commandId, ageMs: t - command.ts }, 'dropped stale order command');
+        ack();
+        return;
+      }
+      lastEventPublish = null;
+      simulator.command(command, t);
+      commandsHandled++;
+      // Acknowledge only once the answering event is on the stream; otherwise the command is redelivered.
+      void (lastEventPublish ?? Promise.resolve(true)).then((published) => {
+        if (published) ack();
+      });
+    },
+  );
+
   let last = now();
   const tickEveryMs = 1000 / TICKS_PER_SECOND;
   let nextTickAt = last + tickEveryMs;
@@ -155,6 +196,7 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
       live: simulator.liveCount,
       pending: simulator.pendingCount,
       eventsPublished,
+      commandsHandled,
       ticksPublished,
       publishErrors,
       inflight,
@@ -164,6 +206,7 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
       clearInterval(timer);
       clearInterval(stateTimer);
       await control?.close();
+      await commands.close();
     },
   };
 }

@@ -1,6 +1,7 @@
 import {
   OrderFactory,
   PAIR_BY_NAME,
+  applyCommand,
   applyFill,
   normal,
   parseOrderSeq,
@@ -8,6 +9,7 @@ import {
   transition,
   uniform,
   type LoadPreset,
+  type OrderCommand,
   type Order,
   type OrderEvent,
   type Rng,
@@ -192,6 +194,39 @@ export class Simulator {
     return created;
   }
 
+  /**
+   * Applies a trader command to an order the simulator holds and answers it on `orders.events`: an UPDATE
+   * carrying the command's id and the absolute changed fields, or a REJECT (INVALID_TRANSITION from the
+   * lifecycle rules, UNKNOWN_ORDER for an order that is not held, such as a historical one).
+   */
+  command(command: OrderCommand, now: number): void {
+    const order = this.orders.get(command.orderId);
+    if (order === undefined) {
+      this.emit({
+        type: 'REJECT',
+        commandId: command.commandId,
+        orderId: command.orderId,
+        code: 'UNKNOWN_ORDER',
+        message: `Order ${command.orderId} is not active`,
+        ts: now,
+      });
+      return;
+    }
+    const result = applyCommand(order, command.action, now);
+    if (!result.ok) {
+      this.emit({
+        type: 'REJECT',
+        commandId: command.commandId,
+        orderId: command.orderId,
+        code: result.code,
+        message: result.message,
+        ts: now,
+      });
+      return;
+    }
+    this.commit(order, result.changes, now, command.commandId);
+  }
+
   private emit(event: OrderEvent): void {
     this.emitted++;
     this.options.emit(event);
@@ -206,10 +241,15 @@ export class Simulator {
     else if (order.status !== 'PAUSED') this.orders.delete(order.orderId);
   }
 
-  private commit(order: Order, changes: Partial<Order>, now: number): Order {
+  private commit(order: Order, changes: Partial<Order>, now: number, commandId?: string): Order {
     const next = { ...order, ...changes };
     this.track(next);
-    this.emit({ type: 'UPDATE', order: { orderId: order.orderId, ...changes }, ts: now });
+    this.emit({
+      type: 'UPDATE',
+      order: { orderId: order.orderId, ...changes },
+      ts: now,
+      ...(commandId === undefined ? {} : { commandId }),
+    });
     return next;
   }
 

@@ -1,5 +1,7 @@
 import {
   SUBJECTS,
+  canApplyCommand,
+  makeCommandId,
   CONSUMERS,
   STREAMS,
   parseLoadState,
@@ -7,13 +9,16 @@ import {
   parsePriceTick,
   type Bus,
   type BusSubscription,
+  type OrderCommand,
+  type OrderEvent,
   type LoadPreset,
 } from '@apeiron/logos';
 import type { OrderRepository } from '@apeiron/mnemosyne';
 import type { QueryEngine } from '../query/engine.js';
 import type { View, ViewChanges } from '../query/view.js';
-import type { LiveHooks, ClientSession } from '../session.js';
+import type { LiveHooks, ClientSession, CommandRequest } from '../session.js';
 import type { ColumnarStore } from '../store/columnar-store.js';
+import { CommandCorrelator, type CommandOutcome } from './commands.js';
 import { DEFAULT_BACKPRESSURE, type BackpressureOptions } from './backpressure.js';
 import type { StatusSummary } from './counters.js';
 import { LiveStore } from './live-store.js';
@@ -41,6 +46,8 @@ export type LiveRuntimeOptions = {
   rankRefreshMs?: number;
   /** Views idle this long with no subscribers are dropped (default 60s). */
   viewIdleMs?: number;
+  /** How long a command may wait for hermes before the client gets an error (default 5s). */
+  commandTimeoutMs?: number;
   /** Wait between attempts to attach to the streams (hermes creates them, so they may not exist yet). */
   retryMs?: number;
 };
@@ -71,7 +78,10 @@ export class LiveRuntime implements LiveHooks {
   readonly maxTrackedBlocks: number;
   readonly backpressure: BackpressureOptions;
   readonly summaryIntervalMs: number;
+  readonly commands: CommandCorrelator;
   private readonly sessions = new Set<ClientSession>();
+  /** Command ids whose UPDATE has been queued for the next flush; each is acked once that flush has applied it. */
+  private appliedCommands: string[] = [];
   private readonly subscriptions: BusSubscription[] = [];
   private timers: ReturnType<typeof setInterval>[] = [];
   private flushing = false;
@@ -84,6 +94,7 @@ export class LiveRuntime implements LiveHooks {
   constructor(private readonly options: LiveRuntimeOptions) {
     this.live = new LiveStore(options.store, options.log);
     this.writeBehind = new WriteBehind(this.live, options.repo, options.log, options.writeBehindMs);
+    this.commands = new CommandCorrelator(options.commandTimeoutMs);
     this.maxTrackedBlocks = options.maxTrackedBlocks;
     this.backpressure = options.backpressure ?? DEFAULT_BACKPRESSURE;
     this.summaryIntervalMs = options.summaryIntervalMs ?? 1_000;
@@ -119,6 +130,7 @@ export class LiveRuntime implements LiveHooks {
     for (const sub of this.subscriptions) await sub.close().catch(() => undefined);
     this.subscriptions.length = 0;
     this.flush();
+    this.commands.clear();
     await this.writeBehind.stop();
     this.system.stop();
   }
@@ -131,6 +143,45 @@ export class LiveRuntime implements LiveHooks {
 
   unregister(session: ClientSession): void {
     this.sessions.delete(session);
+    this.commands.dropOwner(session);
+  }
+
+  /**
+   * Sends a trader command to hermes. A fast pre-check against the store answers an unknown order or an
+   * impossible transition at once; otherwise the command is published to `orders.commands` and `settle` is
+   * called when the matching UPDATE has been applied (ok), hermes rejects it, or it times out. Hermes stays
+   * authoritative: the pre-check can be stale, so a command that passes it may still be rejected.
+   */
+  command(request: CommandRequest, settle: (outcome: CommandOutcome) => void): void {
+    const status = this.live.statusOf(request.orderId);
+    if (status === undefined) {
+      settle({ ok: false, code: 'UNKNOWN_ORDER', message: `Order ${request.orderId} does not exist` });
+      return;
+    }
+    if (!canApplyCommand(status, request.action)) {
+      settle({
+        ok: false,
+        code: 'INVALID_TRANSITION',
+        message: `Cannot ${request.action.toLowerCase()} an order that is ${status}`,
+      });
+      return;
+    }
+    const commandId = makeCommandId(request.clientId, request.reqId);
+    if (!this.commands.register(commandId, request.owner, settle)) {
+      settle({ ok: false, code: 'BAD_REQUEST', message: `Command ${commandId} is already in progress` });
+      return;
+    }
+    const payload: OrderCommand = {
+      orderId: request.orderId,
+      action: request.action,
+      requestedBy: request.clientId,
+      ts: Date.now(),
+      commandId,
+    };
+    this.options.bus.publish(SUBJECTS.ordersCommands, payload).catch((error: unknown) => {
+      this.options.log.error({ err: error, commandId }, 'failed to publish order command');
+      this.commands.resolve(commandId, { ok: false, code: 'INTERNAL', message: 'Could not send the command' });
+    });
   }
 
   preset(): LoadPreset | null {
@@ -168,6 +219,10 @@ export class LiveRuntime implements LiveHooks {
           this.options.log.error({ err: error }, 'session flush failed');
         }
       }
+      // After the sessions have sent their deltas, so a client sees the status change before its ack.
+      const applied = this.appliedCommands;
+      this.appliedCommands = [];
+      for (const commandId of applied) this.commands.resolve(commandId, { ok: true });
       const ms = performance.now() - t0;
       const s = this.flushStats;
       s.flushes++;
@@ -204,6 +259,15 @@ export class LiveRuntime implements LiveHooks {
 
   // ---- bus
 
+  /** A command's answer: an UPDATE is acked after the next flush applies it; a REJECT fails the command at once. */
+  private correlate(event: OrderEvent): void {
+    if (event.type === 'REJECT') {
+      this.commands.resolve(event.commandId, { ok: false, code: event.code, message: event.message });
+    } else if (event.type === 'UPDATE' && event.commandId !== undefined && this.commands.has(event.commandId)) {
+      this.appliedCommands.push(event.commandId);
+    }
+  }
+
   private async attach(): Promise<void> {
     if (this.stopped) return;
     const { bus, log } = this.options;
@@ -227,7 +291,9 @@ export class LiveRuntime implements LiveHooks {
             ack();
             return;
           }
-          this.live.enqueueEvent(parsed.value, ack);
+          const event = parsed.value;
+          this.live.enqueueEvent(event, ack);
+          this.correlate(event);
         },
       );
       this.subscriptions.push(orders);

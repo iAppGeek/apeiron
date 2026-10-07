@@ -4,6 +4,7 @@ import {
   parseOrderSeq,
   parseOrderEvent,
   type Order,
+  type OrderCommand,
   type OrderEvent,
 } from '@apeiron/logos';
 import { describe, expect, it } from 'vitest';
@@ -321,5 +322,93 @@ describe('Simulator lifecycle', () => {
     }
     expect(a.events).toEqual(b.events);
     expect(a.events.length).toBeGreaterThan(500);
+  });
+});
+
+describe('Simulator commands', () => {
+  const command = (orderId: string, action: 'CANCEL' | 'PAUSE' | 'RESUME', n = 1): OrderCommand => ({
+    orderId,
+    action,
+    requestedBy: 'c',
+    ts: SEED_NOW,
+    commandId: `c:${n}`,
+  });
+  const liveId = (h: Harness): string => {
+    const id = currentOrders().find((o) => h.sim.order(o.orderId)?.status === 'LIVE')?.orderId;
+    if (id === undefined) throw new Error('no live order');
+    return id;
+  };
+  const last = (h: Harness): OrderEvent => h.events[h.events.length - 1] as OrderEvent;
+
+  it('pauses a LIVE order and answers with an UPDATE carrying the command id', () => {
+    const h = harness();
+    const id = liveId(h);
+    const liveBefore = h.sim.liveCount;
+    h.sim.command(command(id, 'PAUSE'), SEED_NOW + 5);
+    expect(last(h)).toMatchObject({ type: 'UPDATE', commandId: 'c:1', ts: SEED_NOW + 5, order: { orderId: id, status: 'PAUSED' } });
+    expect(h.sim.order(id)?.status).toBe('PAUSED');
+    expect(h.sim.liveCount).toBe(liveBefore - 1);
+  });
+
+  it('gives a PAUSED order no fills, and resuming restarts them', () => {
+    const h = harness();
+    const id = liveId(h);
+    h.sim.command(command(id, 'PAUSE'), SEED_NOW);
+    h.events.length = 0;
+    const t = run(h, SEED_NOW, 20);
+    const touching = (): OrderEvent[] => h.events.filter((e) => e.type === 'UPDATE' && e.order.orderId === id);
+    expect(touching()).toEqual([]);
+
+    h.sim.command(command(id, 'RESUME', 2), t);
+    expect(last(h)).toMatchObject({ type: 'UPDATE', commandId: 'c:2', order: { orderId: id, status: 'LIVE' } });
+    h.events.length = 0;
+    run(h, t, 60);
+    expect(touching().length).toBeGreaterThan(0);
+  });
+
+  it('cancels LIVE, PAUSED and PENDING_START orders and then forgets them', () => {
+    const h = harness();
+    const live = liveId(h);
+    const pending = currentOrders().find((o) => o.status === 'PENDING_START')?.orderId as string;
+    h.sim.command(command(live, 'PAUSE'), SEED_NOW);
+    h.sim.command(command(live, 'CANCEL', 2), SEED_NOW);
+    expect(last(h)).toMatchObject({ commandId: 'c:2', order: { status: 'CANCELLED', completedAt: SEED_NOW } });
+    h.sim.command(command(pending, 'CANCEL', 3), SEED_NOW);
+    expect(last(h)).toMatchObject({ commandId: 'c:3', order: { orderId: pending, status: 'CANCELLED' } });
+    expect(h.sim.order(live)).toBeUndefined();
+    expect(h.sim.order(pending)).toBeUndefined();
+  });
+
+  it('rejects invalid transitions with INVALID_TRANSITION and changes nothing', () => {
+    const h = harness();
+    const id = liveId(h);
+    const pending = currentOrders().find((o) => o.status === 'PENDING_START')?.orderId as string;
+    for (const [orderId, action] of [
+      [id, 'RESUME'],
+      [pending, 'PAUSE'],
+      [pending, 'RESUME'],
+    ] as const) {
+      h.sim.command(command(orderId, action, 9), SEED_NOW);
+      expect(last(h)).toMatchObject({ type: 'REJECT', commandId: 'c:9', orderId, code: 'INVALID_TRANSITION' });
+    }
+    expect(h.sim.order(id)?.status).toBe('LIVE');
+    // Cancelled orders are no longer held, so a second CANCEL is an unknown order rather than a bad transition.
+    h.sim.command(command(id, 'CANCEL', 10), SEED_NOW);
+    h.sim.command(command(id, 'CANCEL', 11), SEED_NOW);
+    expect(last(h)).toMatchObject({ type: 'REJECT', code: 'UNKNOWN_ORDER' });
+  });
+
+  it('rejects orders it does not hold with UNKNOWN_ORDER', () => {
+    const h = harness();
+    h.sim.command(command('ALG00000001', 'CANCEL', 4), SEED_NOW);
+    expect(parseOrderEvent(last(h)).ok).toBe(true);
+    expect(last(h)).toEqual({
+      type: 'REJECT',
+      commandId: 'c:4',
+      orderId: 'ALG00000001',
+      code: 'UNKNOWN_ORDER',
+      message: 'Order ALG00000001 is not active',
+      ts: SEED_NOW,
+    });
   });
 });
