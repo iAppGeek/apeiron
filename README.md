@@ -18,21 +18,53 @@ See [`docs/PLAN.md`](docs/PLAN.md) for the full design and phase plan.
 | `@apeiron/logos` | shared schema, columns, protocol, codecs, PRNG |
 | `@apeiron/mnemosyne` | `OrderRepository` interface and adapters |
 | `@apeiron/iris` | NATS adapter: JetStream stream and consumer definitions, the `Bus` implementation |
+| `@apeiron/e2e` | Playwright end-to-end tests against the containerised stack |
 
 ## Quick start
 
-Requirements: Node >= 24, pnpm 10, Docker.
+Requirements: Node >= 24, pnpm 10, Docker (Compose v2, about 6 GB of RAM for the Docker VM).
 
 ```bash
 pnpm install
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
-cp .env.example .env                      # optional local overrides
-docker compose --profile core up -d --build   # mongo + nats + antikythera (127.0.0.1:4000) + pharos (http://localhost:8080)
-docker compose --profile core --profile seed up gaia   # seed 1M orders (idempotent; second run is a no-op)
-pnpm --filter @apeiron/pharos dev          # web app on :5173 (Vite proxies /ws to localhost:4000)
+
+cp .env.example .env                                           # optional local overrides, never committed
+docker compose --profile core up -d --build mongo nats        # the database and the bus
+docker compose --profile core --profile seed run --rm gaia     # seed 1M orders (idempotent; a second run is a no-op)
+docker compose --profile core up -d --build                    # server, mock middleware and web app
+docker compose --profile core --profile monitoring up -d       # optional: Prometheus and Grafana
+open http://localhost:8080                                     # the blotter
+```
+
+The server loads the database once at startup, so seed before starting it (or restart it afterwards). Everything
+binds to `127.0.0.1`. Other useful commands:
+
+```bash
+pnpm --filter @apeiron/pharos dev          # web app on :5173 with hot reload (Vite proxies /ws to localhost:4000)
 pnpm --filter @apeiron/gaia stats          # sample statistics of the generated dataset
 pnpm --filter @apeiron/antikythera bench   # engine benchmarks on 1M generator rows (cold and warm)
+pnpm e2e                                   # Playwright end-to-end tests against http://localhost:8080
 ```
+
+### End-to-end tests
+
+`pnpm e2e` runs the Playwright suite in `e2e/tests` against the containerised stack (`E2E_BASE_URL` overrides
+`http://localhost:8080`). Install the browser once with `pnpm --filter @apeiron/e2e exec playwright install chromium`.
+`pnpm e2e:ci` is the compact variant CI uses (list and HTML reporters, stops after five failures). The tests cover the grid
+load, sorting, set, number and date filters, grouping with drill-down and aggregates, live tick flashes, new orders on
+top, scroll anchoring and the badge (including the refresh path of a non-default sort), Cancel with confirmation, Pause
+and Resume, trader and codec switching, the load-preset pill, and that group rows offer no order actions. The commands
+mutate a few orders; `scripts/loadtest-reset.sh` restores the dataset.
+
+## Documentation
+
+| | |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | components, data flow, the key algorithms (columnar store, incremental views, flush loop with a budget, client tracking, anchoring), Mermaid diagrams |
+| [`docs/hosting.md`](docs/hosting.md) | local compose profiles and ports, AWS on demand (Terraform, `remote-*` scripts, costs), GHCR or ECR, alternatives, security notes |
+| [`docs/db-adapters.md`](docs/db-adapters.md) | the `OrderRepository` contract, running the contract suite, Oracle and KDB sketches |
+| [`docs/PLAN.md`](docs/PLAN.md) | the design and phase plan, with the authoritative contracts in its appendices |
+| [`docs/checkpoints/`](docs/checkpoints) | what each phase built, with raw verification output |
 
 ## Live updates
 
