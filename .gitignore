@@ -12,3 +12,5 @@ coverage
 *.log
 .DS_Store
 .playwright-mcp/
+*.tfvars
+*.tfplan
