@@ -21,6 +21,10 @@ export type Toast = { id: number; kind: 'error' | 'info'; text: string };
 export type AppState = {
   status: ConnectionStatus;
   reconnectAttempt: number;
+  /** Successful reconnects since the page loaded. */
+  reconnects: number;
+  /** Why the socket last went away: `code:1006`, `stale:6100ms` (half open), `connect-timeout:6000ms`; null before any drop. */
+  lastCloseReason: string | null;
   /** True once the server has accepted a hello, so the grid may start requesting rows. */
   welcomed: boolean;
   codec: CodecName;
@@ -55,7 +59,8 @@ export type AppState = {
 };
 
 export type AppActions = {
-  setStatus: (status: ConnectionStatus, attempt: number) => void;
+  setStatus: (status: ConnectionStatus, attempt: number, reconnects?: number) => void;
+  setCloseReason: (reason: string) => void;
   setWelcomed: (traders: TraderInfo[]) => void;
   setCodec: (codec: CodecName) => void;
   setRequestedTrader: (traderId: string) => void;
@@ -78,6 +83,8 @@ export type AppActions = {
 export const INITIAL_APP_STATE: AppState = {
   status: 'connecting',
   reconnectAttempt: 0,
+  reconnects: 0,
+  lastCloseReason: null,
   welcomed: false,
   codec: 'json',
   requestedTrader: 'ALL',
@@ -107,8 +114,11 @@ const MAX_TOASTS = 4;
 
 export const useAppStore = create<AppState & AppActions>()((set) => ({
   ...INITIAL_APP_STATE,
-  setStatus: (status, attempt): void => {
-    set({ status, reconnectAttempt: attempt });
+  setStatus: (status, attempt, reconnects): void => {
+    set(reconnects === undefined ? { status, reconnectAttempt: attempt } : { status, reconnectAttempt: attempt, reconnects });
+  },
+  setCloseReason: (lastCloseReason): void => {
+    set({ lastCloseReason });
   },
   setWelcomed: (traders): void => {
     set({ welcomed: true, traders });

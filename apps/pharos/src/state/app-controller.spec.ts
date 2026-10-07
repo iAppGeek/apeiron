@@ -52,7 +52,7 @@ describe('createAppController', () => {
     expect(client.connect).toHaveBeenCalledWith('ws://x/ws');
     expect(client.hello).toHaveBeenCalledWith('ALL', 'json');
 
-    client.handlers.status?.({ status: 'connected', attempt: 0, codec: 'json' });
+    client.handlers.status?.({ status: 'connected', attempt: 0, codec: 'json', reconnects: 0 });
     client.handlers.stats?.({ msgsIn: 3, msgsOut: 2, deltasIn: 0, rttMs: 9, clockOffsetMs: null });
     emitMessage(client, welcome);
     expect(useAppStore.getState()).toMatchObject({
@@ -344,7 +344,7 @@ describe('createAppController', () => {
 
     it('treats close code 1013 the same way', () => {
       const { client, purge } = started();
-      client.handlers.closed?.({ code: 1013 });
+      client.handlers.closed?.({ code: 1013, reason: 'test' });
       expect(useAppStore.getState().toasts).toHaveLength(1);
       emitMessage(client, welcome);
       expect(purge).toHaveBeenCalledTimes(1);
@@ -353,22 +353,30 @@ describe('createAppController', () => {
     it('shows one toast when both the error and the close code arrive', () => {
       const { client } = started();
       emitMessage(client, { t: 'error', code: 'SLOW_CONSUMER', message: 'behind' });
-      client.handlers.closed?.({ code: 1013 });
+      client.handlers.closed?.({ code: 1013, reason: 'test' });
       expect(useAppStore.getState().toasts).toHaveLength(1);
     });
 
     it('toasts again for a later slow-consumer episode', () => {
       const { client } = started();
-      client.handlers.closed?.({ code: 1013 });
+      client.handlers.closed?.({ code: 1013, reason: 'test' });
       emitMessage(client, welcome);
-      client.handlers.closed?.({ code: 1013 });
+      client.handlers.closed?.({ code: 1013, reason: 'test' });
       expect(useAppStore.getState().toasts).toHaveLength(2);
+    });
+
+    it('exposes the reconnect counter and the last close reason in the store', () => {
+      const { client } = started();
+      client.handlers.closed?.({ code: null, reason: 'stale:8000ms' });
+      expect(useAppStore.getState().lastCloseReason).toBe('stale:8000ms');
+      client.handlers.status?.({ status: 'connected', attempt: 0, codec: 'json', reconnects: 3 });
+      expect(useAppStore.getState().reconnects).toBe(3);
     });
 
     it('purges after any unexpected close, with no toast, because a fresh session tracks nothing', () => {
       const { client, purge } = started();
-      client.handlers.closed?.({ code: 1006 });
-      client.handlers.closed?.({ code: null });
+      client.handlers.closed?.({ code: 1006, reason: 'test' });
+      client.handlers.closed?.({ code: null, reason: 'test' });
       expect(useAppStore.getState().toasts).toHaveLength(0);
       emitMessage(client, welcome);
       expect(purge).toHaveBeenCalledTimes(1);
@@ -380,7 +388,7 @@ describe('createAppController', () => {
       const purge = vi.fn();
       controller.setPurge(purge);
       controller.start('ws://x/ws');
-      client.handlers.closed?.({ code: 1006 });
+      client.handlers.closed?.({ code: 1006, reason: 'test' });
       emitMessage(client, welcome);
       expect(purge).not.toHaveBeenCalled();
     });
@@ -396,7 +404,7 @@ describe('createAppController', () => {
       controller.start('ws://x/ws');
       emitMessage(client, welcome);
       return controller.changeTrader('T2').then(() => {
-        client.handlers.closed?.({ code: 1006 });
+        client.handlers.closed?.({ code: 1006, reason: 'test' });
         emitMessage(client, welcome);
         expect(purge).toHaveBeenCalledTimes(1);
         expect(useAppStore.getState().confirmedTrader).toBe('T2');

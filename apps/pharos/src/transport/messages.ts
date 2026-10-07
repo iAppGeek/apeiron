@@ -20,13 +20,13 @@ export type MainToWorker =
 
 /** Worker to main thread. Every payload is a plain structured-cloneable value. */
 export type WorkerToMain =
-  | { kind: 'status'; status: ConnectionStatus; attempt: number; codec: CodecName }
+  | { kind: 'status'; status: ConnectionStatus; attempt: number; codec: CodecName; reconnects: number }
   | ({ kind: 'hello-result'; id: number } & ({ ok: true; welcome: WelcomeMsg } | ({ ok: false } & Failure)))
   | ({ kind: 'response'; reqId: number } & ({ ok: true; msg: ServerMsg } | ({ ok: false } & Failure)))
   /** Every server message that is not the answer to a request (delta, summary, welcome, stray errors). */
   | { kind: 'message'; msg: ServerMsg }
-  /** The socket closed without the page asking for it; `code` is the WebSocket close code (1013 means slow consumer). */
-  | { kind: 'closed'; code: number | null }
+  /** The socket closed without the page asking for it; `code` is the WebSocket close code (1013 means slow consumer). `reason` is `code:<n>`, `closed`, `stale:<ms>` (no frame for too long) or `connect-timeout:<ms>`. */
+  | { kind: 'closed'; code: number | null; reason: string }
   | {
       kind: 'stats';
       msgsIn: number;

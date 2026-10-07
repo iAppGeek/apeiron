@@ -18,7 +18,7 @@ export type WorkerLike = {
 
 export type RowsResult = { rows: Row[]; rowCount: number; ms: number };
 
-export type StatusEvent = { status: ConnectionStatus; attempt: number; codec: CodecName };
+export type StatusEvent = { status: ConnectionStatus; attempt: number; codec: CodecName; reconnects: number };
 export type StatsEvent = {
   msgsIn: number;
   msgsOut: number;
@@ -27,7 +27,7 @@ export type StatsEvent = {
   clockOffsetMs: number | null;
 };
 
-export type ClosedEvent = { code: number | null };
+export type ClosedEvent = { code: number | null; reason: string };
 
 export type ClientEvents = {
   status: StatusEvent;
@@ -89,7 +89,7 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
     const data = event.data;
     switch (data.kind) {
       case 'status':
-        emit('status', { status: data.status, attempt: data.attempt, codec: data.codec });
+        emit('status', { status: data.status, attempt: data.attempt, codec: data.codec, reconnects: data.reconnects });
         return;
       case 'message':
         emit('message', data.msg);
@@ -104,7 +104,7 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
         });
         return;
       case 'closed':
-        emit('closed', { code: data.code });
+        emit('closed', { code: data.code, reason: data.reason });
         return;
       case 'response': {
         const settler = requests.get(data.reqId);

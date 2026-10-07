@@ -11,7 +11,7 @@ import { loadStore, type LoadReport } from './loader.js';
 import { memorySnapshot } from './memory.js';
 import { ClientSession } from './session.js';
 import { ColumnarStore } from './store/columnar-store.js';
-import { attachWebSocket } from './ws-transport.js';
+import { attachWebSocket, DEFAULT_HEARTBEAT, type HeartbeatOptions } from './ws-transport.js';
 
 export type ServerOptions = {
   repo: OrderRepository;
@@ -43,6 +43,8 @@ export type ServerOptions = {
   flushBudgetMs?: number;
   /** The metrics registry served on `/metrics` (default: a new one). */
   metrics?: Metrics;
+  /** Server-side ping and silence timeout (default 5s / 15s); null disables it. */
+  heartbeat?: HeartbeatOptions | null;
 };
 
 export type HealthBody = {
@@ -189,6 +191,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
           },
         }).handlers(),
       (error) => app.log.warn({ err: error }, 'socket error'),
+      options.heartbeat === undefined ? DEFAULT_HEARTBEAT : options.heartbeat,
     );
   });
 

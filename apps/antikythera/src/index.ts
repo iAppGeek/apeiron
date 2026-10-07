@@ -19,6 +19,7 @@ const server = await buildServer({
   maxBlockRows: config.maxBlockRows,
   loadBatchSize: config.loadBatchSize,
   flushBudgetMs: config.flushBudgetMs,
+  heartbeat: { intervalMs: Math.max(250, Math.floor(config.heartbeatTimeoutMs / 3)), timeoutMs: config.heartbeatTimeoutMs },
 });
 
 const shutdown = async (): Promise<void> => {

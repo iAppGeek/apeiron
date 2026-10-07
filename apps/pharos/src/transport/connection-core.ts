@@ -43,6 +43,11 @@ export type CoreOptions = {
   backoffMaxMs: number;
   /** 0 disables jitter; 0.2 spreads each delay by up to plus or minus 20%. */
   backoffJitter: number;
+  /**
+   * No frame of any kind (pong, delta, summary, reply) for this long means the socket is half open: it is
+   * abandoned and reconnected. Three ping intervals by default; a socket still connecting is held to it too.
+   */
+  staleAfterMs: number;
 };
 
 export const DEFAULT_CORE_OPTIONS: CoreOptions = {
@@ -52,6 +57,7 @@ export const DEFAULT_CORE_OPTIONS: CoreOptions = {
   backoffBaseMs: 500,
   backoffMaxMs: 10_000,
   backoffJitter: 0.2,
+  staleAfterMs: 6000,
 };
 
 export type CoreDeps = {
@@ -101,6 +107,14 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
   let reconnectTimer: unknown = null;
   let pingTimer: unknown = null;
   let statsTimer: unknown = null;
+  let connectTimer: unknown = null;
+  /** Clock time of the latest frame of any kind on the current socket. */
+  let lastFrameAt = 0;
+  /** Welcomes that confirmed a fresh socket; every one after the first is a successful reconnect. */
+  let socketsWelcomed = 0;
+  let welcomedThisSocket = false;
+  /** Drops the current socket as dead and reconnects; null while there is no socket. */
+  let abandon: ((reason: string) => void) | null = null;
 
   let traderId = 'ALL';
   let codecName: CodecName = 'json';
@@ -134,7 +148,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
   const isOpen = (): boolean => socket !== null && socket.readyState === OPEN;
 
   const emitStatus = (status: 'connecting' | 'connected' | 'reconnecting' | 'closed'): void => {
-    emit({ kind: 'status', status, attempt, codec: codecName });
+    emit({ kind: 'status', status, attempt, codec: codecName, reconnects: Math.max(0, socketsWelcomed - 1) });
   };
 
   const sendRaw = (data: string | Uint8Array): void => {
@@ -175,7 +189,13 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
   const startTimers = (): void => {
     stopTimers();
     pingTimer = clock.setInterval(() => {
-      if (isOpen()) sendMsg({ t: 'ping', ts: clock.now() });
+      if (!isOpen()) return;
+      const silentMs = clock.now() - lastFrameAt;
+      if (silentMs > options.staleAfterMs) {
+        abandon?.(`stale:${Math.round(silentMs)}ms`);
+        return;
+      }
+      sendMsg({ t: 'ping', ts: clock.now() });
     }, options.pingIntervalMs);
     statsTimer = clock.setInterval(() => {
       const seconds = options.statsIntervalMs / 1000;
@@ -210,6 +230,10 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
     switch (msg.t) {
       case 'welcome': {
         attempt = 0;
+        if (!welcomedThisSocket) {
+          welcomedThisSocket = true;
+          socketsWelcomed += 1;
+        }
         const hello = inflightHellos.shift();
         const ids = hello?.ids ?? [];
         if (hello !== undefined) confirmed = { traderId: hello.traderId, codec: hello.codec };
@@ -271,6 +295,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
 
   const onFrame = (data: unknown): void => {
     msgsIn += 1;
+    lastFrameAt = clock.now();
     let decoded: unknown;
     try {
       decoded = decodeFrame(data);
@@ -290,8 +315,17 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
     const ws = deps.createSocket(url);
     ws.binaryType = 'arraybuffer';
     socket = ws;
+    welcomedThisSocket = false;
+    lastFrameAt = clock.now();
+    connectTimer = clock.setTimeout(() => {
+      connectTimer = null;
+      if (socket === ws && ws.readyState !== OPEN) abandon?.(`connect-timeout:${options.staleAfterMs}ms`);
+    }, options.staleAfterMs);
     ws.onopen = (): void => {
       if (socket !== ws) return;
+      if (connectTimer !== null) clock.clearTimeout(connectTimer);
+      connectTimer = null;
+      lastFrameAt = clock.now();
       inflightHellos = [{ ids: queuedHelloIds, traderId, codec: codecName }];
       queuedHelloIds = [];
       sendHello();
@@ -303,6 +337,9 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
     const onGone = (): void => {
       if (socket !== ws) return;
       socket = null;
+      abandon = null;
+      if (connectTimer !== null) clock.clearTimeout(connectTimer);
+      connectTimer = null;
       stopTimers();
       rttMs = null;
       failAllPending(failure('DISCONNECTED', 'Connection lost'));
@@ -316,8 +353,25 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
       if (socket !== ws) return;
       // Deltas held back for a frame belong to the old connection; hand them over before it is declared lost.
       batcher.flush();
-      if (!closedByUser) emit({ kind: 'closed', code: event?.code ?? null });
+      const code = event?.code ?? null;
+      if (!closedByUser) emit({ kind: 'closed', code, reason: code === null ? 'closed' : `code:${code}` });
       onGone();
+    };
+    abandon = (reason): void => {
+      if (socket !== ws) return;
+      batcher.flush();
+      emit({ kind: 'closed', code: null, reason });
+      // Handlers go first so the half-open socket's eventual close event cannot touch the next connection.
+      onGone();
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      try {
+        ws.close();
+      } catch {
+        // The socket is being thrown away; a failed close changes nothing.
+      }
     };
     ws.onerror = (): void => {
       // A close event always follows an error; reconnection is handled there.
@@ -369,6 +423,9 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
       batcher.flush();
       if (reconnectTimer !== null) clock.clearTimeout(reconnectTimer);
       reconnectTimer = null;
+      if (connectTimer !== null) clock.clearTimeout(connectTimer);
+      connectTimer = null;
+      abandon = null;
       stopTimers();
       if (socket !== null) {
         const ws = socket;

@@ -144,15 +144,16 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
 
   return {
     start(url: string): () => void {
-      const offStatus = client.on('status', ({ status, attempt }) => {
-        useAppStore.getState().setStatus(status, attempt);
+      const offStatus = client.on('status', ({ status, attempt, reconnects }) => {
+        useAppStore.getState().setStatus(status, attempt, reconnects);
       });
       const offStats = client.on('stats', (stats) => {
         useAppStore.getState().setStats(stats);
         clockOffsetMs = stats.clockOffsetMs;
         publishLive(stats.deltasIn);
       });
-      const offClosed = client.on('closed', ({ code }) => {
+      const offClosed = client.on('closed', ({ code, reason }) => {
+        useAppStore.getState().setCloseReason(reason);
         needResync();
         if (code === SLOW_CONSUMER_CLOSE_CODE) onSlowConsumer();
       });
