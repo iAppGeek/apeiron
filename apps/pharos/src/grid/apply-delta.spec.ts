@@ -37,6 +37,7 @@ class FakeGrid implements DeltaGridApi {
     this.rowCount = count;
   });
   ensureIndexVisible = vi.fn();
+  getFirstDisplayedRowIndex = vi.fn(() => 0);
   getVerticalPixelRange = vi.fn(() => ({ top: this.scrollTop, bottom: this.scrollTop + 600 }));
   getDisplayedRowAtIndex = vi.fn(() => ({ rowHeight: this.rowHeight }));
   getRowNode = vi.fn((id: string): IRowNode | undefined => this.nodes.get(id));

@@ -13,6 +13,7 @@ type FakeApi = {
   refreshServerSide: ReturnType<typeof vi.fn>;
   ensureIndexVisible: ReturnType<typeof vi.fn>;
   getVerticalPixelRange: ReturnType<typeof vi.fn>;
+  getFirstDisplayedRowIndex: ReturnType<typeof vi.fn>;
   getDisplayedRowAtIndex: ReturnType<typeof vi.fn>;
   getRowGroupColumns: ReturnType<typeof vi.fn>;
 };
@@ -80,6 +81,7 @@ describe('Blotter', () => {
       refreshServerSide: vi.fn(),
       ensureIndexVisible: vi.fn(),
       getVerticalPixelRange: vi.fn(() => ({ top: 0, bottom: 600 })),
+      getFirstDisplayedRowIndex: vi.fn(() => 0),
       getDisplayedRowAtIndex: vi.fn(() => ({ rowHeight: 28 })),
       getRowGroupColumns: vi.fn(() => []),
     };
@@ -98,6 +100,8 @@ describe('Blotter', () => {
       cacheBlockSize: 100,
       maxBlocksInCache: 20,
       rowGroupPanelShow: 'always',
+      animateRows: false,
+      rowBuffer: 10,
       sideBar: { toolPanels: ['columns', 'filters'] },
     });
     expect(Object.keys(grid.props?.['aggFuncs'] as object)).toEqual(['wavg']);

@@ -6,7 +6,7 @@ import { NewOrdersBadge } from '../components/NewOrdersBadge';
 import type { AppController } from '../state/app-controller';
 import { useAppStore } from '../state/app-store';
 import type { BlotterClient } from '../transport/client';
-import { readTopRow } from './anchor';
+import { ROW_BUFFER, readTopRow } from './anchor';
 import { createDeltaApplier, type DeltaApplier } from './apply-delta';
 import { buildColumnDefs } from './column-defs';
 import { createDatasource } from './datasource';
@@ -162,6 +162,9 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
           blockLoadDebounceMillis={60}
           rowGroupPanelShow="always"
           suppressAggFuncInHeader
+          // Rows shift constantly as orders arrive on top; animating each shift leaves ghost rows overlapping.
+          animateRows={false}
+          rowBuffer={ROW_BUFFER}
           cellFlashDuration={CELL_FLASH_MS}
           cellFadeDuration={CELL_FADE_MS}
           onStoreRefreshed={onStoreRefreshed}

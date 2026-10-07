@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { planAnchor, readTopRow, type AnchorApi } from './anchor';
+import { ROW_BUFFER, planAnchor, readTopRow, type AnchorApi } from './anchor';
 
-const api = (top: number, rowHeight: number | null | undefined = 28): AnchorApi => ({
+const api = (top: number, rowHeight: number | null | undefined = 28, firstRendered = 0): AnchorApi => ({
+  getFirstDisplayedRowIndex: vi.fn(() => firstRendered),
   getVerticalPixelRange: vi.fn(() => ({ top, bottom: top + 600 })),
   getDisplayedRowAtIndex: vi.fn(() => (rowHeight === undefined ? undefined : { rowHeight })),
   ensureIndexVisible: vi.fn(),
@@ -26,6 +27,12 @@ describe('readTopRow', () => {
   it('falls back to a default height when no row is displayed yet', () => {
     expect(readTopRow(api(280, undefined))).toBe(10);
     expect(readTopRow(api(280, null))).toBe(10);
+  });
+
+  it('deeper down, trusts the first rendered row plus the buffer rather than a scaled scroll position', () => {
+    // 600k rows down the scroll position is scaled and meaningless, but the first rendered row is exact.
+    expect(readTopRow(api(8_000_000, 28, 600_000 - ROW_BUFFER))).toBe(600_000);
+    expect(readTopRow(api(0, 28, 15))).toBe(15 + ROW_BUFFER);
   });
 
   it('is 0 for a nonsense row height', () => {

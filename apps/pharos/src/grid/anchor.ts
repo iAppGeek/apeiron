@@ -1,5 +1,6 @@
 /** The part of the grid api the anchor needs, so it can be faked in tests. */
 export type AnchorApi = {
+  getFirstDisplayedRowIndex(): number;
   getVerticalPixelRange(): { top: number; bottom: number };
   getDisplayedRowAtIndex(index: number): { rowHeight?: number | null } | undefined;
   ensureIndexVisible(index: number, position?: 'top' | 'bottom' | 'middle' | null): void;
@@ -7,11 +8,20 @@ export type AnchorApi = {
 
 const FALLBACK_ROW_HEIGHT = 28;
 
+/** Rows AG Grid renders above and below the viewport. The grid is given this value explicitly (`rowBuffer`). */
+export const ROW_BUFFER = 10;
+
 /**
- * The row index at the top of the viewport, to the nearest whole row. Unlike `getFirstDisplayedRowIndex`
- * this ignores the rows AG Grid renders above the viewport as a buffer, so 0 really means the top.
+ * The row index at the top of the viewport.
+ *
+ * `getFirstDisplayedRowIndex` is the first rendered row, which sits `ROW_BUFFER` rows above the viewport once the
+ * grid is scrolled past that buffer. That holds at any depth, whereas dividing the scroll position by the row height
+ * does not: with a million rows AG Grid caps the scroll container's height and scales the scroll position. Near the
+ * top (first rendered row 0) the scroll position is unscaled and the pixel maths is exact to the nearest row.
  */
 export function readTopRow(api: AnchorApi): number {
+  const firstRendered = api.getFirstDisplayedRowIndex();
+  if (firstRendered > 0) return firstRendered + ROW_BUFFER;
   const top = api.getVerticalPixelRange().top;
   if (top <= 0) return 0;
   const rowHeight = api.getDisplayedRowAtIndex(0)?.rowHeight ?? FALLBACK_ROW_HEIGHT;
