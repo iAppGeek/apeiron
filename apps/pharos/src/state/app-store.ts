@@ -59,6 +59,8 @@ export type AppState = {
   /** True while requests wait for the server to finish loading orders. */
   notReady: boolean;
   toasts: Toast[];
+  /** Every toast text shown so far, oldest first, capped at 50 (the resilience suite reads it after the toasts have gone). */
+  toastHistory: string[];
 };
 
 export type AppActions = {
@@ -112,6 +114,7 @@ export const INITIAL_APP_STATE: AppState = {
   newOrders: 0,
   notReady: false,
   toasts: [],
+  toastHistory: [],
 };
 
 let toastSeq = 1;
@@ -172,7 +175,10 @@ export const useAppStore = create<AppState & AppActions>()((set) => ({
   },
   pushToast: (kind, text): number => {
     const id = toastSeq++;
-    set((s) => ({ toasts: [...s.toasts, { id, kind, text }].slice(-MAX_TOASTS) }));
+    set((s) => ({
+      toasts: [...s.toasts, { id, kind, text }].slice(-MAX_TOASTS),
+      toastHistory: [...s.toastHistory, `${kind}: ${text}`].slice(-50),
+    }));
     return id;
   },
   dismissToast: (id): void => {

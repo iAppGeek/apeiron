@@ -65,7 +65,7 @@ describe('test hooks', () => {
     expect(hooks().rootRowCount()).toBe(1234);
     expect(hooks().statusBarRowCount()).toBe(99);
     expect(hooks().firstDisplayedRow()).toBe(7);
-    expect(hooks().connection()).toEqual({ state: 'connected', welcomed: false, reconnects: 4, lastCloseReason: 'stale:8000ms', closes: 0, closeHistory: [], pendingRequests: 0 });
+    expect(hooks().connection()).toEqual({ state: 'connected', welcomed: false, reconnects: 4, lastCloseReason: 'stale:8000ms', closes: 0, closeHistory: [], pendingRequests: 0, toastHistory: [] });
     expect(hooks().viewState()).toEqual({
       trader: 'T2',
       codec: 'msgpack',

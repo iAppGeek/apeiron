@@ -18,11 +18,11 @@ describe('describeFailure', () => {
 });
 
 describe('isRetryable', () => {
-  it('waits out NOT_READY and DISCONNECTED only', () => {
+  it('waits out NOT_READY, DISCONNECTED and TIMEOUT only', () => {
     expect(isRetryable('NOT_READY')).toBe(true);
     expect(isRetryable('DISCONNECTED')).toBe(true);
     expect(isRetryable('UNSUPPORTED_FILTER')).toBe(false);
-    expect(isRetryable('TIMEOUT')).toBe(false);
+    expect(isRetryable('TIMEOUT')).toBe(true);
     expect(isRetryable('INTERNAL')).toBe(false);
   });
 });

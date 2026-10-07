@@ -33,6 +33,7 @@ export type PageHooks = {
     closes: number;
     closeHistory: string[];
     pendingRequests: number;
+    toastHistory: string[];
   };
   counters(): { deltasApplied: number; rowsUpdated: number; rowsAdded: number; purges: number; lastDeltaAt: number };
   viewState(): PageSnapshot['view'] & { expanded: string[][] };
@@ -50,6 +51,7 @@ export type PageStats = {
   closes: number;
   closeHistory: string[];
   pendingRequests: number;
+  toastHistory: string[];
   state: string;
   busy: boolean;
   /** Milliseconds since the last delta was applied, or null if none has been. */
@@ -74,6 +76,7 @@ export async function readStats(page: Page): Promise<PageStats> {
       closes: conn.closes,
       closeHistory: conn.closeHistory,
       pendingRequests: conn.pendingRequests,
+      toastHistory: conn.toastHistory,
       state: conn.state,
       busy: hooks.busy(),
       sinceLastDeltaMs: c.lastDeltaAt === 0 ? null : Date.now() - c.lastDeltaAt,

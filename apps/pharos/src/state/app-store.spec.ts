@@ -93,4 +93,14 @@ describe('app store', () => {
     state().clearNewOrders();
     expect(state()).toBe(before);
   });
+
+  it('keeps a history of every toast, capped at 50', () => {
+    const store = useAppStore.getState();
+    for (let n = 0; n < 55; n += 1) store.pushToast(n % 2 === 0 ? 'error' : 'info', `t${n}`);
+    const history = useAppStore.getState().toastHistory;
+    expect(history).toHaveLength(50);
+    expect(history[0]).toBe('info: t5');
+    expect(history.at(-1)).toBe('error: t54');
+    expect(useAppStore.getState().toasts.length).toBeLessThanOrEqual(4);
+  });
 });

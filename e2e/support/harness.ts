@@ -227,6 +227,13 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
         const snapshot = await readSnapshot(p.page);
         const pageReader = await openReader({ traderId: snapshot.view.trader });
         const screen = await checkServerVsScreen('server-vs-screen', snapshot, pageReader);
+        if (!screen.ok) {
+          // Tell a permanent difference from a late one: look again after a few seconds. The check still fails either way.
+          await sleep(4000);
+          const again = await checkServerVsScreen('server-vs-screen', await readSnapshot(p.page), pageReader);
+          screen.stats['stillWrongAfter4s'] = again.ok ? 'no' : 'yes';
+          if (!again.ok) screen.stats['failuresAfter4s'] = again.stats['failures'] ?? 0;
+        }
         pageReader.close();
         const sampler = await p.page.evaluate(readSamplerInPage);
         const reconnects = s.reconnects - before.reconnects;
@@ -238,6 +245,8 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
           rowsUpdated: s.rowsUpdated - before.rowsUpdated,
           purges: s.purges - before.purges,
           lastCloseReason: s.lastCloseReason,
+          closeHistory: s.closeHistory,
+          toasts: s.toastHistory,
           latency: summariseLatency(latencySamples.get(p.id) ?? []),
           checks: [screen, checkInvariants('invariants', sampler), checkMinimums('minimums', { reconnects, deltas }, minimums)],
         });

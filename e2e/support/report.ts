@@ -18,6 +18,9 @@ export type ViewReport = {
   rowsUpdated: number;
   purges: number;
   lastCloseReason: string | null;
+  /** Every close reason and every toast the page showed, so a failure can be traced to what the user was told. */
+  closeHistory: string[];
+  toasts: string[];
   latency: LatencySummary;
   checks: Check[];
 };

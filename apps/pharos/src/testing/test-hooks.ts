@@ -36,6 +36,8 @@ export type ConnectionInfo = {
   closeHistory: string[];
   /** Requests and hellos still waiting for the server; must be zero once things are quiet. */
   pendingRequests: number;
+  /** Every toast shown so far (`error: text`), oldest first. */
+  toastHistory: string[];
 };
 
 export type TestCounters = {
@@ -168,6 +170,7 @@ export function installHooks(api: GridApi, pendingRequests: () => number): () =>
         closes: s.closes,
         closeHistory: [...s.closeHistory],
         pendingRequests: pendingRequests(),
+        toastHistory: [...s.toastHistory],
       };
     },
     counters(): TestCounters {

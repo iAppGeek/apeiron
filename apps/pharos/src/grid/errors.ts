@@ -43,9 +43,13 @@ export function describeFailure(code: FailureCode, serverMessage?: string): stri
   }
 }
 
-/** Failures the datasource waits out instead of reporting: the server or the link is not ready yet. */
+/**
+ * Failures the datasource waits out instead of reporting: the server or the link is not ready yet, or the answer was
+ * too slow. A timed-out block must be asked for again: failing it leaves the grid empty for good, because nothing
+ * else reloads it once the link recovers (found by S6, where a throttled link starved a `getRows` for 30 s).
+ */
 export function isRetryable(code: FailureCode): boolean {
-  return code === 'NOT_READY' || code === 'DISCONNECTED';
+  return code === 'NOT_READY' || code === 'DISCONNECTED' || code === 'TIMEOUT';
 }
 
 const VERB: Record<CommandAction, string> = { CANCEL: 'Cancel', PAUSE: 'Pause', RESUME: 'Resume' };
