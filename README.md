@@ -12,11 +12,12 @@ See [`docs/PLAN.md`](docs/PLAN.md) for the full design and phase plan.
 |---|---|
 | `@apeiron/pharos` | web app (React + AG Grid) |
 | `@apeiron/antikythera` | blotter server |
-| `@apeiron/hermes` | mock middleware (NATS publisher) |
+| `@apeiron/hermes` | mock middleware (NATS publisher: price feed and order lifecycle) |
 | `@apeiron/gaia` | seeder |
 | `@apeiron/talos` | load-test harness |
 | `@apeiron/logos` | shared schema, columns, protocol, codecs, PRNG |
 | `@apeiron/mnemosyne` | `OrderRepository` interface and adapters |
+| `@apeiron/iris` | NATS adapter: JetStream stream and consumer definitions, the `Bus` implementation |
 
 ## Quick start
 
@@ -31,6 +32,18 @@ docker compose --profile core --profile seed up gaia   # seed 1M orders (idempot
 pnpm --filter @apeiron/pharos dev          # web app on :5173 (Vite proxies /ws to localhost:4000)
 pnpm --filter @apeiron/gaia stats          # sample statistics of the generated dataset
 pnpm --filter @apeiron/antikythera bench   # engine benchmarks on 1M generator rows (cold and warm)
+```
+
+## Live updates
+
+`hermes` publishes `prices.<PAIR>` (3 ticks/s per pair) and `orders.events` (fills, status changes, new orders) to NATS;
+`antikythera` applies them to its store, patches every cached view incrementally, writes lifecycle changes back to Mongo
+(write-behind) and pushes `delta` and `summary` messages to clients. Switch the load with `LOAD_PRESET=medium|stress`
+or live with a `control` message (it is published on `control.load`). Verify a running stack:
+
+```bash
+pnpm --filter @apeiron/antikythera exec tsx src/testing/live-report.ts --scenario default --seconds 15   # also: grouped, stress, writebehind, consistency
+curl localhost:4000/debug/lag                                                                           # flush, lag and write-behind figures
 ```
 
 ## Memory

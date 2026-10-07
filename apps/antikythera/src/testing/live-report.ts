@@ -104,7 +104,40 @@ async function restartCheck(): Promise<void> {
   await client.close();
 }
 
+/** Compares what the server serves with what Mongo holds, for the newest orders and the LIVE ones. Run when the feed is quiet. */
+async function consistency(): Promise<void> {
+  await sleep(1_500); // let write-behind settle
+  const client = await LiveClient.connect(url);
+  const repo = await MongoOrderRepository.connect({ url: mongo, db: 'blotter' });
+  const col = repo.database.collection('orders');
+  const fields = ['status', 'filledQty', 'remainingQty', 'numFills', 'avgFillPrice', 'lastFillQty', 'completedAt', 'orderQty'];
+  const live = { ...flatRequest(0, 1_000), filterModel: { status: { filterType: 'set', values: ['LIVE', 'PAUSED', 'PENDING_START'] } } };
+  const blocks = [await client.getRows(flatRequest(0, 100)), await client.getRows(live)];
+  let checked = 0;
+  const mismatches: unknown[] = [];
+  for (const block of blocks) {
+    for (const row of block.rows) {
+      const doc = await col.findOne({ _id: String(row.orderId) as never });
+      checked++;
+      if (doc === null) {
+        mismatches.push({ orderId: row.orderId, problem: 'missing in mongo' });
+        continue;
+      }
+      const diff = fields.filter((f) => (doc as Record<string, unknown>)[f] !== row[f]);
+      if (diff.length > 0) mismatches.push({ orderId: row.orderId, fields: diff, server: diff.map((f) => row[f]), mongo: diff.map((f) => (doc as Record<string, unknown>)[f]) });
+    }
+  }
+  const mongoCount = await col.countDocuments({});
+  const health = (await getJson('/health')) as { rows: number };
+  print('consistency', { rowsChecked: checked, mismatches: mismatches.length, firstMismatches: mismatches.slice(0, 3), serverRows: health.rows, mongoRows: mongoCount, rowCountsEqual: health.rows === mongoCount });
+  await repo.close();
+  await client.close();
+}
+
 switch (scenario) {
+  case 'consistency':
+    await consistency();
+    break;
   case 'default': {
     const client = await LiveClient.connect(url);
     print('default', await measureDefaultView(client, seconds));
