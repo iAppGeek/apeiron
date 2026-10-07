@@ -121,6 +121,23 @@ describe('createBlotterClient', () => {
     }).not.toThrow();
   });
 
+  it('pending counts requests and hellos until each is answered or failed', async () => {
+    const w = makeWorker();
+    const client = createBlotterClient(w);
+    expect(client.pending()).toBe(0);
+    const p = client.getRows(req);
+    const h = client.hello('ALL', 'json');
+    expect(client.pending()).toBe(2);
+    const reqId = (w.posted[0] as { msg: { reqId: number } }).msg.reqId;
+    w.reply({ kind: 'response', reqId, ok: false, code: 'DISCONNECTED', message: 'gone' });
+    await expect(p).rejects.toMatchObject({ code: 'DISCONNECTED' });
+    expect(client.pending()).toBe(1);
+    const helloId = (w.posted[1] as { id: number }).id;
+    w.reply({ kind: 'hello-result', id: helloId, ok: false, code: 'DISCONNECTED', message: 'gone' });
+    await expect(h).rejects.toMatchObject({ code: 'DISCONNECTED' });
+    expect(client.pending()).toBe(0);
+  });
+
   it('dispose closes the worker and rejects what is still pending', async () => {
     const w = makeWorker();
     const client = createBlotterClient(w);

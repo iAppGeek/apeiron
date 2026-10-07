@@ -64,6 +64,8 @@ export type BlotterClient = {
    */
   command(orderId: string, action: CommandAction): Promise<void>;
   on<E extends keyof ClientEvents>(event: E, handler: (payload: ClientEvents[E]) => void): () => void;
+  /** Requests and hellos still waiting for an answer; zero once every one has been answered or failed. */
+  pending(): number;
   dispose(): void;
 };
 
@@ -172,6 +174,10 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
       return (): void => {
         listeners[event].delete(handler);
       };
+    },
+
+    pending(): number {
+      return requests.size + hellos.size;
     },
 
     dispose(): void {

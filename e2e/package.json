@@ -9,7 +9,15 @@
     "e2e:ci": "playwright test --reporter=list,html --max-failures=5",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e:resilience": "playwright test -c playwright.resilience.config.ts",
+    "e2e:resilience:smoke": "RESILIENCE_SMOKE=1 playwright test -c playwright.resilience.config.ts --grep @smoke"
+  },
+  "dependencies": {
+    "@apeiron/hermes": "workspace:*",
+    "@apeiron/iris": "workspace:*",
+    "@apeiron/logos": "workspace:*",
+    "@apeiron/mnemosyne": "workspace:*"
   },
   "devDependencies": {
     "@apeiron/eslint-config": "workspace:*",

@@ -369,6 +369,9 @@ describe('createAppController', () => {
       const { client } = started();
       client.handlers.closed?.({ code: null, reason: 'stale:8000ms' });
       expect(useAppStore.getState().lastCloseReason).toBe('stale:8000ms');
+      client.handlers.closed?.({ code: 1006, reason: 'code:1006' });
+      expect(useAppStore.getState().closes).toBe(2);
+      expect(useAppStore.getState().closeHistory).toEqual(['stale:8000ms', 'code:1006']);
       client.handlers.status?.({ status: 'connected', attempt: 0, codec: 'json', reconnects: 3 });
       expect(useAppStore.getState().reconnects).toBe(3);
     });

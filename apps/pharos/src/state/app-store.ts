@@ -25,6 +25,9 @@ export type AppState = {
   reconnects: number;
   /** Why the socket last went away: `code:1006`, `stale:6100ms` (half open), `connect-timeout:6000ms`; null before any drop. */
   lastCloseReason: string | null;
+  /** How many times the socket has gone away without the page asking, and the last 50 reasons (oldest first). */
+  closes: number;
+  closeHistory: string[];
   /** True once the server has accepted a hello, so the grid may start requesting rows. */
   welcomed: boolean;
   codec: CodecName;
@@ -85,6 +88,8 @@ export const INITIAL_APP_STATE: AppState = {
   reconnectAttempt: 0,
   reconnects: 0,
   lastCloseReason: null,
+  closes: 0,
+  closeHistory: [],
   welcomed: false,
   codec: 'json',
   requestedTrader: 'ALL',
@@ -118,7 +123,7 @@ export const useAppStore = create<AppState & AppActions>()((set) => ({
     set(reconnects === undefined ? { status, reconnectAttempt: attempt } : { status, reconnectAttempt: attempt, reconnects });
   },
   setCloseReason: (lastCloseReason): void => {
-    set({ lastCloseReason });
+    set((s) => ({ lastCloseReason, closes: s.closes + 1, closeHistory: [...s.closeHistory, lastCloseReason].slice(-50) }));
   },
   setWelcomed: (traders): void => {
     set({ welcomed: true, traders });

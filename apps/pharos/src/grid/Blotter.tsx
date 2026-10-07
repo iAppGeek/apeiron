@@ -38,7 +38,7 @@ import { GRID_MODULES } from './modules';
 import { buildContextMenuItems, orderTargetOf } from './order-actions';
 import { createPendingCommands } from './pending-commands';
 import { createTickTracker } from './tick-tracker';
-import { installTestHooks, noteDelta, notePurge } from '../testing/hooks-gate';
+import { installTestHooks, noteDelta, notePurge, noteRequest } from '../testing/hooks-gate';
 import { readFirstVisibleRow } from './viewport-probe';
 
 export type BlotterProps = {
@@ -127,7 +127,12 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
     api.setGridOption(
       'serverSideDatasource',
       createDatasource({
-        client,
+        client: {
+          getRows: (request) => {
+            noteRequest(request);
+            return client.getRows(request);
+          },
+        },
         onRootRowCount: (count, grouped) => {
           store.setRowCount(count, grouped);
         },
@@ -160,7 +165,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       canSetRowCount: () => api.getRowGroupColumns().length === 0,
     });
     applier.current = live;
-    const removeHooks = installTestHooks(api);
+    const removeHooks = installTestHooks(api, () => client.pending());
     controller.setDeltaHandler((delta) => {
       const stats = live.apply(delta);
       noteDelta(stats);
@@ -180,7 +185,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       live.dispose();
       applier.current = null;
     };
-  }, [api, controller, ticks, probe]);
+  }, [api, controller, ticks, probe, client]);
 
   const onStoreRefreshed = useCallback((event: StoreRefreshedEvent) => {
     applier.current?.onStoreRefreshed(event.route);

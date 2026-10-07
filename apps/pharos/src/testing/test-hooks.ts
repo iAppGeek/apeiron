@@ -1,4 +1,4 @@
-import type { Row } from '@apeiron/logos';
+import type { Row, SsrmRequest } from '@apeiron/logos';
 import type { GridApi, IRowNode } from 'ag-grid-community';
 import type { ApplyStats } from '../grid/apply-delta';
 import { useAppStore, type SummaryStats } from '../state/app-store';
@@ -7,6 +7,8 @@ import { useAppStore, type SummaryStats } from '../state/app-store';
 export type LoadedRow = {
   /** Display index; null for a row that is loaded but not currently displayed. */
   rowIndex: number | null;
+  /** Position among its parent's children (the index a `getRows` for that route uses), when the grid knows it. */
+  childIndex: number | null;
   id: string | undefined;
   /** Group keys from the root down to this row's parent. */
   groupKeys: string[];
@@ -15,6 +17,7 @@ export type LoadedRow = {
 
 export type GroupRow = {
   rowIndex: number | null;
+  childIndex: number | null;
   id: string | undefined;
   level: number;
   key: string | null;
@@ -29,6 +32,10 @@ export type ConnectionInfo = {
   welcomed: boolean;
   reconnects: number;
   lastCloseReason: string | null;
+  closes: number;
+  closeHistory: string[];
+  /** Requests and hellos still waiting for the server; must be zero once things are quiet. */
+  pendingRequests: number;
 };
 
 export type TestCounters = {
@@ -67,11 +74,15 @@ export type ApeironTestHooks = {
   counters(): TestCounters;
   viewState(): ViewState;
   latency(): LatencyInfo;
+  /** The latest `getRows` request the grid sent; its columns, sort and filter describe the current view. */
+  lastRequest(): SsrmRequest | null;
   /** True while a getRows is loading, or the grid is switching trader or codec. */
   busy(): boolean;
 };
 
 type HookWindow = Window & { __apeironTest?: ApeironTestHooks };
+
+let lastRequest: SsrmRequest | null = null;
 
 const counters: TestCounters = { deltasApplied: 0, rowsUpdated: 0, rowsAdded: 0, purges: 0, lastDeltaAt: 0 };
 
@@ -82,6 +93,8 @@ const keysOf = (node: IRowNode): string[] => {
   }
   return keys;
 };
+
+const childIndexOf = (node: IRowNode): number | null => (typeof node.childIndex === 'number' && node.childIndex >= 0 ? node.childIndex : null);
 
 const rowOf = (data: unknown): Row => ({ ...(data as Row) });
 
@@ -94,18 +107,22 @@ export function recordDelta(stats: ApplyStats | void): void {
   counters.rowsAdded += stats.rowsAdded;
 }
 
+export function recordRequest(request: SsrmRequest): void {
+  lastRequest = request;
+}
+
 export function recordPurge(): void {
   counters.purges += 1;
 }
 
 /** Publishes `window.__apeironTest` for the given grid and returns a function that removes it. */
-export function installHooks(api: GridApi): () => void {
+export function installHooks(api: GridApi, pendingRequests: () => number): () => void {
   const hooks: ApeironTestHooks = {
     loadedRows(): LoadedRow[] {
       const out: LoadedRow[] = [];
       api.forEachNode((node) => {
         if (node.group === true || node.data === undefined || node.data === null) return;
-        out.push({ rowIndex: node.rowIndex, id: node.id, groupKeys: keysOf(node), data: rowOf(node.data) });
+        out.push({ rowIndex: node.rowIndex, childIndex: childIndexOf(node), id: node.id, groupKeys: keysOf(node), data: rowOf(node.data) });
       });
       return out;
     },
@@ -116,6 +133,7 @@ export function installHooks(api: GridApi): () => void {
         const data: Row = { ...rowOf(node.data), ...(node.aggData as Row | undefined) };
         out.push({
           rowIndex: node.rowIndex,
+          childIndex: childIndexOf(node),
           id: node.id,
           level: node.level,
           key: node.key ?? null,
@@ -142,7 +160,15 @@ export function installHooks(api: GridApi): () => void {
     },
     connection(): ConnectionInfo {
       const s = useAppStore.getState();
-      return { state: s.status, welcomed: s.welcomed, reconnects: s.reconnects, lastCloseReason: s.lastCloseReason };
+      return {
+        state: s.status,
+        welcomed: s.welcomed,
+        reconnects: s.reconnects,
+        lastCloseReason: s.lastCloseReason,
+        closes: s.closes,
+        closeHistory: [...s.closeHistory],
+        pendingRequests: pendingRequests(),
+      };
     },
     counters(): TestCounters {
       return { ...counters };
@@ -171,9 +197,12 @@ export function installHooks(api: GridApi): () => void {
       const s = useAppStore.getState();
       return { p50: s.latencyP50Ms, p95: s.latencyP95Ms };
     },
+    lastRequest(): SsrmRequest | null {
+      return lastRequest === null ? null : structuredClone(lastRequest);
+    },
     busy(): boolean {
       const s = useAppStore.getState();
-      return !s.welcomed || s.notReady || s.status !== 'connected' || s.requestedTrader !== s.confirmedTrader;
+      return !s.welcomed || s.notReady || s.status !== 'connected' || s.requestedTrader !== s.confirmedTrader || pendingRequests() > 0;
     },
   };
   const target: HookWindow = window;
@@ -189,4 +218,5 @@ export const resetCountersForTest = (): void => {
   counters.rowsAdded = 0;
   counters.purges = 0;
   counters.lastDeltaAt = 0;
+  lastRequest = null;
 };

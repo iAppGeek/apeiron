@@ -44,6 +44,7 @@ const makeClient = (): {
     getRows: vi.fn(),
     setFilterValues: vi.fn(),
     control,
+    pending: vi.fn(() => 0),
     dispose: vi.fn(),
   } as unknown as BlotterClient;
   return { client, handlers, hello, connect, control };
