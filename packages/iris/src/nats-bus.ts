@@ -1,14 +1,13 @@
 import {
-  AckPolicy,
-  DeliverPolicy,
   jetstream,
   jetstreamManager,
   type ConsumerMessages,
   type JetStreamClient,
   type JetStreamManager,
 } from '@nats-io/jetstream';
-import { connect, nanos, type NatsConnection } from '@nats-io/transport-node';
+import { connect, type NatsConnection } from '@nats-io/transport-node';
 import { subjectMatches, type Bus, type BusHandler, type BusSubscription, type ConsumeHandler, type ConsumeSpec } from '@apeiron/logos';
+import { ensureConsumer } from './consumers.js';
 
 export type BusLogger = {
   warn(obj: Record<string, unknown>, msg: string): void;
@@ -23,10 +22,6 @@ export type NatsBusOptions = {
 };
 
 const decoder = new TextDecoder();
-
-/** How long a delivered message may stay unacked before JetStream redelivers it. */
-const ACK_WAIT_MS = 30_000;
-const MAX_ACK_PENDING = 20_000;
 
 /** The Bus over NATS core plus JetStream. Subjects captured by a stream are published through JetStream. */
 export class NatsBus implements Bus {
@@ -89,23 +84,7 @@ export class NatsBus implements Bus {
 
   async consume(spec: ConsumeSpec, handler: ConsumeHandler): Promise<BusSubscription> {
     const jsm = await this.manager();
-    const config = {
-      durable_name: spec.durable,
-      filter_subject: spec.subject,
-      ack_policy: AckPolicy.Explicit,
-      deliver_policy: DeliverPolicy.All,
-      ack_wait: nanos(ACK_WAIT_MS),
-      max_ack_pending: MAX_ACK_PENDING,
-    };
-    try {
-      await jsm.consumers.info(spec.stream, spec.durable);
-      await jsm.consumers.update(spec.stream, spec.durable, {
-        ack_wait: config.ack_wait,
-        max_ack_pending: config.max_ack_pending,
-      });
-    } catch {
-      await jsm.consumers.add(spec.stream, config);
-    }
+    await ensureConsumer(jsm, spec);
     const consumer = await this.js.consumers.get(spec.stream, spec.durable);
     const messages: ConsumerMessages = await consumer.consume({ max_messages: 1_000 });
     void (async (): Promise<void> => {

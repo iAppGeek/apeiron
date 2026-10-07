@@ -1,7 +1,8 @@
 import type { Bus, BusHandler, BusSubscription, ConsumeHandler, ConsumeSpec } from './bus.js';
 
 type StreamState = { subjects: string[]; log: { subject: string; payload: unknown }[] };
-type DurableState = { acked: Set<number> };
+/** Everything at or below `ackedThrough` is acknowledged (JetStream's `AckPolicy.All`). */
+type DurableState = { ackedThrough: number };
 type Sub = { subject: string; handler: BusHandler };
 type Consumer = { spec: ConsumeSpec; handler: ConsumeHandler; closed: boolean };
 
@@ -22,6 +23,7 @@ const clone = <T>(value: T): T => structuredClone(value);
 /**
  * In-process {@link Bus} for tests. Delivery is synchronous, payloads are cloned (so tests catch aliasing),
  * and streams keep a log so a durable consumer that reconnects is replayed everything it has not acked.
+ * An ack covers every earlier message too, as JetStream's `AckPolicy.All` does.
  */
 export class MemoryBus implements Bus {
   private readonly subs = new Set<Sub>();
@@ -73,7 +75,7 @@ export class MemoryBus implements Bus {
     const consumer: Consumer = { spec, handler, closed: false };
     this.consumers.add(consumer);
     stream.log.forEach((m, index) => {
-      if (!durable.acked.has(index) && subjectMatches(spec.subject, m.subject)) {
+      if (index > durable.ackedThrough && subjectMatches(spec.subject, m.subject)) {
         this.deliver(consumer, index, m.subject, m.payload);
       }
     });
@@ -95,7 +97,7 @@ export class MemoryBus implements Bus {
   private durable(name: string): DurableState {
     let d = this.durables.get(name);
     if (d === undefined) {
-      d = { acked: new Set() };
+      d = { ackedThrough: -1 };
       this.durables.set(name, d);
     }
     return d;
@@ -104,7 +106,7 @@ export class MemoryBus implements Bus {
   private deliver(consumer: Consumer, index: number, subject: string, payload: unknown): void {
     const durable = this.durable(consumer.spec.durable);
     consumer.handler(clone(payload), subject, () => {
-      durable.acked.add(index);
+      durable.ackedThrough = Math.max(durable.ackedThrough, index);
     });
   }
 }

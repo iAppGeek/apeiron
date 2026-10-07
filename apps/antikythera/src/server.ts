@@ -1,6 +1,9 @@
 import websocket from '@fastify/websocket';
+import type { Bus } from '@apeiron/logos';
 import type { OrderRepository } from '@apeiron/mnemosyne';
 import Fastify, { LogController, type FastifyInstance } from 'fastify';
+import { LiveRuntime } from './live/runtime.js';
+import type { BackpressureOptions } from './live/backpressure.js';
 import { QueryEngine } from './query/engine.js';
 import { LagMonitor, withLagReport } from './lag.js';
 import { loadStore, type LoadReport } from './loader.js';
@@ -11,6 +14,17 @@ import { attachWebSocket } from './ws-transport.js';
 
 export type ServerOptions = {
   repo: OrderRepository;
+  /** The message bus. Without one the server is read-only (no live updates, no control). */
+  bus?: Bus;
+  /** Flush tick length (default 100). */
+  flushMs?: number;
+  /** Write-behind interval (default 500). */
+  writeBehindMs?: number;
+  /** Most blocks tracked per client for live deltas (default 100). */
+  maxTrackedBlocks?: number;
+  backpressure?: BackpressureOptions;
+  /** Seconds between summaries are 1s unless a test says otherwise. */
+  summaryIntervalMs?: number;
   logLevel?: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
   storeCapacity?: number;
   viewCacheMaxViews?: number;
@@ -30,6 +44,7 @@ export type HealthBody = {
   loadMs: number;
   heapMb: number;
   rssMb: number;
+  live?: { attached: boolean; clients: number; liveRows: number; pendingEvents: number };
 };
 
 export type BlotterServer = {
@@ -39,6 +54,8 @@ export type BlotterServer = {
   load(): Promise<LoadReport>;
   /** The engine once loading has finished, else null. */
   engine(): QueryEngine | null;
+  /** The live runtime once loading has finished and a bus was given, else null. */
+  runtime(): LiveRuntime | null;
   health(): HealthBody;
   lag: LagMonitor;
 };
@@ -56,14 +73,20 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
   });
   await app.register(websocket, { options: { maxPayload: options.maxPayload ?? 1_048_576 } });
 
-  const store = new ColumnarStore({ capacity: options.storeCapacity });
+  const store = new ColumnarStore({
+    capacity: options.storeCapacity,
+    onAscendingBroken: (orderId) =>
+      app.log.warn({ orderId }, 'an appended orderId is not above the previous one; sorts lose the row-order tiebreak (views will rebuild)'),
+  });
   const lag = new LagMonitor();
   lag.start();
-  app.addHook('onClose', () => {
+  app.addHook('onClose', async () => {
     lag.stop();
+    await runtime?.stop();
   });
 
   let engine: QueryEngine | null = null;
+  let runtime: LiveRuntime | null = null;
   let report: LoadReport | null = null;
   let failed = false;
   let loadStarted = 0;
@@ -77,12 +100,40 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
       loadMs: report?.loadMs ?? (loadStarted === 0 ? 0 : Math.round(performance.now() - loadStarted)),
       heapMb: mem.heapMb,
       rssMb: mem.rssMb,
+      ...(runtime === null
+        ? {}
+        : {
+            live: {
+              attached: runtime.isAttached,
+              clients: runtime.clientCount,
+              liveRows: runtime.live.liveRows,
+              pendingEvents: runtime.live.pendingEvents,
+            },
+          }),
     };
   };
 
   app.get('/health', async (_req, reply) => {
     const body = health();
     return reply.code(body.status === 'ok' ? 200 : 503).send(body);
+  });
+
+  app.get('/debug/lag', async (req) => {
+    const reset = (req.query as { reset?: string }).reset === '1';
+    if (runtime === null) return { live: false };
+    const body = {
+      lag: runtime.system.totalLag(),
+      server: runtime.system.latest,
+      flush: { ...runtime.flushStats, avgMs: runtime.flushStats.flushes === 0 ? 0 : runtime.flushStats.totalMs / runtime.flushStats.flushes },
+      writeBehind: runtime.writeBehind.stats,
+      live: runtime.live.stats,
+      clients: runtime.clientCount,
+    };
+    if (reset) {
+      runtime.system.resetTotalLag();
+      runtime.flushStats.maxMs = 0;
+    }
+    return body;
   });
 
   const logSlowBuild = (info: { ms: number; rowCount: number }): void => {
@@ -98,6 +149,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
       (connection) =>
         new ClientSession(connection, {
           engine: () => engine,
+          live: () => runtime,
           log: app.log,
           onRows: (info) => {
             if (info.built && info.ms >= slowBuildMs) logSlowBuild(info);
@@ -121,6 +173,21 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
         maxBlockRows: options.maxBlockRows ?? 5_000,
       });
       report = result;
+      if (options.bus !== undefined) {
+        runtime = new LiveRuntime({
+          store,
+          engine,
+          repo: options.repo,
+          bus: options.bus,
+          log: app.log,
+          flushMs: options.flushMs ?? 100,
+          writeBehindMs: options.writeBehindMs ?? 500,
+          maxTrackedBlocks: options.maxTrackedBlocks ?? 100,
+          backpressure: options.backpressure,
+          summaryIntervalMs: options.summaryIntervalMs,
+        });
+        runtime.start();
+      }
       app.log.info(
         {
           rows: result.rows,
@@ -146,5 +213,5 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
     }
   };
 
-  return { app, store, load, engine: () => engine, health, lag };
+  return { app, store, load, engine: () => engine, runtime: () => runtime, health, lag };
 }

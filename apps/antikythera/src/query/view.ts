@@ -154,6 +154,11 @@ export class View {
     this.build();
   }
 
+  /** True when leaf rows are ordered by exactly `createdAt desc` (then new orders always land at position 0). */
+  get leafIsCreatedAtDesc(): boolean {
+    return this.leafKeys.length === 1 && this.leafKeys[0]?.field === 'createdAt' && this.leafKeys[0].desc;
+  }
+
   /** Rows that pass the view's filter, before any grouping. */
   get filteredCount(): number {
     return this.root.rows.len;

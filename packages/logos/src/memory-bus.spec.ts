@@ -49,6 +49,7 @@ describe('MemoryBus', () => {
     });
     expect(first).toEqual([1, 2]);
     await sub.close();
+    // Acking the first message acknowledges it; the second stays pending and is redelivered.
 
     await bus.publish('orders.events', { n: 3 });
     const second: number[] = [];
@@ -57,6 +58,18 @@ describe('MemoryBus', () => {
       ack();
     });
     expect(second).toEqual([2, 3]);
+  });
+
+  it('treats an ack as covering every earlier message (AckPolicy.All)', async () => {
+    const bus = new MemoryBus();
+    for (const n of [1, 2, 3]) await bus.publish('orders.events', { n });
+    const sub = await bus.consume({ stream: 'ORDERS', durable: 'all', subject: 'orders.events' }, (p, _s, ack) => {
+      if ((p as { n: number }).n === 2) ack();
+    });
+    await sub.close();
+    const again: number[] = [];
+    await bus.consume({ stream: 'ORDERS', durable: 'all', subject: 'orders.events' }, (p) => again.push((p as { n: number }).n));
+    expect(again).toEqual([3]);
   });
 
   it('delivers live messages to an active consumer and rejects unknown streams', async () => {

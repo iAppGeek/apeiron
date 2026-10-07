@@ -108,13 +108,27 @@ export function transition(order: Order, to: OrderStatus, now: number): Transiti
 
 export type PriceQuote = { bid: number; ask: number };
 
+/** The fields {@link derivePriceFields} reads, so the server can pass a light object instead of a full order. */
+export type PriceDerivationInput = Pick<
+  Order,
+  | 'currencyPair'
+  | 'side'
+  | 'status'
+  | 'limitPrice'
+  | 'avgFillPrice'
+  | 'arrivalPrice'
+  | 'filledQty'
+  | 'orderQty'
+  | 'notionalUsd'
+>;
+
 /**
  * The price-derived fields the server owns, recomputed from the latest quote: `marketBid/Ask/Mid`,
  * `spreadBps`, `distanceToLimitBps` (positive when the market is inside the limit, by side),
  * `slippageBps` when the order has fills, `unrealisedPnlUsd` for LIVE and PAUSED orders, and
  * `lastUpdateTime`.
  */
-export function derivePriceFields(order: Order, quote: PriceQuote, now: number): Partial<Order> {
+export function derivePriceFields(order: PriceDerivationInput, quote: PriceQuote, now: number): Partial<Order> {
   const dec = decimalsOf(order);
   const marketBid = roundTo(quote.bid, dec);
   const marketAsk = roundTo(quote.ask, dec);

@@ -15,6 +15,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@apeiron/iris": "workspace:*",
     "@apeiron/logos": "workspace:*",
     "@apeiron/mnemosyne": "workspace:*",
     "@fastify/websocket": "^11.3.3",
