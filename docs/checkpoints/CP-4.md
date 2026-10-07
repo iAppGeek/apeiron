@@ -2,7 +2,9 @@
 
 Branch `phase-7-observability`. This checkpoint covers phases 6 and 7. It also records an incident: the first load run took the server down, and the investigation (and a second, environmental cause) changed antikythera and the compose file.
 
-**Verdict in one line:** with the fixes below, 50 clients for 300 s meet every POC target with both codecs, and a 600 s soak with 240 s of stress runs without a stall. The first full run did not.
+**Review update (APPROVE WITH FIXES applied, section 12):** the flush interval is now 50 ms, `delta.srcTs` makes tick-to-screen a true end-to-end figure (p95 62 to 65 ms in the final runs), and sections 5 to 9 below are the pre-review runs at `FLUSH_MS=100`, kept as the record of the incident fix.
+
+**Verdict in one line (before the review fixes):** with the fixes below, 50 clients for 300 s meet every POC target with both codecs, and a 600 s soak with 240 s of stress runs without a stall. The first full run did not.
 
 ## 1. What was built
 
@@ -212,7 +214,7 @@ total 30.0s busy 6.4s
 
 Targets: getRows p95 < 50 ms, view change (cold getRows) < 300 ms, delta p95 < 150 ms, event-loop lag p99 < 50 ms, RSS < 2 GB.
 
-### 5.1 50 clients, 300 s, json (host talos process, specials, stress 120 to 180 s)
+### 5.1 50 clients, 300 s, json (pre-review, `FLUSH_MS=100`; host talos process, specials, stress 120 to 180 s)
 
 ```
 talos: 50 clients, 300s, codec json, seed 1, 2026-10-07T10:00:41.136Z
@@ -593,8 +595,8 @@ Node 24 (container `v24.21.0`), TypeScript 6.0 (7.x still blocked by typescript-
 
 ## 11. Known weaknesses and review attention
 
-1. **Tick-to-screen is over 150 ms end to end.** Delta latency (`serverTs` to receipt) is 21 to 25 ms at p95, but the oldest event waits 151 to 193 ms (p95) before its flush runs (100 ms flush interval, hermes publish and NATS delivery, and the time a flush waits behind other work), so the server-side path from hermes to the socket is about 170 to 220 ms at p95. If the plan's "tick-to-screen p95 < 150 ms" is meant end to end, it is **not met**; if it means the last hop, it is met comfortably. Needs a ruling.
-2. **Test hygiene matters.** A stress run leaves up to about 5,000 LIVE rows that drain at about 3 orders/s, and a stalled run leaves a JetStream backlog; later runs start heavier. Use `scripts/loadtest-reset.sh` between runs. The report does not yet record the LIVE count at the start of a run.
+1. **(Resolved in review: see section 12.)** *Tick-to-screen was over 150 ms end to end at `FLUSH_MS=100`.* Delta latency (`serverTs` to receipt) is 21 to 25 ms at p95, but the oldest event waits 151 to 193 ms (p95) before its flush runs (100 ms flush interval, hermes publish and NATS delivery, and the time a flush waits behind other work), so the server-side path from hermes to the socket is about 170 to 220 ms at p95. If the plan's "tick-to-screen p95 < 150 ms" is meant end to end, it is **not met**; if it means the last hop, it is met comfortably. Needs a ruling.
+2. **Test hygiene matters.** A stress run leaves up to about 5,000 LIVE rows that drain at about 3 orders/s, and a stalled run leaves a JetStream backlog; later runs start heavier. Use `scripts/loadtest-reset.sh` between runs. (The report now records the rows and LIVE count at the start, section 12.)
 3. **The Docker VM is small and shared.** The runs were on a laptop VM of 5.9 GB with another stack running. A 600 s stall appeared when MongoDB's cache was left at its default; the 1 GB cap is a workaround that should be revisited for the remote box.
 4. **Stale-view cost:** a view whose last client leaves becomes stale and the next request pays a full cold build (12 to 50 ms for most views, more for string sorts). Under a flapping workload that is repeated work.
 5. **Deferred rebuilds** leave a view's row order slightly stale for up to about a second while its subscribers still receive value updates; they then get `dirtyRoutes`. The deferred-rebuild panel stayed flat in these runs (no view crossed the threshold), so that path is covered by tests but not by the load test.
@@ -602,3 +604,238 @@ Node 24 (container `v24.21.0`), TypeScript 6.0 (7.x still blocked by typescript-
 7. **The cold column is the client's view of "first request of a new view"**; the share the server actually builds is in the server histograms (about 375 of 29,750 requests).
 8. **Not covered:** 60 fps scrolling (a browser measurement; phase 8 E2E), the remote Graviton box, and Oracle or KDB adapters.
 9. Hermes reports `publishErrors` under heavy stress in earlier runs (183 in a stalled run); none in the final runs.
+
+## 12. CP-4 review fixes (F1 to F5) and the final numbers
+
+The review (`CP-4-review.md`, APPROVE WITH FIXES) ruled that tick-to-screen means end to end, and asked for these changes:
+
+- **F1** `FLUSH_MS` default 50 (config, compose, `.env.example`, server default).
+- **F2** `delta.srcTs`: the earliest source-event `ts` (hermes price tick or order event) folded into the delta. The change set carries a timestamp per changed row (the event or tick behind it; an event-driven repricing is not blamed on an older tick); each client's pending delta keeps the earliest across the ticks it was held back for, and structural changes use the tick-wide earliest; a refresh with no source event is stamped at send time. New metric `apeiron_event_age_at_send_seconds`. Pharos's tick-to-screen now uses `srcTs` (still corrected for clock offset); talos gates **tick-to-screen** (receipt minus `srcTs`) and keeps the last hop (`serverTs` to receipt) separately. The dashboard panel "Tick-to-client: event age at send" has the 150 ms line.
+- **F3** talos: the first 10 s are left out of the view-change statistics; the first view of every client is reported as the **startup burst** (p50/p95/max); the report records the rows and LIVE count at the start; the event-loop summary adds **p99.9** and the longest stall.
+- **F4** \`MONGO_CACHE_GB\` (default 1) feeds \`--wiredTigerCacheSizeGB\`; documented in compose and \`.env.example\` (raise it on the 16 GB remote box).
+- **F5** the two 300 s runs below, each after \`scripts/loadtest-reset.sh\`, on the rebuilt stack.
+
+Tests added: change-set timestamps and merge, live-store per-row source timestamps (including the repricing case), tracker \`srcTs\` (tracked rows, held-back ticks, structural changes, refresh), session age-at-send, the metric, pharos coalescing and status-bar latency from \`srcTs\`, and talos tick-to-screen, startup burst, the 10 s exclusion, start state and p99.9.
+
+### 12.1 Final results, 50 clients, 300 s, `FLUSH_MS=50`
+
+| | json | msgpack | Target |
+|---|---|---|---|
+| **Tick-to-screen p50 / p95 / p99** (source event to receipt) | 38 / **65** / 80 ms | 38 / **62.5** / 76 ms | p95 < 150 ms |
+| Last hop p50 / p95 / p99 (`serverTs` to receipt) | 4.5 / 28 / 33 ms | 4 / 22 / 29 ms | |
+| getRows warm p50 / p95 / p99 | 5.1 / **18.0** / 31.2 ms | 5.5 / **18.1** / 27.2 ms | p95 < 50 ms |
+| View change (cold, after 10 s) p50 / p95 / p99 | 16.8 / **37.7** / 52.0 ms | 16.8 / **38.2** / 46.7 ms | p95 < 300 ms |
+| Startup burst (first view of all 50 clients at once) p50 / p95 / max | 83 / 207 / 265 ms | 194 / 380 / 445 ms | not gated, under 2 s |
+| Command ack p50 / p95 | 37.7 / 66.5 ms | 37.8 / 66.3 ms | |
+| Event-loop lag p99 / p99.9 / longest stall | **23.1** / 35 / 216 ms | **19.0** / 31.8 / 346 ms | p99 < 50 ms |
+| Server CPU median (max) | 22% (112%) | 24% (114%) | |
+| Server RSS median (max) | 1,040 (1,099) MB | 1,019 (1,065) MB | max < 2,048 MB |
+| Tick-to-screen p95 in the stress window | 75 ms | 72 ms | |
+| Server at start | 1,000,228 rows, 578 LIVE | 1,000,251 rows, 588 LIVE | |
+| Bytes in per client | 147 KB/s (`rows` 111, `delta` 36) | 131 KB/s (`rows` 97, `delta` 34) | |
+| Messages in per client | 9.3 /s | 9.2 /s | |
+
+Every gated target is met, both codecs. Compared with the pre-review runs (`FLUSH_MS=100`), the tick-to-screen figure that was about 170 to 220 ms is now 62 to 65 ms, command ack p50 fell from 66 to 38 ms, and median CPU is about 1 point higher. The server-histogram "event age at send" p95 reads 90 ms because its buckets are wide (50 and 100 ms) and it is interpolated; the client-side figure above is the exact one.
+
+### 12.2 Raw output, json
+
+```
+talos: 50 clients, 300s, codec json, seed 1, 2026-10-07T10:42:50.645Z
+server at start: 1000228 rows, 578 LIVE
+
+Latency, json (50 clients), ms
+                                                  p50    p95    p99    max      n
+getRows warm                                      5.1   18.0   31.2  269.3  29072
+getRows cold (view change, after 10 s)           16.8   37.7   52.0   73.3    324
+tick-to-screen (srcTs to receipt)                38.0   65.0   80.0  405.5  91237
+  last hop (serverTs to receipt)                  4.5   28.0   33.0  113.5  91237
+getRows startup burst (first view, all at once)  83.0  207.0  265.0  265.0     49
+command ack                                      37.7   66.5   84.3  122.1    823
+
+Tick-to-screen by phase, json, ms
+           p50   p95   p99    max      n
+baseline  34.0  57.0  70.0  405.5  31868
+stress    44.0  75.0  84.0  138.5  23174
+after     37.0  65.0  76.5   96.0  36195
+
+Traffic per client, json
+     msgs/s   KB/s
+in      9.3  147.2
+out     2.2    0.7
+errors by code: {"INVALID_TRANSITION":391,"SLOW_CONSUMER":1}
+
+Server (/metrics every 2s, 151 scrapes, 0 failed)
+                                    min  median    max
+CPU % of one core                   9.4    22.0  111.6
+RSS MB                              609    1040   1099
+heap used MB                        245     290    351
+event-loop lag p99 ms (1s windows)  3.6    13.3   92.1
+event-loop lag max ms (1s windows)  3.6    18.4  180.1
+event-loop lag over the whole run (server histogram): p50 0.9 ms, p99 23.1 ms, p99.9 35.0 ms, longest stall 216.1 ms
+
+Server-side histograms over the run
+                                                                 value
+getRows warm p95 ms                                               0.86
+getRows cold p95 ms                                              32.72
+getRows cold / warm count                                  378 / 29375
+flush p50 / p99 ms                                        1.13 / 44.24
+event age at flush p95 ms                                         71.4
+event age at send p95 ms (server side of tick-to-screen)          90.1
+delta size p95 bytes                                             31680
+command p95 ms                                                    81.5
+soft_conflate / slow_consumer events                            59 / 1
+
+Targets
+                                                         target    measured  verdict
+getRows p95 (warm, client-measured)                     < 50 ms   json 18.0     PASS
+View change: cold getRows p95 (after the first 10 s)   < 300 ms   json 37.7     PASS
+Tick-to-screen p95 (source event to receipt)           < 150 ms   json 65.0     PASS
+Event-loop lag p99 (server, whole run)                  < 50 ms    all 23.1     PASS
+Server RSS max                                        < 2048 MB  all 1099.5     PASS
+
+Events (seconds into the run)
+      0.0s  preset.seen {"preset":"medium"}
+     20.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":14,"code":null}
+     40.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":1,"code":null}
+     60.0s  slow.paused 
+     60.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":40,"code":null}
+     62.2s  server.soft_conflate_first_seen {"note":"first /metrics scrape after the pause that shows deltas being held back"}
+     64.2s  server.slow_consumer_first_seen {"note":"first /metrics scrape that shows the client closed with SLOW_CONSUMER"}
+     65.0s  slow.server_closed_seen {"serverClosedIt":true,"fills":5}
+     65.0s  slow.resumed {"pausedMs":5004}
+     65.1s  slow.error_received 
+     65.5s  slow.after_resume {"slowConsumerError":true,"closed":true,"closeCode":1013}
+     65.5s  slow.reconnect {"ok":true,"ms":8}
+     80.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":14,"code":null}
+    100.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":3,"code":null}
+    120.0s  stress.stress {"acked":true,"ackMs":7}
+    120.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":1,"code":null}
+    120.3s  preset.seen {"preset":"stress"}
+    140.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":0,"code":null}
+    160.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":11,"code":null}
+    180.0s  stress.medium {"acked":true,"ackMs":1}
+    180.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":0,"code":null}
+    180.0s  preset.seen {"preset":"medium"}
+    200.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":1,"code":null}
+    220.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":10,"code":null}
+    240.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":0,"code":null}
+    260.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":0,"code":null}
+    280.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":1,"code":null}
+
+generator: send lag p99 2.0 ms, max 42.8 ms; own event-loop lag p99 2.5 ms, max 36.5 ms; counters {"scrolls":29353,"viewChanges":330,"commandsSent":1225,"commandsSkipped":246,"unexpectedCloses":0,"connectFailures":0}
+```
+
+### 12.3 Raw output, msgpack
+
+```
+talos: 50 clients, 300s, codec msgpack, seed 1, 2026-10-07T10:48:59.913Z
+server at start: 1000251 rows, 588 LIVE
+
+Latency, msgpack (50 clients), ms
+                                                   p50    p95    p99    max      n
+getRows warm                                       5.5   18.1   27.2  336.7  29067
+getRows cold (view change, after 10 s)            16.8   38.2   46.7   55.6    320
+tick-to-screen (srcTs to receipt)                 38.0   62.5   76.0  435.5  88626
+  last hop (serverTs to receipt)                   4.0   22.0   29.0  257.0  88626
+getRows startup burst (first view, all at once)  194.0  380.0  445.0  445.0     49
+command ack                                       37.8   66.3   77.1  109.2    823
+
+Tick-to-screen by phase, msgpack, ms
+           p50   p95   p99    max      n
+baseline  35.0  57.5  65.0  435.5  31375
+stress    46.0  72.0  82.5  117.0  22139
+after     38.0  62.0  70.0  102.0  35112
+
+Traffic per client, msgpack
+     msgs/s   KB/s
+in      9.2  131.1
+out     2.2    0.5
+errors by code: {"INVALID_TRANSITION":379,"SLOW_CONSUMER":1,"UNKNOWN_ORDER":1}
+
+Server (/metrics every 2s, 151 scrapes, 0 failed)
+                                    min  median    max
+CPU % of one core                   8.0    23.8  114.2
+RSS MB                              708    1019   1065
+heap used MB                        246     292    348
+event-loop lag p99 ms (1s windows)  4.3    11.4   31.4
+event-loop lag max ms (1s windows)  4.7    18.4   45.3
+event-loop lag over the whole run (server histogram): p50 1.0 ms, p99 19.0 ms, p99.9 31.8 ms, longest stall 346.0 ms
+
+Server-side histograms over the run
+                                                                 value
+getRows warm p95 ms                                               0.83
+getRows cold p95 ms                                              35.87
+getRows cold / warm count                                  373 / 29375
+flush p50 / p99 ms                                        1.15 / 35.98
+event age at flush p95 ms                                         73.1
+event age at send p95 ms (server side of tick-to-screen)          89.9
+delta size p95 bytes                                             31096
+command p95 ms                                                    78.9
+soft_conflate / slow_consumer events                            79 / 1
+
+Targets
+                                                         target      measured  verdict
+getRows p95 (warm, client-measured)                     < 50 ms  msgpack 18.1     PASS
+View change: cold getRows p95 (after the first 10 s)   < 300 ms  msgpack 38.2     PASS
+Tick-to-screen p95 (source event to receipt)           < 150 ms  msgpack 62.5     PASS
+Event-loop lag p99 (server, whole run)                  < 50 ms      all 19.0     PASS
+Server RSS max                                        < 2048 MB    all 1064.5     PASS
+
+Events (seconds into the run)
+      0.0s  preset.seen {"preset":"medium"}
+     20.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":0,"code":null}
+     40.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":2,"code":null}
+     60.0s  slow.paused 
+     60.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":38,"code":null}
+     62.3s  server.soft_conflate_first_seen {"note":"first /metrics scrape after the pause that shows deltas being held back"}
+     68.3s  server.slow_consumer_first_seen {"note":"first /metrics scrape that shows the client closed with SLOW_CONSUMER"}
+     69.0s  slow.server_closed_seen {"serverClosedIt":true,"fills":9}
+     69.0s  slow.resumed {"pausedMs":9012}
+     69.2s  slow.error_received 
+     69.5s  slow.after_resume {"slowConsumerError":true,"closed":true,"closeCode":1013}
+     69.5s  slow.reconnect {"ok":true,"ms":6}
+     80.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":3,"code":null}
+    100.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":1,"code":null}
+    120.0s  stress.stress {"acked":true,"ackMs":1}
+    120.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":1,"code":null}
+    120.1s  preset.seen {"preset":"stress"}
+    140.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":0,"code":null}
+    160.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":1,"code":null}
+    180.0s  stress.medium {"acked":true,"ackMs":36}
+    180.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":9,"code":null}
+    180.1s  preset.seen {"preset":"medium"}
+    200.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":10,"code":null}
+    220.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":0,"code":null}
+    240.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":1,"code":null}
+    260.0s  codec.switch {"to":"json","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":1,"code":null}
+    280.0s  codec.switch {"to":"msgpack","welcomed":true,"getRowsOk":true,"frameTypeOk":true,"ms":2,"code":null}
+
+generator: send lag p99 2.0 ms, max 13.1 ms; own event-loop lag p99 2.5 ms, max 11.0 ms; counters {"scrolls":29348,"viewChanges":326,"commandsSent":1215,"commandsSkipped":255,"unexpectedCloses":0,"connectFailures":0}
+```
+
+### 12.4 Verification after the fixes (raw summary lines)
+
+`pnpm lint && pnpm typecheck && pnpm test && pnpm build`, exit code 0:
+
+```
+ Tasks:    11 successful, 11 total
+ Tasks:    11 successful, 11 total
+@apeiron/iris:test:  Test Files  2 passed | 1 skipped (3)
+@apeiron/iris:test:       Tests  9 passed | 2 skipped (11)
+@apeiron/gaia:test:  Test Files  5 passed (5)
+@apeiron/gaia:test:       Tests  25 passed (25)
+@apeiron/talos:test:  Test Files  15 passed (15)
+@apeiron/talos:test:       Tests  123 passed (123)
+@apeiron/pharos:test:  Test Files  34 passed (34)
+@apeiron/pharos:test:       Tests  381 passed (381)
+@apeiron/hermes:test:  Test Files  8 passed (8)
+@apeiron/hermes:test:       Tests  60 passed (60)
+@apeiron/mnemosyne:test:  Test Files  4 passed (4)
+@apeiron/mnemosyne:test:       Tests  35 passed (35)
+@apeiron/logos:test:  Test Files  12 passed (12)
+@apeiron/logos:test:       Tests  156 passed (156)
+@apeiron/antikythera:test:  Test Files  40 passed (40)
+@apeiron/antikythera:test:       Tests  434 passed (434)
+ Tasks:    11 successful, 11 total
+ Tasks:    8 successful, 8 total
+```

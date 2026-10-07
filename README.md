@@ -48,7 +48,7 @@ curl localhost:4000/debug/lag                                                   
 
 ## Benchmarks
 
-Load test: `talos`, 50 WebSocket clients for 300 seconds against the containerised stack (1M rows, Medium preset), on one laptop (Apple silicon, Docker Desktop VM with 6 GB). The mix has scrolling at 2 blocks/s per client, a sort/filter/group change about every 45 s, a Pause or Resume about every 10 s, one slow consumer, one codec switcher, and a 60 s stress window (about 2,000 order updates/s, up to 5,000 LIVE rows) from 120 s to 180 s. Latencies are measured from each request's *intended* send time, so a stalled server cannot hide its own delay. Full method, raw output and the incident behind the numbers are in [`docs/checkpoints/CP-4.md`](docs/checkpoints/CP-4.md).
+Load test: `talos`, 50 WebSocket clients for 300 seconds against the containerised stack (1M rows, Medium preset, 50 ms flush), on one laptop (Apple silicon, Docker Desktop VM with 6 GB). The mix has scrolling at 2 blocks/s per client, a sort/filter/group change about every 45 s, a Pause or Resume about every 10 s, one slow consumer, one codec switcher, and a 60 s stress window (about 2,000 order updates/s, up to 5,000 LIVE rows) from 120 s to 180 s. Latencies are measured from each request's *intended* send time, so a stalled server cannot hide its own delay. **Tick-to-screen is end to end**: from the source event's timestamp in hermes (`delta.srcTs`) to the client receiving the delta. Full method, raw output and the incident behind the numbers are in [`docs/checkpoints/CP-4.md`](docs/checkpoints/CP-4.md).
 
 ```bash
 scripts/loadtest-reset.sh                                      # fresh state: re-seed, empty JetStream, Medium
@@ -58,18 +58,33 @@ docker compose --profile core --profile loadtest run --rm talos                 
 
 | | JSON | msgpack |
 |---|---|---|
-| Bytes in per client | 151 KB/s | 130 KB/s (-14%) |
-| Messages in per client | 8.7 /s | 9.0 /s |
-| Of which `rows` / `delta` bytes | 112 / 39 KB/s | 93 / 37 KB/s |
-| getRows warm p50 / p95 / p99 | 5.0 / 17.4 / 27.0 ms | 5.3 / 18.3 / 29.2 ms |
-| getRows cold (view change) p50 / p95 / p99 | 18.6 / 110 / 220 ms | 18.9 / 118 / 335 ms |
-| Delta latency p50 / p95 / p99 (`serverTs` to receipt) | 5 / 21 / 27 ms | 5.5 / 25 / 35 ms |
-| Command ack p50 / p95 | 67 / 114 ms | 64 / 115 ms |
-| Server CPU median (max) | 21% (121%) of one core | 24% (144%) |
-| Server RSS median (max) | 986 (1,035) MB | 1,025 (1,094) MB |
-| Event-loop lag p99 over the run | 17.8 ms | 19.2 ms |
+| Bytes in per client | 147 KB/s | 131 KB/s (-11%) |
+| Messages in per client | 9.3 /s | 9.2 /s |
+| Of which `rows` / `delta` bytes | 111 / 36 KB/s | 97 / 34 KB/s |
+| **Tick-to-screen** p50 / p95 / p99 (source event to client) | 38 / 65 / 80 ms | 38 / 62.5 / 76 ms |
+| Last hop only (`serverTs` to receipt) p50 / p95 | 4.5 / 28 ms | 4 / 22 ms |
+| getRows warm p50 / p95 / p99 | 5.1 / 18.0 / 31 ms | 5.5 / 18.1 / 27 ms |
+| View change (cold) p50 / p95 / p99 | 16.8 / 37.7 / 52 ms | 16.8 / 38.2 / 47 ms |
+| Startup burst, 50 cold views at once: p50 / p95 / max | 83 / 207 / 265 ms | 194 / 380 / 445 ms |
+| Command ack p50 / p95 | 38 / 67 ms | 38 / 66 ms |
+| Server CPU median (max) | 22% (112%) of one core | 24% (114%) |
+| Server RSS median (max) | 1,040 (1,099) MB | 1,019 (1,065) MB |
+| Event-loop lag p99 / p99.9 / longest stall | 23 / 35 / 216 ms | 19 / 32 / 346 ms |
 
-POC targets, both codecs: getRows p95 under 50 ms, view change under 300 ms, delta p95 under 150 ms, event-loop lag p99 under 50 ms and RSS under 2 GB are all met. msgpack saves about 14% of the bytes (17% on `rows`, 6% on `delta`) and costs a little more server CPU; neither changes a latency target. The delta latency above is only the final hop; add the age of the oldest event when its flush runs (p95 151 to 193 ms) for the whole server-side path from hermes, which is over 150 ms (see CP-4, known weaknesses).
+All POC targets are met with both codecs: getRows p95 under 50 ms, view change under 300 ms, end-to-end tick-to-screen p95 under 150 ms, event-loop lag p99 under 50 ms, RSS under 2 GB. msgpack saves about 11% of the bytes (13% on `rows`, 5% on `delta`) and costs a little more server CPU; neither changes a latency target. A 600 s soak with 240 s of stress ran without a stall (CP-4, section 5.3).
+
+## What the POC proved
+
+- **The grid.** A single Node server process holds 1M+ orders x 50 columns in memory (about 1 GB RSS) and serves 50 concurrent blotters. Each client can have its own sort, filter or grouping, and live updates keep coming.
+- **Latency.** Warm block fetch about 18 ms p95 (client-measured); view change about 38 ms p95; end-to-end tick-to-screen about 65 ms p95 (62.5 with msgpack), also under the stress window (75 ms); an order action (Pause, Resume) round trip about 67 ms p95.
+- **Load.** Under stress (about 5,000 LIVE orders ticking 3x/s, about 15k row updates/s), event-loop p99 stays under 25 ms, and median CPU is about 22-24% of one core (peaks of 110% across threads).
+- **Correctness under load.** Incremental views are proven identical to full rebuilds (property tests, including the deferred and carried-over paths, plus live cross-checks against fresh builds). Slow consumers are conflated and then disconnected (`SLOW_CONSUMER`) without hurting anyone else, and can reconnect.
+- **Limits found.**
+  - Synchronous rebuilds and maintaining views nobody uses caused a death spiral (fixed: untracked views go stale, rebuilds are deferred, the flush has a time budget over a shared tick log).
+  - A connect storm of 50 cold views queues for about 0.3-0.4 s on one thread (startup burst max 265 ms json, 445 ms msgpack).
+  - MongoDB needs its cache capped on a small host (`MONGO_CACHE_GB`), or the Docker VM swaps and everything stalls.
+  - Rare single stalls of 200-350 ms are still visible in the longest-stall figure.
+- **JSON vs msgpack.** msgpack is about 11% fewer bytes, uses slightly more server CPU, and latency is the same. Either is fine. Default to JSON for debuggability, and use msgpack on constrained links.
 
 Monitoring: `docker compose --profile core --profile monitoring up -d` adds Prometheus (<http://127.0.0.1:9090>) and Grafana (<http://127.0.0.1:3001>, dashboard "Apeiron: Blotter Server"). Grafana allows anonymous viewing without a login; that is for local use only, and both ports bind to 127.0.0.1. Edit with `admin` / `GRAFANA_ADMIN_PASSWORD` (default `admin`).
 
