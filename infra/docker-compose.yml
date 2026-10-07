@@ -120,6 +120,88 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  prometheus:
+    profiles: [monitoring]
+    # Newest stable release (the image has no floating minor tag, so the patch is pinned).
+    image: prom/prometheus:v3.15.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  grafana:
+    profiles: [monitoring]
+    image: grafana/grafana:13.2
+    environment:
+      # Anonymous visitors get the Viewer role so the dashboard opens without a login. Local use only:
+      # the port is bound to 127.0.0.1. Admin sign-in (admin / GRAFANA_ADMIN_PASSWORD) is still needed to edit.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/apeiron-blotter-server.json
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  talos:
+    profiles: [loadtest]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      args:
+        APP: talos
+    image: ${REGISTRY:-local}/apeiron/talos:${TAG:-dev}
+    # Needs the core profile too:  docker compose --profile core --profile loadtest run --rm talos
+    command:
+      - node
+      - dist/index.js
+      - --clients
+      - "${TALOS_CLIENTS:-50}"
+      - --duration
+      - "${TALOS_DURATION:-300}"
+      - --codec
+      - ${TALOS_CODEC:-json}
+      - --seed
+      - "${TALOS_SEED:-1}"
+      - --url
+      - ws://antikythera:4000/ws
+      - --metrics
+      - http://antikythera:4000/metrics
+      - --out
+      - /results
+    volumes:
+      - ./loadtest/results:/results
+    depends_on:
+      antikythera:
+        condition: service_healthy
+    restart: "no"
+
   gaia:
     profiles: [seed]
     build:
@@ -145,3 +227,4 @@ services:
 volumes:
   mongo-data:
   nats-data:
+  prometheus-data:
