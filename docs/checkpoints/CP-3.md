@@ -100,3 +100,40 @@ Unchanged from phase 5a: React 19.3, Vite 8.3, AG Grid (community, enterprise, r
 - Latency is `serverTs` to the end of the synchronous transaction, not to paint.
 - The preset is unknown until set from the page; another client changing it is not reflected.
 - Live price-tick figure above is cell value changes, not server ticks, so it reads below the 3/s target by construction.
+
+## CP-3 fixes (from the [CP-3 review](CP-3-review.md))
+
+**F1. Codec renegotiation (confirmed bug, fixed).** After msgpack was negotiated the server decoded every frame with msgpack, so the client's JSON-text re-hello got `BAD_FRAME` and the Dev menu could not switch back to JSON. `ClientSession` now decodes by frame type (text is JSON, binary is msgpack); the negotiated codec only chooses what the server sends. The first frame must still be a JSON text hello. The old session test "rejects a text frame in msgpack mode" asserted the buggy behaviour and was replaced.
+- Tests: session unit tests (text in msgpack mode, binary in json mode, garbage in both, json to msgpack to json to msgpack with `getRows` after each switch); a real-socket integration test in `server.spec.ts` doing the same four switches on one WebSocket; pharos connection-core round-trip tests (every hello is JSON text, later frames follow the negotiated codec, incoming frames decoded by type), controller test (three switches, three hellos, three purges), and an App test toggling the Dev menu both ways.
+- **Browser check (Playwright MCP, real clicks, rebuilt containers):** Dev, MessagePack: status bar codec `msgpack`, radio checked, deltas 10.0/s, no toast. Dev, JSON: codec `json`, radio checked, deltas 10.0/s, 33 rows rendered, no toast. Both directions work.
+
+**F2. Load preset visible.**
+- `@apeiron/logos`: `SUBJECTS.controlState = 'control.state'`, `LoadState`, `loadStateSchema`, `parseLoadState`; `welcome.preset` and `summary.preset` (`'medium' | 'stress' | null`).
+- `@apeiron/hermes`: publishes `control.state {preset}` at startup, on every `control.load` change and every 5s (`STATE_INTERVAL_MS`), stopped on `stop()`.
+- `@apeiron/antikythera`: `LiveRuntime` subscribes to `control.state`, caches the latest valid value (invalid payloads ignored), exposes `preset()`; sessions send it in `welcome` and every `summary`.
+- `pharos`: the store preset follows `welcome` and `summary` (a null never hides a known value, so a change made from another tab shows up within a second); the Dev menu shows it immediately after load; a `STRESS` pill appears in the status bar while stress is on. Browser check after a plain page reload with stress running: pill `STRESS` present with no click; after Dev, Medium: pill gone, Medium radio checked. Screenshot: `docs/screenshots/phase-5/status-bar-preset-stress.png`.
+- Tests for each part: logos (`control.state` parse), hermes (startup, change, 5s repeat, stop), antikythera runtime (cache, invalid payload, welcome and summary carry it), session summary/welcome, pharos controller (welcome, summary, null does not hide), StatusBar pill, App (Dev menu and pill from welcome).
+- The "active preset starts unknown" weakness and deviation 9 above no longer apply.
+
+Raw output of `pnpm lint && pnpm typecheck && pnpm test && pnpm build` (exit 0) after the fixes:
+
+```
+ Tasks:    10 successful, 10 total
+ Tasks:    10 successful, 10 total
+@apeiron/iris:test:  Test Files  2 passed | 1 skipped (3)
+@apeiron/iris:test:       Tests  9 passed | 2 skipped (11)
+@apeiron/gaia:test:  Test Files  5 passed (5)
+@apeiron/gaia:test:       Tests  25 passed (25)
+@apeiron/hermes:test:  Test Files  7 passed (7)
+@apeiron/hermes:test:       Tests  45 passed (45)
+@apeiron/pharos:test:  Test Files  32 passed (32)
+@apeiron/pharos:test:       Tests  328 passed (328)
+@apeiron/mnemosyne:test:  Test Files  4 passed (4)
+@apeiron/mnemosyne:test:       Tests  35 passed (35)
+@apeiron/logos:test:  Test Files  12 passed (12)
+@apeiron/logos:test:       Tests  132 passed (132)
+@apeiron/antikythera:test:  Test Files  36 passed (36)
+@apeiron/antikythera:test:       Tests  358 passed (358)
+ Tasks:    10 successful, 10 total
+ Tasks:    7 successful, 7 total
+```
