@@ -40,7 +40,7 @@ describe('readFirstVisibleRow', () => {
   });
 
   it('counts a row at the top that is at least half visible, and skips one that is mostly hidden', () => {
-    expect(readFirstVisibleRow(build(100, [[10, 80, 32], [11, 112, 32]]))).toBe(10);
+    expect(readFirstVisibleRow(build(100, [[10, 90, 32], [11, 122, 32]]))).toBe(10);
     expect(readFirstVisibleRow(build(100, [[10, 85, 32], [11, 117, 32]]))).toBe(10);
     expect(readFirstVisibleRow(build(100, [[10, 70, 32], [11, 102, 32]]))).toBe(11);
   });
