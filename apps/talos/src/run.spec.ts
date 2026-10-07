@@ -93,7 +93,7 @@ describe('runLoadTest', () => {
     const feeder = setInterval(() => {
       for (const s of sockets.values()) {
         if (s.paused) continue;
-        const delta: ServerMsg = { t: 'delta', seq: 1, serverTs: Date.now() - 5, updates: [], groupUpdates: [], adds: [], dirtyRoutes: [], rowCounts: [], newAbove: 0 };
+        const delta: ServerMsg = { t: 'delta', seq: 1, serverTs: Date.now() - 5, srcTs: Date.now() - 45, updates: [], groupUpdates: [], adds: [], dirtyRoutes: [], rowCounts: [], newAbove: 0 };
         s.deliver(delta, s.sent.at(-1)?.binary === true ? 'msgpack' : 'json');
       }
     }, 100);

@@ -51,13 +51,13 @@ export async function runNormalClient(d: NormalDeps): Promise<void> {
   let view = d.plan.view;
   let knowledge = new ViewKnowledge(view);
 
-  const open = async (intendedAt: number, cold: boolean): Promise<void> => {
+  const open = async (intendedAt: number, cold: boolean | 'startup'): Promise<void> => {
     const forView = view;
     const forKnowledge = knowledge;
     const outcome = await client.getRows(requestFor(forView, 0), intendedAt, cold);
     if (outcome.ok && forView === view) forKnowledge.learn([], outcome.rows, outcome.rowCount);
   };
-  await open(d.clock.now(), true);
+  await open(d.clock.now(), 'startup');
 
   const scroll = stream(d, 1000 / d.scrollPerSec, 0.3, (intendedAt) => {
     const forView = view;

@@ -9,15 +9,15 @@ const meta: Meta = { startedAt: '2026-10-07T00:00:00.000Z', durationS: 100, clie
 
 function recorder(): RunRecorder {
   const r = new RunRecorder(0);
-  for (let i = 1; i <= 100; i++) r.rows({ codec: 'json', cold: false, at: i * 100, ms: i, serverMs: 1 });
-  r.rows({ codec: 'json', cold: true, at: 5_000, ms: 250, serverMs: 200 });
-  for (let i = 0; i < 10; i++) r.delta({ codec: 'json', at: 10_000 + i * 10_000, ms: 10 + i });
-  r.delta({ codec: 'json', at: 50_000, ms: 900 });
+  for (let i = 1; i <= 100; i++) r.rows({ codec: 'json', kind: 'warm', at: i * 100, ms: i, serverMs: 1 });
+  r.rows({ codec: 'json', kind: 'cold', at: 15_000, ms: 250, serverMs: 200 });
+  for (let i = 0; i < 10; i++) r.delta({ codec: 'json', at: 10_000 + i * 10_000, ms: 10 + i, e2eMs: 10 + i + 100 });
+  r.delta({ codec: 'json', at: 50_000, ms: 900, e2eMs: 900 + 100 });
   r.command({ codec: 'json', at: 20_000, ms: 80, ok: true });
   r.frame({ codec: 'json', direction: 'in', type: 'delta', bytes: 8_000 });
   r.frame({ codec: 'json', direction: 'in', type: 'rows', bytes: 2_000 });
   r.frame({ codec: 'json', direction: 'out', type: 'getRows', bytes: 400 });
-  r.rows({ codec: 'msgpack', cold: false, at: 1_000, ms: 3, serverMs: 1 });
+  r.rows({ codec: 'msgpack', kind: 'warm', at: 1_000, ms: 3, serverMs: 1 });
   r.error({ codec: 'msgpack', code: 'TIMEOUT', at: 1 });
   return r;
 }
@@ -97,9 +97,11 @@ describe('evaluateTargets', () => {
   const codec = (codec: 'json' | 'msgpack', warm: number, cold: number, delta: number): CodecReport => ({
     codec,
     clients: 1,
-    getRows: { warm: summarize([warm]), cold: summarize([cold]), serverReportedCold: null, serverReportedWarm: null },
-    delta: summarize([delta]),
+    getRows: { warm: summarize([warm]), cold: summarize([cold]), startup: null, serverReportedCold: null, serverReportedWarm: null },
+    delta: summarize([delta / 5]),
     deltaByPhase: null,
+    tickToScreen: summarize([delta]),
+    tickToScreenByPhase: null,
     commandAck: null,
     perClient: { msgsInPerSec: 0, bytesInPerSec: 0, msgsOutPerSec: 0, bytesOutPerSec: 0, bytesInByType: {} },
     errors: {},
@@ -114,6 +116,13 @@ describe('evaluateTargets', () => {
     failures: 0,
   });
 
+  it('gates the end-to-end tick-to-screen figure, not the last hop', () => {
+    const slowEndToEnd = codec('json', 10, 100, 160);
+    expect(slowEndToEnd.delta?.p95).toBeLessThan(150);
+    const t = evaluateTargets([slowEndToEnd], server(900, 5), null);
+    expect(t[2]).toMatchObject({ name: expect.stringContaining('Tick-to-screen'), values: { json: 160 }, pass: false });
+  });
+
   it('passes when every figure is under its limit', () => {
     const t = evaluateTargets([codec('json', 10, 100, 20)], server(900, 5), null);
     expect(t.map((x) => x.pass)).toEqual([true, true, true, true, true]);
@@ -126,8 +135,44 @@ describe('evaluateTargets', () => {
   });
 
   it('prefers the whole-run lag histogram over the 1s-window figures, and is n/a without data', () => {
-    expect(evaluateTargets([codec('json', 1, 1, 1)], server(1, 80), { p50: 1, p99: 12, max: 90, samples: 100 })[3]).toMatchObject({ values: { all: 12 }, pass: true });
+    expect(evaluateTargets([codec('json', 1, 1, 1)], server(1, 80), { p50: 1, p99: 12, p999: 40, max: 90, samples: 100 })[3]).toMatchObject({ values: { all: 12 }, pass: true });
     const none = evaluateTargets([], null, null);
     expect(none.every((x) => x.pass === null)).toBe(true);
+  });
+});
+
+describe('startup burst, tick-to-screen and start state in the report', () => {
+  const r = new RunRecorder(0);
+  r.rows({ codec: 'json', kind: 'startup', at: 500, ms: 900, serverMs: 30 });
+  r.rows({ codec: 'json', kind: 'startup', at: 700, ms: 1500, serverMs: 30 });
+  r.rows({ codec: 'json', kind: 'cold', at: 4_000, ms: 800, serverMs: 30 });
+  r.rows({ codec: 'json', kind: 'cold', at: 20_000, ms: 60, serverMs: 30 });
+  r.delta({ codec: 'json', at: 30_000, ms: 20, e2eMs: 90 });
+  const report = buildReport({
+    meta,
+    recorder: r,
+    clientsByCodec: { json: 2 },
+    phases: null,
+    resources: null,
+    first: parseProm('apeiron_live_rows 593\napeiron_store_rows 1000234\n'),
+    last: null,
+    lagCumulative: { p50: 1, p99: 5, p999: 12, max: 60, samples: 10 },
+  });
+
+  it('reports the first view of every client apart from view changes, and leaves the first 10 s out of the latter', () => {
+    const json = report.codecs[0] as CodecReport;
+    expect(json.getRows.startup).toMatchObject({ count: 2, p50: 900, max: 1500 });
+    expect(json.getRows.cold).toMatchObject({ count: 1, max: 60 });
+  });
+
+  it('reports tick-to-screen (source event to receipt) apart from the last hop', () => {
+    const json = report.codecs[0] as CodecReport;
+    expect(json.tickToScreen?.p95).toBe(90);
+    expect(json.delta?.p95).toBe(20);
+  });
+
+  it('records what the server held when the run began', () => {
+    expect(report.start).toEqual({ liveRows: 593, storeRows: 1_000_234 });
+    expect(report.eventLoopLagCumulative?.p999).toBe(12);
   });
 });

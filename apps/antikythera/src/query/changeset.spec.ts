@@ -75,4 +75,30 @@ describe('ChangeSet', () => {
     expect(first.size).toBe(5);
     expect(later.size).toBe(4);
   });
+
+  it('keeps the earliest source timestamp per row and for the whole set', () => {
+    const cs = new ChangeSet();
+    expect(cs.srcTs).toBe(Infinity);
+    cs.noteUpdate(1, ['venue'], { venue: 'EBS' }, 500);
+    cs.noteUpdate(1, ['side'], { side: 'BUY' }, 300);
+    cs.noteUpdate(1, ['status'], { status: 'LIVE' }, 900);
+    cs.noteNew(2, 700);
+    cs.noteUpdate(3, ['venue'], { venue: 'EBS' });
+    expect(cs.entries.get(1)?.ts).toBe(300);
+    expect(cs.entries.get(2)?.ts).toBe(700);
+    expect(cs.entries.get(3)?.ts).toBe(Infinity);
+    expect(cs.srcTs).toBe(300);
+  });
+
+  it('carries source timestamps through a merge', () => {
+    const first = new ChangeSet();
+    first.noteUpdate(1, ['venue'], { venue: 'EBS' }, 500);
+    const later = new ChangeSet();
+    later.noteUpdate(1, ['side'], { side: 'BUY' }, 400);
+    later.noteNew(2, 450);
+    first.merge(later);
+    expect(first.entries.get(1)?.ts).toBe(400);
+    expect(first.entries.get(2)?.ts).toBe(450);
+    expect(first.srcTs).toBe(400);
+  });
 });

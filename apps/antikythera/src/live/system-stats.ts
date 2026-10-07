@@ -13,7 +13,7 @@ export class SystemStats {
   private lastCpu = process.cpuUsage();
   private lastAt = performance.now();
   private current: ServerStats = { cpu: 0, rssMb: 0, elLagMs: 0 };
-  private lastLag: LagSnapshot = { p50: 0, p99: 0, max: 0, samples: 0 };
+  private lastLag: LagSnapshot = { p50: 0, p99: 0, p999: 0, max: 0, samples: 0 };
 
   start(): void {
     this.windowLag.start();

@@ -4,15 +4,30 @@ import { RunRecorder } from './recorder.js';
 describe('RunRecorder', () => {
   it('keeps latencies per codec, cold apart from warm, with times relative to the run start', () => {
     const r = new RunRecorder(1_000);
-    r.rows({ codec: 'json', cold: true, at: 3_000, ms: 120, serverMs: 100 });
-    r.rows({ codec: 'json', cold: false, at: 4_000, ms: 5, serverMs: 2 });
-    r.rows({ codec: 'msgpack', cold: false, at: 5_000, ms: 4, serverMs: 2 });
+    r.rows({ codec: 'json', kind: 'cold', at: 3_000, ms: 120, serverMs: 100 });
+    r.rows({ codec: 'json', kind: 'warm', at: 4_000, ms: 5, serverMs: 2 });
+    r.rows({ codec: 'msgpack', kind: 'warm', at: 5_000, ms: 4, serverMs: 2 });
     expect(r.codecs()).toEqual(['json', 'msgpack']);
     expect(r.forCodec('json').rowsCold.values()).toEqual([120]);
     expect(r.forCodec('json').rowsWarm.summary(3_000)?.p50).toBe(5);
     expect(r.forCodec('json').rowsWarm.summary(0, 3_000)).toBeNull();
     expect(r.forCodec('json').serverRowsCold.values()).toEqual([100]);
     expect(r.forCodec('json').serverRowsWarm.values()).toEqual([2]);
+  });
+
+  it('keeps the startup burst, view changes and scrolling apart, and tick-to-screen apart from the last hop', () => {
+    const r = new RunRecorder(0);
+    r.rows({ codec: 'json', kind: 'startup', at: 100, ms: 700, serverMs: 30 });
+    r.rows({ codec: 'json', kind: 'cold', at: 20_000, ms: 90, serverMs: 40 });
+    r.rows({ codec: 'json', kind: 'warm', at: 21_000, ms: 4, serverMs: 1 });
+    r.delta({ codec: 'json', at: 22_000, ms: 12, e2eMs: 75 });
+    const s = r.forCodec('json');
+    expect(s.rowsStartup.values()).toEqual([700]);
+    expect(s.rowsCold.values()).toEqual([90]);
+    expect(s.rowsWarm.values()).toEqual([4]);
+    expect(s.serverRowsCold.values()).toEqual([40]);
+    expect(s.delta.values()).toEqual([12]);
+    expect(s.deltaE2e.values()).toEqual([75]);
   });
 
   it('totals frames by codec, direction and type', () => {

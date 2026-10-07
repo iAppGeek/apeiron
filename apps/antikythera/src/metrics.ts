@@ -11,6 +11,8 @@ export type SessionMetrics = {
   message(direction: Direction, type: string, codec: CodecName, bytes: number): void;
   getRows(info: { ms: number; built: boolean; grouped: boolean }): void;
   delta(bytes: number): void;
+  /** Seconds from the delta's earliest source event to the moment it was handed to the socket. */
+  eventAgeAtSend(seconds: number): void;
   error(code: string): void;
   backpressure(event: BackpressureEvent): void;
 };
@@ -64,6 +66,7 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
   private readonly children = new Map<string, Child>();
   private readonly getRowsSeconds: Histogram;
   private readonly deltaBytes: Histogram;
+  private readonly eventAgeSend: Histogram;
   private readonly errors: Counter;
   private readonly backpressureEvents: Counter;
   private readonly flushSeconds: Histogram;
@@ -104,6 +107,12 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
       registers,
     });
     this.deltaBytes = new Histogram({ name: 'apeiron_delta_bytes', help: 'Encoded size of each delta message.', buckets: BYTES, registers });
+    this.eventAgeSend = new Histogram({
+      name: 'apeiron_event_age_at_send_seconds',
+      help: 'Age of the earliest source event (delta.srcTs) in each delta when it is sent: the server-side share of end-to-end tick-to-screen.',
+      buckets: SECONDS_FAST,
+      registers,
+    });
     this.errors = new Counter({ name: 'apeiron_errors_total', help: 'Error messages sent to clients, by error code.', labelNames: ['code'], registers });
     this.backpressureEvents = new Counter({
       name: 'apeiron_backpressure_events_total',
@@ -179,6 +188,10 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
 
   delta(bytes: number): void {
     this.deltaBytes.observe(bytes);
+  }
+
+  eventAgeAtSend(seconds: number): void {
+    this.eventAgeSend.observe(seconds);
   }
 
   error(code: string): void {

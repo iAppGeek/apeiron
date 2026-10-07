@@ -17,7 +17,7 @@ export type ServerOptions = {
   repo: OrderRepository;
   /** The message bus. Without one the server is read-only (no live updates, no control). */
   bus?: Bus;
-  /** Flush tick length (default 100). */
+  /** Flush tick length (default 50). */
   flushMs?: number;
   /** Write-behind interval (default 500). */
   writeBehindMs?: number;
@@ -213,7 +213,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
           repo: options.repo,
           bus: options.bus,
           log: app.log,
-          flushMs: options.flushMs ?? 100,
+          flushMs: options.flushMs ?? 50,
           writeBehindMs: options.writeBehindMs ?? 500,
           maxTrackedBlocks: options.maxTrackedBlocks ?? 100,
           backpressure: options.backpressure,

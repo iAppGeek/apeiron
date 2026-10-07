@@ -350,3 +350,50 @@ describe('ClientTracker.markAllDirty', () => {
     expect(w.tracker.build(w.store, 2)).toBeNull();
   });
 });
+
+describe('ClientTracker srcTs', () => {
+  const stamped = (w: ReturnType<typeof world>, updates: [string, Partial<Order>, number][]): ReturnType<typeof applyUpdates> => {
+    const out = applyUpdates(w.store, w.engine, []);
+    for (const [orderId, patch, ts] of updates) {
+      const row = w.store.rowIndexOf(orderId) as number;
+      const { changed, prev } = w.store.updateRow(row, patch);
+      out.cs.noteUpdate(row, changed, prev, ts);
+    }
+    out.changes = w.engine.applyChanges(out.cs);
+    return out;
+  };
+
+  it('is the earliest source timestamp of the rows the client holds', () => {
+    const w = world();
+    w.get(req({ startRow: 0, endRow: 2 }));
+    const out = stamped(w, [['T0000004', { marketMid: 5 }, 900], ['T0000003', { marketMid: 6 }, 800], ['T0000001', { marketMid: 7 }, 100]]);
+    w.collect(out.changes, out.cs);
+    expect(w.tracker.build(w.store, 1_000)?.srcTs).toBe(800);
+  });
+
+  it('keeps the earliest across ticks the client was held back for', () => {
+    const w = world();
+    w.get(req({ startRow: 0, endRow: 2 }));
+    w.collect([], stamped(w, [['T0000004', { marketMid: 5 }, 940]]).cs);
+    w.collect([], stamped(w, [['T0000003', { marketMid: 6 }, 910]]).cs);
+    w.collect([], stamped(w, [['T0000004', { marketMid: 7 }, 990]]).cs);
+    expect(w.tracker.build(w.store, 1_000)?.srcTs).toBe(910);
+  });
+
+  it('uses the tick-wide earliest for structural changes the client must refresh', () => {
+    const w = world();
+    w.get(req({ sortModel: [{ colId: 'orderQty', sort: 'asc' }] }));
+    const out = stamped(w, [['T0000002', { orderQty: 99 }, 850], ['T0000004', { marketMid: 1 }, 700]]);
+    w.collect(out.changes, out.cs);
+    expect(w.tracker.build(w.store, 1_000)).toMatchObject({ srcTs: 700, dirtyRoutes: [[]] });
+  });
+
+  it('is the send time for a refresh with no source event, and never later than it', () => {
+    const w = world();
+    w.get(req());
+    w.tracker.markAllDirty();
+    expect(w.tracker.build(w.store, 1_234)?.srcTs).toBe(1_234);
+    w.collect([], stamped(w, [['T0000001', { marketMid: 1 }, 5_000]]).cs);
+    expect(w.tracker.build(w.store, 1_234)?.srcTs).toBe(1_234);
+  });
+});

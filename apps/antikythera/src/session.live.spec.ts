@@ -321,6 +321,7 @@ const fakeMetrics = (): SessionMetrics & { [K in keyof SessionMetrics]: ReturnTy
   message: vi.fn(),
   getRows: vi.fn(),
   delta: vi.fn(),
+  eventAgeAtSend: vi.fn(),
   error: vi.fn(),
   backpressure: vi.fn(),
 });
@@ -363,5 +364,20 @@ describe('ClientSession metrics', () => {
     w.connection.bufferedAmount = 20_000;
     w.flush(idle(w), 2_200);
     expect(metrics.backpressure).toHaveBeenCalledWith('slow_consumer');
+  });
+
+  it('reports the age of the earliest source event when a delta is sent, and puts it in the delta', () => {
+    const metrics = fakeMetrics();
+    const w = world({}, true, metrics);
+    getRows(w);
+    const out = applyUpdates(w.store, w.engine, []);
+    const row = w.store.rowIndexOf('T0000002') as number;
+    const { changed, prev } = w.store.updateRow(row, { marketMid: 3 });
+    out.cs.noteUpdate(row, changed, prev, 1_000);
+    w.flush(out, 1_100);
+    const delta = w.sent.find((m) => m.t === 'delta');
+    expect(delta).toMatchObject({ t: 'delta', srcTs: 1_000 });
+    // The session clock reads 1234, so the event was 234 ms old when the delta went out.
+    expect(metrics.eventAgeAtSend).toHaveBeenCalledWith(0.234);
   });
 });

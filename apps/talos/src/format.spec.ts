@@ -5,10 +5,10 @@ import { buildReport } from './report.js';
 
 const recorder = new RunRecorder(0);
 for (let i = 1; i <= 20; i++) {
-  recorder.rows({ codec: 'json', cold: false, at: i * 100, ms: i, serverMs: 1 });
-  recorder.delta({ codec: 'json', at: i * 100, ms: i });
+  recorder.rows({ codec: 'json', kind: 'warm', at: i * 100, ms: i, serverMs: 1 });
+  recorder.delta({ codec: 'json', at: i * 100, ms: i, e2eMs: i + 100 });
 }
-recorder.rows({ codec: 'json', cold: true, at: 100, ms: 90, serverMs: 80 });
+recorder.rows({ codec: 'json', kind: 'cold', at: 100, ms: 90, serverMs: 80 });
 recorder.event('slow.paused', 20_000, { x: 1 });
 const report = buildReport({
   meta: { startedAt: '2026-10-07T00:00:00.000Z', durationS: 60, clients: 2, codec: 'json', url: 'ws://x', metricsUrl: 'http://x', seed: 3, options: {} },
@@ -18,7 +18,7 @@ const report = buildReport({
   resources: { cpuPercent: { min: 1, median: 5, max: 9, samples: 3 }, rssMb: { min: 800, median: 810, max: 820, samples: 3 }, heapUsedMb: null, eventLoopLagP99Ms: { min: 1, median: 2, max: 3, samples: 3 }, eventLoopLagMaxMs: null, scrapes: 3, failures: 0 },
   first: null,
   last: null,
-  lagCumulative: { p50: 1, p99: 4, max: 30, samples: 10 },
+  lagCumulative: { p50: 1, p99: 4, p999: 9, max: 30, samples: 10 },
 });
 
 describe('table', () => {
@@ -33,8 +33,13 @@ describe('consoleReport', () => {
   it('has the latency table, phases, traffic, server ranges, targets and events', () => {
     expect(text).toContain('Latency, json (2 clients), ms');
     expect(text).toContain('getRows warm');
-    expect(text).toContain('getRows cold (view change)');
-    expect(text).toContain('Delta latency by phase');
+    expect(text).toContain('getRows cold (view change, after 10 s)');
+    expect(text).toContain('Tick-to-screen by phase');
+    expect(text).toContain('tick-to-screen (srcTs to receipt)');
+    expect(text).toContain('last hop (serverTs to receipt)');
+    expect(text).toContain('startup burst');
+    expect(text).toContain('p99.9');
+    expect(text).toContain('server at start');
     expect(text).toContain('Traffic per client, json');
     expect(text).toContain('RSS MB');
     expect(text).toContain('event-loop lag over the whole run');

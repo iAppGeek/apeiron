@@ -7,8 +7,9 @@ services:
     image: mongo:9.0
     profiles: [core, seed]
     # WiredTiger defaults to half of the Docker VM's RAM, which under sustained write-behind load starves the
-    # blotter server (the VM swapped and every container stalled). 1 GB holds the working set of this dataset.
-    command: ["--wiredTigerCacheSizeGB", "1"]
+    # blotter server (the VM swapped and every container stalled). MONGO_CACHE_GB (default 1) caps it; 1 GB holds
+    # the working set of this dataset. Raise it on a bigger host (the 16 GB remote box).
+    command: ["--wiredTigerCacheSizeGB", "${MONGO_CACHE_GB:-1}"]
     ports:
       - "127.0.0.1:27017:27017"
     volumes:
@@ -55,7 +56,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=3072
       LOAD_BATCH_SIZE: ${LOAD_BATCH_SIZE:-200}
       NATS_URL: nats://nats:4222
-      FLUSH_MS: ${FLUSH_MS:-100}
+      FLUSH_MS: ${FLUSH_MS:-50}
       FLUSH_BUDGET_MS: ${FLUSH_BUDGET_MS:-40}
       WRITE_BEHIND_MS: ${WRITE_BEHIND_MS:-500}
       MAX_TRACKED_BLOCKS: ${MAX_TRACKED_BLOCKS:-100}

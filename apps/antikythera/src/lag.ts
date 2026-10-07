@@ -6,6 +6,8 @@ export type LagSnapshot = {
   /** Event-loop lag beyond the sampling resolution, in ms. */
   p50: number;
   p99: number;
+  /** The 99.9th percentile: shows the stalls p99 hides. */
+  p999: number;
   max: number;
   samples: number;
 };
@@ -39,6 +41,7 @@ export class LagMonitor {
     return {
       p50: lag(this.histogram.percentile(50)),
       p99: lag(this.histogram.percentile(99)),
+      p999: lag(this.histogram.percentile(99.9)),
       max: lag(this.histogram.max),
       samples: this.histogram.count,
     };

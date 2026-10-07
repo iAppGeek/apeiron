@@ -95,7 +95,7 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
     if (deltaHandler === null) return;
     const stats = deltaHandler(delta);
     const appliedAt = now();
-    latency.record(appliedAt, tickToScreenMs(appliedAt, delta.serverTs, clockOffsetMs));
+    latency.record(appliedAt, tickToScreenMs(appliedAt, delta.srcTs, clockOffsetMs));
     if (stats === undefined) return;
     rowsUpdated += stats.rowsUpdated;
     if (stats.rootRowCount !== null) {

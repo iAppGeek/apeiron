@@ -3,10 +3,14 @@ import { SampleSet } from './stats.js';
 
 export type Direction = 'in' | 'out';
 
+/** startup: the first view a client opens (all of them at once); cold: a view change; warm: scrolling. */
+export type RowsKind = 'startup' | 'cold' | 'warm';
+
 /** Where clients and the special behaviours report what they measure. `at` is the run clock in ms (epoch). */
 export type Recorder = {
-  rows(info: { codec: CodecName; cold: boolean; at: number; ms: number; serverMs: number }): void;
-  delta(info: { codec: CodecName; at: number; ms: number }): void;
+  rows(info: { codec: CodecName; kind: RowsKind; at: number; ms: number; serverMs: number }): void;
+  /** `ms` is the last hop (serverTs to receipt); `e2eMs` runs from the source event (srcTs) to receipt: tick-to-screen. */
+  delta(info: { codec: CodecName; at: number; ms: number; e2eMs: number }): void;
   command(info: { codec: CodecName; at: number; ms: number; ok: boolean; code?: string }): void;
   frame(info: { codec: CodecName; direction: Direction; type: string; bytes: number }): void;
   error(info: { codec: CodecName; code: string; at: number }): void;
@@ -21,12 +25,15 @@ export type FrameTotals = { msgs: number; bytes: number };
 export type RunEvent = { t: number; name: string; detail: Record<string, unknown> };
 
 export type CodecSamples = {
+  rowsStartup: SampleSet;
   rowsCold: SampleSet;
   rowsWarm: SampleSet;
   /** Server-reported `ms` of the same responses, cold and warm apart. */
   serverRowsCold: SampleSet;
   serverRowsWarm: SampleSet;
   delta: SampleSet;
+  /** Source event to receipt: tick-to-screen. */
+  deltaE2e: SampleSet;
   commandAck: SampleSet;
 };
 
@@ -45,7 +52,7 @@ export class RunRecorder implements Recorder {
   forCodec(codec: CodecName): CodecSamples {
     let s = this.samples.get(codec);
     if (s === undefined) {
-      s = { rowsCold: new SampleSet(), rowsWarm: new SampleSet(), serverRowsCold: new SampleSet(), serverRowsWarm: new SampleSet(), delta: new SampleSet(), commandAck: new SampleSet() };
+      s = { rowsStartup: new SampleSet(), rowsCold: new SampleSet(), rowsWarm: new SampleSet(), serverRowsCold: new SampleSet(), serverRowsWarm: new SampleSet(), delta: new SampleSet(), deltaE2e: new SampleSet(), commandAck: new SampleSet() };
       this.samples.set(codec, s);
     }
     return s;
@@ -55,15 +62,17 @@ export class RunRecorder implements Recorder {
     return [...this.samples.keys()].sort();
   }
 
-  rows(info: { codec: CodecName; cold: boolean; at: number; ms: number; serverMs: number }): void {
+  rows(info: { codec: CodecName; kind: RowsKind; at: number; ms: number; serverMs: number }): void {
     const s = this.forCodec(info.codec);
     const t = info.at - this.startMs;
-    (info.cold ? s.rowsCold : s.rowsWarm).add(t, info.ms);
-    (info.cold ? s.serverRowsCold : s.serverRowsWarm).add(t, info.serverMs);
+    (info.kind === 'startup' ? s.rowsStartup : info.kind === 'cold' ? s.rowsCold : s.rowsWarm).add(t, info.ms);
+    if (info.kind !== 'startup') (info.kind === 'cold' ? s.serverRowsCold : s.serverRowsWarm).add(t, info.serverMs);
   }
 
-  delta(info: { codec: CodecName; at: number; ms: number }): void {
-    this.forCodec(info.codec).delta.add(info.at - this.startMs, info.ms);
+  delta(info: { codec: CodecName; at: number; ms: number; e2eMs: number }): void {
+    const s = this.forCodec(info.codec);
+    s.delta.add(info.at - this.startMs, info.ms);
+    s.deltaE2e.add(info.at - this.startMs, info.e2eMs);
   }
 
   command(info: { codec: CodecName; at: number; ms: number; ok: boolean; code?: string }): void {

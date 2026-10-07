@@ -14,8 +14,10 @@ export function table(rows: readonly (readonly string[])[]): string {
 function latencyRows(c: CodecReport): string[][] {
   return [
     ['getRows warm', q(c.getRows.warm, (s) => s.p50), q(c.getRows.warm, (s) => s.p95), q(c.getRows.warm, (s) => s.p99), q(c.getRows.warm, (s) => s.max), String(c.getRows.warm?.count ?? 0)],
-    ['getRows cold (view change)', q(c.getRows.cold, (s) => s.p50), q(c.getRows.cold, (s) => s.p95), q(c.getRows.cold, (s) => s.p99), q(c.getRows.cold, (s) => s.max), String(c.getRows.cold?.count ?? 0)],
-    ['delta (serverTs to receipt)', q(c.delta, (s) => s.p50), q(c.delta, (s) => s.p95), q(c.delta, (s) => s.p99), q(c.delta, (s) => s.max), String(c.delta?.count ?? 0)],
+    ['getRows cold (view change, after 10 s)', q(c.getRows.cold, (s) => s.p50), q(c.getRows.cold, (s) => s.p95), q(c.getRows.cold, (s) => s.p99), q(c.getRows.cold, (s) => s.max), String(c.getRows.cold?.count ?? 0)],
+    ['tick-to-screen (srcTs to receipt)', q(c.tickToScreen, (s) => s.p50), q(c.tickToScreen, (s) => s.p95), q(c.tickToScreen, (s) => s.p99), q(c.tickToScreen, (s) => s.max), String(c.tickToScreen?.count ?? 0)],
+    ['  last hop (serverTs to receipt)', q(c.delta, (s) => s.p50), q(c.delta, (s) => s.p95), q(c.delta, (s) => s.p99), q(c.delta, (s) => s.max), String(c.delta?.count ?? 0)],
+    ['getRows startup burst (first view, all at once)', q(c.getRows.startup, (s) => s.p50), q(c.getRows.startup, (s) => s.p95), q(c.getRows.startup, (s) => s.p99), q(c.getRows.startup, (s) => s.max), String(c.getRows.startup?.count ?? 0)],
     ['command ack', q(c.commandAck, (s) => s.p50), q(c.commandAck, (s) => s.p95), q(c.commandAck, (s) => s.p99), q(c.commandAck, (s) => s.max), String(c.commandAck?.count ?? 0)],
   ];
 }
@@ -24,12 +26,13 @@ function latencyRows(c: CodecReport): string[][] {
 export function consoleReport(r: Report): string {
   const out: string[] = [];
   out.push(`talos: ${r.meta.clients} clients, ${r.meta.durationS}s, codec ${r.meta.codec}, seed ${r.meta.seed}, ${r.meta.startedAt}`);
+  out.push(`server at start: ${n(r.start.storeRows, 0)} rows, ${n(r.start.liveRows, 0)} LIVE`);
   for (const c of r.codecs) {
     out.push('', `Latency, ${c.codec} (${c.clients} clients), ms`);
     out.push(table([['', 'p50', 'p95', 'p99', 'max', 'n'], ...latencyRows(c)]));
-    if (c.deltaByPhase !== null) {
-      const d = c.deltaByPhase;
-      out.push('', `Delta latency by phase, ${c.codec}, ms`);
+    if (c.tickToScreenByPhase !== null) {
+      const d = c.tickToScreenByPhase;
+      out.push('', `Tick-to-screen by phase, ${c.codec}, ms`);
       out.push(table([['', 'p50', 'p95', 'p99', 'max', 'n'], ...(['baseline', 'stress', 'after'] as const).map((k) => [k, q(d[k], (s) => s.p50), q(d[k], (s) => s.p95), q(d[k], (s) => s.p99), q(d[k], (s) => s.max), String(d[k]?.count ?? 0)])]));
     }
     out.push('', `Traffic per client, ${c.codec}`);
@@ -44,7 +47,7 @@ export function consoleReport(r: Report): string {
   }
   if (r.eventLoopLagCumulative !== null) {
     const l = r.eventLoopLagCumulative;
-    out.push(`event-loop lag over the whole run (server histogram): p50 ${n(l.p50)} ms, p99 ${n(l.p99)} ms, max ${n(l.max)} ms`);
+    out.push(`event-loop lag over the whole run (server histogram): p50 ${n(l.p50)} ms, p99 ${n(l.p99)} ms, p99.9 ${n(l.p999)} ms, longest stall ${n(l.max)} ms`);
   }
   const h = r.serverHistograms;
   if (h !== null) {
@@ -56,6 +59,7 @@ export function consoleReport(r: Report): string {
       ['getRows cold / warm count', `${h.getRowsColdCount} / ${h.getRowsWarmCount}`],
       ['flush p50 / p99 ms', `${n(h.flushP50Ms, 2)} / ${n(h.flushP99Ms, 2)}`],
       ['event age at flush p95 ms', n(h.eventAgeP95Ms, 1)],
+      ['event age at send p95 ms (server side of tick-to-screen)', n(h.eventAgeAtSendP95Ms, 1)],
       ['delta size p95 bytes', n(h.deltaBytesP95, 0)],
       ['command p95 ms', n(h.commandP95Ms, 1)],
       ['soft_conflate / slow_consumer events', `${h.softConflates} / ${h.slowConsumers}`],
@@ -74,16 +78,16 @@ export function consoleReport(r: Report): string {
 /** A short Markdown summary to paste into docs. */
 export function markdownSummary(r: Report): string {
   const lines: string[] = [];
-  lines.push(`### ${r.meta.clients} clients, ${r.meta.durationS}s, ${r.meta.codec}`, '');
+  lines.push(`### ${r.meta.clients} clients, ${r.meta.durationS}s, ${r.meta.codec}`, '', `Server at start: ${n(r.start.storeRows, 0)} rows, ${n(r.start.liveRows, 0)} LIVE.`, '');
   lines.push('| Target | Limit | Measured | Verdict |', '|---|---|---|---|');
   for (const t of r.targets) {
     const measured = Object.entries(t.values).map(([k, v]) => (k === 'all' ? `${n(v)} ${t.unit}` : `${k} ${n(v)} ${t.unit}`)).join(', ');
     lines.push(`| ${t.name} | ${t.target} | ${measured} | ${t.pass === null ? 'n/a' : t.pass ? 'PASS' : 'FAIL'} |`);
   }
-  lines.push('', '| Codec | getRows warm p50/p95/p99 ms | getRows cold p50/p95/p99 ms | delta p50/p95/p99 ms | command ack p50/p95 ms | msgs/s/client in | KB/s/client in |', '|---|---|---|---|---|---|---|');
+  lines.push('', '| Codec | getRows warm p50/p95/p99 ms | getRows cold p50/p95/p99 ms | tick-to-screen p50/p95/p99 ms | last hop p50/p95/p99 ms | startup burst p50/p95/max ms | command ack p50/p95 ms | msgs/s/client in | KB/s/client in |', '|---|---|---|---|---|---|---|---|---|');
   for (const c of r.codecs) {
     const trio = (s: Summary | null): string => (s === null ? '-' : `${n(s.p50)} / ${n(s.p95)} / ${n(s.p99)}`);
-    lines.push(`| ${c.codec} | ${trio(c.getRows.warm)} | ${trio(c.getRows.cold)} | ${trio(c.delta)} | ${c.commandAck === null ? '-' : `${n(c.commandAck.p50)} / ${n(c.commandAck.p95)}`} | ${n(c.perClient.msgsInPerSec)} | ${kb(c.perClient.bytesInPerSec)} |`);
+    lines.push(`| ${c.codec} | ${trio(c.getRows.warm)} | ${trio(c.getRows.cold)} | ${trio(c.tickToScreen)} | ${trio(c.delta)} | ${c.getRows.startup === null ? '-' : `${n(c.getRows.startup.p50)} / ${n(c.getRows.startup.p95)} / ${n(c.getRows.startup.max)}`} | ${c.commandAck === null ? '-' : `${n(c.commandAck.p50)} / ${n(c.commandAck.p95)}`} | ${n(c.perClient.msgsInPerSec)} | ${kb(c.perClient.bytesInPerSec)} |`);
   }
   if (r.server !== null) {
     const s = r.server;

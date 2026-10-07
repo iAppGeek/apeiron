@@ -154,12 +154,12 @@ export class LiveStore {
     if (event.type === 'NEW') {
       const result = this.store.upsert(event.order);
       if (result.kind === 'append') {
-        cs.noteNew(result.row);
+        cs.noteNew(result.row, event.ts);
         this.stats.rowsAppended++;
         this.countRow(result.row, 1);
         this.syncLive(result.row, undefined);
       } else {
-        this.afterUpdate(result.row, result.changed, result.prev, cs);
+        this.afterUpdate(result.row, result.changed, result.prev, cs, event.ts);
       }
       this.dirty.add(event.order.orderId);
       eventRows.add(result.row);
@@ -174,16 +174,16 @@ export class LiveStore {
       return;
     }
     const { changed, prev } = this.store.updateRow(row, event.order);
-    this.afterUpdate(row, changed, prev, cs);
+    this.afterUpdate(row, changed, prev, cs, event.ts);
     if (changed.length > 0) this.dirty.add(event.order.orderId);
     eventRows.add(row);
   }
 
-  private afterUpdate(row: number, changed: readonly OrderField[], prev: Partial<Order>, cs: ChangeSet): void {
+  private afterUpdate(row: number, changed: readonly OrderField[], prev: Partial<Order>, cs: ChangeSet, ts: number): void {
     if (changed.length === 0) return;
     const accounting = changed.some((f) => f === 'status' || f === 'notionalUsd' || f === 'traderId');
     if (accounting) this.countRow(row, -1, prev);
-    cs.noteUpdate(row, changed, prev);
+    cs.noteUpdate(row, changed, prev, ts);
     if (accounting) this.countRow(row, 1);
     if (changed.includes('status') || changed.includes('currencyPair')) this.syncLive(row, prev);
   }
@@ -232,7 +232,7 @@ export class LiveStore {
       this.stats.ticksApplied++;
       const rows = this.liveByPair.get(pair);
       if (rows === undefined) continue;
-      for (const row of rows) this.recompute(row, tick, now, cs);
+      for (const row of rows) this.recompute(row, tick, now, cs, tick.ts);
     }
     // A fill changes unrealised P&L and slippage, so rows touched by events are repriced even if their pair is quiet.
     for (const row of eventRows) {
@@ -240,11 +240,12 @@ export class LiveStore {
       const pair = this.pairOf(row);
       if (ticked.has(pair)) continue;
       const tick = this.latestTicks.get(pair);
-      if (tick !== undefined) this.recompute(row, tick, now, cs);
+      if (tick !== undefined) this.recompute(row, tick, now, cs, Infinity);
     }
   }
 
-  private recompute(row: number, tick: PriceTick, now: number, cs: ChangeSet): void {
+  /** `ts` is the source timestamp this repricing is owed to: the tick's own, or Infinity when an order event already supplied it. */
+  private recompute(row: number, tick: PriceTick, now: number, cs: ChangeSet, ts: number): void {
     const s = this.store;
     const n = (field: OrderField): number => s.numberColumn(field)[row] as number;
     const orNull = (v: number): number | null => (v === v ? v : null);
@@ -262,6 +263,6 @@ export class LiveStore {
     };
     const { changed, prev } = s.updateRow(row, derivePriceFields(input, tick, now));
     this.stats.priceRecomputes++;
-    cs.noteUpdate(row, changed, prev);
+    cs.noteUpdate(row, changed, prev, ts);
   }
 }

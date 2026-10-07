@@ -1,5 +1,5 @@
 import type { CodecName } from '@apeiron/logos';
-import { histogramDelta, histogramQuantile, sumOf, type Sample } from './prom.js';
+import { histogramDelta, histogramQuantile, sumOf, valueOf, type Sample } from './prom.js';
 import type { RunRecorder, FrameTotals, RunEvent } from './recorder.js';
 import type { ResourceReport } from './scraper.js';
 import type { Summary } from './stats.js';
@@ -22,9 +22,21 @@ export type DeltaPhases = { baseline: Summary | null; stress: Summary | null; af
 export type CodecReport = {
   codec: CodecName;
   clients: number;
-  getRows: { cold: Summary | null; warm: Summary | null; serverReportedCold: Summary | null; serverReportedWarm: Summary | null };
+  getRows: {
+    /** View changes after the first 10 s (the connect storm is reported as `startup`). */
+    cold: Summary | null;
+    warm: Summary | null;
+    /** The first view every client opens, all at once. */
+    startup: Summary | null;
+    serverReportedCold: Summary | null;
+    serverReportedWarm: Summary | null;
+  };
+  /** Last hop: serverTs to receipt. */
   delta: Summary | null;
   deltaByPhase: DeltaPhases | null;
+  /** End to end: source event (srcTs) to receipt. The tick-to-screen target. */
+  tickToScreen: Summary | null;
+  tickToScreenByPhase: DeltaPhases | null;
   commandAck: Summary | null;
   perClient: {
     msgsInPerSec: number;
@@ -45,13 +57,18 @@ export type ServerHistograms = {
   flushP50Ms: number | null;
   flushP99Ms: number | null;
   eventAgeP95Ms: number | null;
+  /** Age of the earliest source event when each delta was sent: the server side of tick-to-screen. */
+  eventAgeAtSendP95Ms: number | null;
   deltaBytesP95: number | null;
   commandP95Ms: number | null;
   softConflates: number;
   slowConsumers: number;
 };
 
-export type LagCumulative = { p50: number; p99: number; max: number; samples: number };
+export type LagCumulative = { p50: number; p99: number; p999: number; max: number; samples: number };
+
+/** How long the first part of the run is left out of the view-change statistics. */
+export const STARTUP_WINDOW_MS = 10_000;
 
 export type TargetResult = {
   name: string;
@@ -64,6 +81,8 @@ export type TargetResult = {
 
 export type Report = {
   meta: Meta;
+  /** What the server held when the run began, so runs can be compared (a stress run leaves extra LIVE rows behind). */
+  start: { liveRows: number | null; storeRows: number | null };
   phases: Phases | null;
   codecs: CodecReport[];
   server: ResourceReport | null;
@@ -83,6 +102,7 @@ export function serverHistograms(first: readonly Sample[], last: readonly Sample
   const cold = histogramDelta(first, last, 'apeiron_getrows_duration_seconds', { temp: 'cold' });
   const flush = histogramDelta(first, last, 'apeiron_flush_duration_seconds');
   const age = histogramDelta(first, last, 'apeiron_event_age_at_flush_seconds');
+  const ageAtSend = histogramDelta(first, last, 'apeiron_event_age_at_send_seconds');
   const delta = histogramDelta(first, last, 'apeiron_delta_bytes');
   const command = histogramDelta(first, last, 'apeiron_command_duration_seconds', { outcome: 'ok' });
   const grew = (event: string): number => Math.max(0, sumOf(last, 'apeiron_backpressure_events_total', { event }) - sumOf(first, 'apeiron_backpressure_events_total', { event }));
@@ -95,6 +115,7 @@ export function serverHistograms(first: readonly Sample[], last: readonly Sample
     flushP50Ms: ms(histogramQuantile(flush, 0.5)),
     flushP99Ms: ms(histogramQuantile(flush, 0.99)),
     eventAgeP95Ms: ms(histogramQuantile(age, 0.95)),
+    eventAgeAtSendP95Ms: ms(histogramQuantile(ageAtSend, 0.95)),
     deltaBytesP95: Number.isNaN(bytes) ? null : bytes,
     commandP95Ms: ms(histogramQuantile(command, 0.95)),
     softConflates: grew('soft_conflate'),
@@ -115,13 +136,17 @@ function codecReport(recorder: RunRecorder, codec: CodecName, clients: number, d
     codec,
     clients,
     getRows: {
-      cold: s.rowsCold.summary(),
+      cold: s.rowsCold.summary(STARTUP_WINDOW_MS),
       warm: s.rowsWarm.summary(),
+      startup: s.rowsStartup.summary(),
       serverReportedCold: s.serverRowsCold.summary(),
       serverReportedWarm: s.serverRowsWarm.summary(),
     },
     delta: s.delta.summary(),
     deltaByPhase: phases === null ? null : { baseline: s.delta.summary(-Infinity, from), stress: s.delta.summary(from, to), after: s.delta.summary(to) },
+    tickToScreen: s.deltaE2e.summary(),
+    tickToScreenByPhase:
+      phases === null ? null : { baseline: s.deltaE2e.summary(-Infinity, from), stress: s.deltaE2e.summary(from, to), after: s.deltaE2e.summary(to) },
     commandAck: s.commandAck.summary(),
     perClient: {
       msgsInPerSec: per(inT.total.msgs),
@@ -148,7 +173,10 @@ export type ReportInput = {
   generatorLag?: { p99: number; max: number } | null;
 };
 
-/** Targets from the plan: getRows p95 under 50 ms, view change under 300 ms, delta p95 under 150 ms, event-loop lag p99 under 50 ms, RSS under 2 GB. */
+/**
+ * Targets from the plan: getRows p95 under 50 ms, view change under 300 ms, end-to-end tick-to-screen p95 under 150 ms
+ * (source event to receipt, CP-4 ruling), event-loop lag p99 under 50 ms, RSS under 2 GB.
+ */
 export function evaluateTargets(codecs: readonly CodecReport[], server: ResourceReport | null, lag: LagCumulative | null): TargetResult[] {
   const per = (pick: (c: CodecReport) => number | undefined): Record<string, number | null> =>
     Object.fromEntries(codecs.map((c): [string, number | null] => [c.codec, pick(c) ?? null]));
@@ -158,13 +186,13 @@ export function evaluateTargets(codecs: readonly CodecReport[], server: Resource
   };
   const warm = per((c) => c.getRows.warm?.p95);
   const cold = per((c) => c.getRows.cold?.p95);
-  const delta = per((c) => c.delta?.p95);
+  const tickToScreen = per((c) => c.tickToScreen?.p95);
   const lagP99 = lag?.p99 ?? server?.eventLoopLagP99Ms?.max ?? null;
   const rss = server?.rssMb?.max ?? null;
   return [
     { name: 'getRows p95 (warm, client-measured)', target: '< 50 ms', unit: 'ms', values: warm, pass: verdict(warm, 50) },
-    { name: 'View change: cold getRows p95', target: '< 300 ms', unit: 'ms', values: cold, pass: verdict(cold, 300) },
-    { name: 'Delta latency p95 (serverTs to receipt)', target: '< 150 ms', unit: 'ms', values: delta, pass: verdict(delta, 150) },
+    { name: 'View change: cold getRows p95 (after the first 10 s)', target: '< 300 ms', unit: 'ms', values: cold, pass: verdict(cold, 300) },
+    { name: 'Tick-to-screen p95 (source event to receipt)', target: '< 150 ms', unit: 'ms', values: tickToScreen, pass: verdict(tickToScreen, 150) },
     { name: 'Event-loop lag p99 (server, whole run)', target: '< 50 ms', unit: 'ms', values: { all: lagP99 }, pass: lagP99 === null ? null : lagP99 < 50 },
     { name: 'Server RSS max', target: '< 2048 MB', unit: 'MB', values: { all: rss }, pass: rss === null ? null : rss < 2048 },
   ];
@@ -178,6 +206,10 @@ export function buildReport(input: ReportInput): Report {
     .map(([codec, n]) => codecReport(recorder, codec, n, durationS, input.phases));
   return {
     meta: input.meta,
+    start: {
+      liveRows: input.first === null ? null : (valueOf(input.first, 'apeiron_live_rows') ?? null),
+      storeRows: input.first === null ? null : (valueOf(input.first, 'apeiron_store_rows') ?? null),
+    },
     phases: input.phases,
     codecs,
     server: input.resources,

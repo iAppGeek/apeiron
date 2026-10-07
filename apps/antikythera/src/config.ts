@@ -16,7 +16,7 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   /** Used from phase 5; optional until then. */
   NATS_URL: z.url({ protocol: /^nats$/ }).optional(),
-  FLUSH_MS: posInt('100'),
+  FLUSH_MS: posInt('50'),
   WRITE_BEHIND_MS: posInt('500'),
   MAX_TRACKED_BLOCKS: posInt('100'),
   LOAD_PRESET: z.enum(['medium', 'stress']).default('medium'),

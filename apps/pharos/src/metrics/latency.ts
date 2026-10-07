@@ -75,6 +75,6 @@ export function createClockOffsetEstimator(maxSamples = 8): ClockOffsetEstimator
 }
 
 /** Tick-to-screen latency of one delta: the time it was applied, on the server clock, minus the server timestamp. */
-export function tickToScreenMs(appliedAt: number, serverTs: number, clockOffsetMs: number | null): number {
-  return Math.max(0, appliedAt + (clockOffsetMs ?? 0) - serverTs);
+export function tickToScreenMs(appliedAt: number, srcTs: number, clockOffsetMs: number | null): number {
+  return Math.max(0, appliedAt + (clockOffsetMs ?? 0) - srcTs);
 }

@@ -158,7 +158,10 @@ export class ClientSession {
     }
     if (decision === 'hold') return;
     const delta = tracker.build(ctx.store, ctx.now);
-    if (delta !== null) this.send(delta);
+    if (delta !== null) {
+      this.send(delta);
+      this.deps.metrics?.eventAgeAtSend(Math.max(0, this.now() - delta.srcTs) / 1000);
+    }
     if (ctx.now - this.lastSummaryAt >= live.summaryIntervalMs) {
       this.lastSummaryAt = ctx.now;
       this.sendSummary(live, tracker);

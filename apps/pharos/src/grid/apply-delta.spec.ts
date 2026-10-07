@@ -56,6 +56,7 @@ const delta = (patch: Partial<DeltaMsg> = {}): DeltaMsg => ({
   t: 'delta',
   seq: 1,
   serverTs: 1000,
+  srcTs: 960,
   updates: [],
   groupUpdates: [],
   adds: [],

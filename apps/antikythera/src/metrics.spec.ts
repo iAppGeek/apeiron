@@ -71,6 +71,7 @@ describe('Metrics', () => {
     m.command('ok', 0.02);
     m.command('INVALID_TRANSITION', 0.001);
     m.delta(900);
+    m.eventAgeAtSend(0.08);
     m.error('BAD_MESSAGE');
     m.backpressure('soft_conflate');
     m.backpressure('slow_consumer');
@@ -84,6 +85,8 @@ describe('Metrics', () => {
     expect(sample(text, 'apeiron_command_duration_seconds_count{outcome="ok"}')).toBe(1);
     expect(sample(text, 'apeiron_command_duration_seconds_count{outcome="INVALID_TRANSITION"}')).toBe(1);
     expect(sample(text, 'apeiron_delta_bytes_count')).toBe(1);
+    expect(sample(text, 'apeiron_event_age_at_send_seconds_count')).toBe(1);
+    expect(sample(text, 'apeiron_event_age_at_send_seconds_sum')).toBeCloseTo(0.08, 6);
     expect(sample(text, 'apeiron_errors_total{code="BAD_MESSAGE"}')).toBe(1);
     expect(sample(text, 'apeiron_backpressure_events_total{event="soft_conflate"}')).toBe(1);
     expect(sample(text, 'apeiron_backpressure_events_total{event="slow_consumer"}')).toBe(1);

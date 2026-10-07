@@ -54,7 +54,8 @@ describe('runNormalClient', () => {
     expect(recorder.counters.viewChanges).toBeGreaterThanOrEqual(4);
     const views = new Set(seen.filter((m) => m.t === 'getRows').map((m) => JSON.stringify([m.t === 'getRows' ? m.req.sortModel : 0, m.t === 'getRows' ? m.req.filterModel : 0, m.t === 'getRows' ? m.req.rowGroupCols : 0])));
     expect(views.size).toBeGreaterThan(2);
-    expect(recorder.forCodec('json').rowsCold.count).toBe(1 + recorder.counters.viewChanges);
+    expect(recorder.forCodec('json').rowsStartup.count).toBe(1);
+    expect(recorder.forCodec('json').rowsCold.count).toBe(recorder.counters.viewChanges);
   });
 
   it('records the send lag of every scheduled request', async () => {

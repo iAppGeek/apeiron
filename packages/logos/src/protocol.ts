@@ -44,6 +44,8 @@ export type ServerMsg =
       t: 'delta';
       seq: number;
       serverTs: number;
+      /** Earliest source-event `ts` (hermes price tick or order event) folded into this tick, for end-to-end latency. */
+      srcTs: number;
       updates: { route: string[]; rows: (Partial<Order> & { orderId: string })[] }[];
       groupUpdates: { route: string[]; rows: Row[] }[];
       adds: { route: string[]; addIndex: number; rows: Order[] }[];

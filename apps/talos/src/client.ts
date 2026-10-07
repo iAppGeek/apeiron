@@ -10,7 +10,7 @@ import {
   type ServerMsg,
   type SsrmRequest,
 } from '@apeiron/logos';
-import type { Recorder } from './recorder.js';
+import type { Recorder, RowsKind } from './recorder.js';
 import type { Clock } from './schedule.js';
 import type { SocketLike } from './socket.js';
 
@@ -95,16 +95,18 @@ export class TalosClient {
     });
   }
 
-  getRows(req: SsrmRequest, intendedAt: number, cold: boolean): Promise<RowsOutcome> {
-    return this.request('rows', intendedAt, cold, { t: 'getRows', reqId: this.nextReq, req }).then((r): RowsOutcome => {
+  /** `cold`: true for the first request of a view change, `'startup'` for a client's very first view, false for scrolling. */
+  getRows(req: SsrmRequest, intendedAt: number, cold: boolean | 'startup'): Promise<RowsOutcome> {
+    const kind: RowsKind = cold === 'startup' ? 'startup' : cold ? 'cold' : 'warm';
+    return this.request('rows', intendedAt, cold === true, { t: 'getRows', reqId: this.nextReq, req }).then((r): RowsOutcome => {
       const at = this.deps.clock.now();
       const ms = at - intendedAt;
       if (r.msg.t === 'rows') {
-        if (this.deps.excludeLatency !== true) this.deps.recorder.rows({ codec: this.codec, cold, at, ms, serverMs: r.msg.ms });
+        if (this.deps.excludeLatency !== true) this.deps.recorder.rows({ codec: this.codec, kind, at, ms, serverMs: r.msg.ms });
         return { ok: true, rows: r.msg.rows, rowCount: r.msg.rowCount, ms, binary: r.binary };
       }
       const code = r.msg.t === 'error' ? r.msg.code : r.msg.t === 'timeout' ? 'TIMEOUT' : 'CLOSED';
-      if (r.msg.t === 'timeout' && this.deps.excludeLatency !== true) this.deps.recorder.rows({ codec: this.codec, cold, at, ms, serverMs: 0 });
+      if (r.msg.t === 'timeout' && this.deps.excludeLatency !== true) this.deps.recorder.rows({ codec: this.codec, kind, at, ms, serverMs: 0 });
       if (r.msg.t !== 'error' && r.msg.t !== 'closed' && this.deps.excludeLatency !== true) this.deps.recorder.error({ codec: this.codec, code, at });
       return { ok: false, code, ms };
     });
@@ -228,7 +230,8 @@ export class TalosClient {
         return;
       case 'delta': {
         if (this.deps.excludeLatency !== true) {
-          this.deps.recorder.delta({ codec: frameCodec, at, ms: at + this.clockOffsetMs - msg.serverTs });
+          const onServerClock = at + this.clockOffsetMs;
+          this.deps.recorder.delta({ codec: frameCodec, at, ms: onServerClock - msg.serverTs, e2eMs: onServerClock - msg.srcTs });
         }
         for (const add of msg.adds) for (const row of add.rows) this.noteOrder(row.orderId, row.status);
         for (const update of msg.updates) for (const row of update.rows) if (row.status !== undefined) this.noteOrder(row.orderId, row.status);

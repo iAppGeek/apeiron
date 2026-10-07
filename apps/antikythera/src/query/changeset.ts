@@ -27,6 +27,8 @@ export type ChangeEntry = {
   prev: Partial<Order>;
   lo: number;
   hi: number;
+  /** Earliest source-event `ts` (hermes) among the changes to this row this tick; Infinity when unknown. */
+  ts: number;
 };
 
 /**
@@ -36,6 +38,8 @@ export type ChangeEntry = {
  */
 export class ChangeSet {
   readonly entries = new Map<number, ChangeEntry>();
+  /** Earliest source-event `ts` among everything in the set; Infinity when none was given. */
+  srcTs = Infinity;
 
   get size(): number {
     return this.entries.size;
@@ -53,28 +57,33 @@ export class ChangeSet {
   merge(later: ChangeSet): void {
     for (const e of later.entries.values()) {
       if (e.isNew) {
-        this.noteNew(e.row);
+        this.noteNew(e.row, e.ts);
         continue;
       }
-      this.noteUpdate(e.row, [...e.fields], e.prev);
+      this.noteUpdate(e.row, [...e.fields], e.prev, e.ts);
     }
   }
 
-  noteNew(row: number): void {
+  noteNew(row: number, ts = Infinity): void {
+    this.srcTs = Math.min(this.srcTs, ts);
     const e = this.entries.get(row);
     if (e !== undefined) {
       e.isNew = true;
+      e.ts = Math.min(e.ts, ts);
       return;
     }
-    this.entries.set(row, { row, isNew: true, fields: new Set(), prev: {}, lo: 0, hi: 0 });
+    this.entries.set(row, { row, isNew: true, fields: new Set(), prev: {}, lo: 0, hi: 0, ts });
   }
 
-  noteUpdate(row: number, changed: readonly OrderField[], prev: Partial<Order>): void {
+  noteUpdate(row: number, changed: readonly OrderField[], prev: Partial<Order>, ts = Infinity): void {
     if (changed.length === 0) return;
+    this.srcTs = Math.min(this.srcTs, ts);
     let e = this.entries.get(row);
     if (e === undefined) {
-      e = { row, isNew: false, fields: new Set(), prev: {}, lo: 0, hi: 0 };
+      e = { row, isNew: false, fields: new Set(), prev: {}, lo: 0, hi: 0, ts };
       this.entries.set(row, e);
+    } else {
+      e.ts = Math.min(e.ts, ts);
     }
     const target = e.prev as Record<string, unknown>;
     const source = prev as Record<string, unknown>;

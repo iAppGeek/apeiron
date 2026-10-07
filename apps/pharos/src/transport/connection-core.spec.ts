@@ -431,6 +431,7 @@ const delta = (seq: number, patch: Partial<Extract<ServerMsg, { t: 'delta' }>> =
   t: 'delta',
   seq,
   serverTs: 5000 + seq,
+  srcTs: 4960 + seq,
   updates: [],
   groupUpdates: [],
   adds: [],

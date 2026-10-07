@@ -58,6 +58,7 @@ export function sampleServerMsgs(): ServerMsg[] {
       t: 'delta',
       seq: 12,
       serverTs: NOW,
+      srcTs: NOW - 40,
       updates: [{ route: [], rows: [{ orderId: a.orderId, marketMid: 1.08123, slippageBps: null }] }],
       groupUpdates: [{ route: ['EURUSD'], rows: [{ childCount: 3, notionalUsd: 123.45 }] }],
       adds: [{ route: [], addIndex: 0, rows: [b] }],

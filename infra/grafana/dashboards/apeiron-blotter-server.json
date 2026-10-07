@@ -1525,8 +1525,8 @@
     {
       "id": 24,
       "type": "timeseries",
-      "title": "Delta latency: event age at flush",
-      "description": "Age of the oldest queued order event or price tick when its flush runs: the server-side share of tick-to-screen. Measured from hermes's publish timestamp. Red line: p95 target 150 ms.",
+      "title": "Tick-to-client: event age at send",
+      "description": "Age of the earliest source event (delta.srcTs, hermes's timestamp) when the delta is sent: the server side of end-to-end tick-to-screen. Add the last hop (about 20 ms) for the client. At flush: when the flush started. Red line: end-to-end p95 target 150 ms.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1584,8 +1584,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(apeiron_event_age_at_flush_seconds_bucket{job=\"antikythera\"}[$__rate_interval])))",
-          "legendFormat": "p50",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(apeiron_event_age_at_send_seconds_bucket{job=\"antikythera\"}[$__rate_interval])))",
+          "legendFormat": "at send p50",
           "refId": "A",
           "editorMode": "code",
           "range": true
@@ -1595,8 +1595,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(apeiron_event_age_at_flush_seconds_bucket{job=\"antikythera\"}[$__rate_interval])))",
-          "legendFormat": "p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(apeiron_event_age_at_send_seconds_bucket{job=\"antikythera\"}[$__rate_interval])))",
+          "legendFormat": "at send p95",
           "refId": "B",
           "editorMode": "code",
           "range": true
@@ -1606,9 +1606,20 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(apeiron_event_age_at_flush_seconds_bucket{job=\"antikythera\"}[$__rate_interval])))",
-          "legendFormat": "p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(apeiron_event_age_at_send_seconds_bucket{job=\"antikythera\"}[$__rate_interval])))",
+          "legendFormat": "at send p99",
           "refId": "C",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(apeiron_event_age_at_flush_seconds_bucket{job=\"antikythera\"}[$__rate_interval])))",
+          "legendFormat": "at flush p95",
+          "refId": "D",
           "editorMode": "code",
           "range": true
         }

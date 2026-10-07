@@ -33,7 +33,7 @@ export function stressPhases(options: Pick<Options, 'duration' | 'stressAt' | 's
 export async function fetchLag(base: string, fetcher: Fetcher, reset: boolean): Promise<LagCumulative | null> {
   try {
     const text = await fetcher(`${base}/debug/lag${reset ? '?reset=1' : ''}`);
-    const body = JSON.parse(text) as { lag?: { p50: number; p99: number; max: number; samples: number } };
+    const body = JSON.parse(text) as { lag?: LagCumulative };
     return body.lag ?? null;
   } catch {
     return null;

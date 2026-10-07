@@ -18,7 +18,7 @@ function setup(over: { excludeLatency?: boolean; onPreset?: (p: string | null) =
 }
 
 const delta = (serverTs: number, extra: Partial<Extract<ServerMsg, { t: 'delta' }>> = {}): ServerMsg => ({
-  t: 'delta', seq: 1, serverTs, updates: [], groupUpdates: [], adds: [], dirtyRoutes: [], rowCounts: [], newAbove: 0, ...extra,
+  t: 'delta', seq: 1, serverTs, srcTs: serverTs - 40, updates: [], groupUpdates: [], adds: [], dirtyRoutes: [], rowCounts: [], newAbove: 0, ...extra,
 });
 
 describe('TalosClient hello', () => {
@@ -111,6 +111,26 @@ describe('TalosClient deltas and clock offset', () => {
     const { s, r } = setup();
     s.deliver(delta(9_950));
     expect(r.forCodec('json').delta.values()).toEqual([50]);
+  });
+
+  it('measures tick-to-screen from the source event (srcTs) and keeps the last hop from serverTs', () => {
+    const { s, r } = setup();
+    // The flush stamped the delta 30 ms ago; the event it carries happened 120 ms ago.
+    s.deliver(delta(9_970, { srcTs: 9_880 }));
+    expect(r.forCodec('json').delta.values()).toEqual([30]);
+    expect(r.forCodec('json').deltaE2e.values()).toEqual([120]);
+  });
+
+  it('files the first view of a client as startup, a view change as cold and scrolling as warm', async () => {
+    const { c, s, r } = setup();
+    for (const kind of ['startup', true, false] as const) {
+      const p = c.getRows(REQ, 10_000, kind);
+      s.deliver({ t: 'rows', reqId: (s.last('getRows') as { reqId: number }).reqId, rows: [], rowCount: 0, ms: 1 });
+      await p;
+    }
+    expect(r.forCodec('json').rowsStartup.count).toBe(1);
+    expect(r.forCodec('json').rowsCold.count).toBe(1);
+    expect(r.forCodec('json').rowsWarm.count).toBe(1);
   });
 
   it('corrects for a server clock that is ahead, using the ping with the lowest round trip', async () => {

@@ -26,5 +26,7 @@ describe('LagMonitor', () => {
     m.stop();
     expect(result).toBe('done');
     expect(lag.max).toBeGreaterThan(100);
+    expect(lag.p999).toBeGreaterThanOrEqual(lag.p99);
+    expect(lag.max).toBeGreaterThanOrEqual(lag.p999);
   });
 });

@@ -5,6 +5,7 @@ const delta = (seq: number, patch: Partial<DeltaMsg> = {}): DeltaMsg => ({
   t: 'delta',
   seq,
   serverTs: 1000 + seq,
+  srcTs: 960 + seq,
   updates: [],
   groupUpdates: [],
   adds: [],
@@ -104,6 +105,11 @@ describe('mergeDeltas', () => {
       },
       { route: ['EURUSD'], rows: [{ status: 'LIVE', childCount: 1 }] },
     ]);
+  });
+
+  it('keeps the earliest srcTs, so merged latency is measured from the oldest source event', () => {
+    expect(mergeDeltas(delta(1, { srcTs: 900 }), delta(2, { srcTs: 950 })).srcTs).toBe(900);
+    expect(mergeDeltas(delta(1, { srcTs: 950 }), delta(2, { srcTs: 900 })).srcTs).toBe(900);
   });
 
   it('takes the latest seq and the earliest serverTs', () => {
