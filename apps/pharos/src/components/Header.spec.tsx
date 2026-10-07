@@ -5,7 +5,7 @@ import { Header } from './Header';
 
 describe('Header', () => {
   it('shows the app name and subtitle', () => {
-    render(<Header traders={[]} traderId="ALL" codec="json" ready onTraderChange={vi.fn()} onCodecChange={vi.fn()} />);
+    render(<Header preset={null} onPresetChange={vi.fn()} traders={[]} traderId="ALL" codec="json" ready onTraderChange={vi.fn()} onCodecChange={vi.fn()} />);
     expect(screen.getByText('Apeiron')).toBeInTheDocument();
     expect(screen.getByText('Infinity Blotter')).toBeInTheDocument();
   });
@@ -15,6 +15,8 @@ describe('Header', () => {
     const onCodecChange = vi.fn();
     render(
       <Header
+        preset={null}
+        onPresetChange={vi.fn()}
         traders={[{ traderId: 'T1', traderName: 'Alice' }]}
         traderId="ALL"
         codec="json"
@@ -30,8 +32,28 @@ describe('Header', () => {
     expect(onCodecChange).toHaveBeenCalledWith('msgpack');
   });
 
+  it('passes the load preset to the dev menu and sends changes', async () => {
+    const onPresetChange = vi.fn();
+    render(
+      <Header
+        preset="medium"
+        onPresetChange={onPresetChange}
+        traders={[]}
+        traderId="ALL"
+        codec="json"
+        ready
+        onTraderChange={vi.fn()}
+        onCodecChange={vi.fn()}
+      />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Dev' }));
+    expect(screen.getByRole('radio', { name: 'Medium' })).toBeChecked();
+    await userEvent.click(screen.getByRole('radio', { name: 'Stress' }));
+    expect(onPresetChange).toHaveBeenCalledWith('stress');
+  });
+
   it('disables the controls until ready', () => {
-    render(<Header traders={[]} traderId="ALL" codec="json" ready={false} onTraderChange={vi.fn()} onCodecChange={vi.fn()} />);
+    render(<Header preset={null} onPresetChange={vi.fn()} traders={[]} traderId="ALL" codec="json" ready={false} onTraderChange={vi.fn()} onCodecChange={vi.fn()} />);
     expect(screen.getByRole('combobox')).toBeDisabled();
   });
 });

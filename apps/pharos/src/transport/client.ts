@@ -1,4 +1,4 @@
-import type { CodecName, Row, ServerMsg, SsrmRequest } from '@apeiron/logos';
+import type { CodecName, LoadPreset, Row, ServerMsg, SsrmRequest } from '@apeiron/logos';
 import type {
   ConnectionStatus,
   Failure,
@@ -19,13 +19,23 @@ export type WorkerLike = {
 export type RowsResult = { rows: Row[]; rowCount: number; ms: number };
 
 export type StatusEvent = { status: ConnectionStatus; attempt: number; codec: CodecName };
-export type StatsEvent = { msgsIn: number; msgsOut: number; rttMs: number | null };
+export type StatsEvent = {
+  msgsIn: number;
+  msgsOut: number;
+  deltasIn: number;
+  rttMs: number | null;
+  clockOffsetMs: number | null;
+};
+
+export type ClosedEvent = { code: number | null };
 
 export type ClientEvents = {
   status: StatusEvent;
   /** Server messages that are not answers to a request: delta, summary, welcome, stray errors. */
   message: ServerMsg;
   stats: StatsEvent;
+  /** The socket closed on its own (not through `dispose`). */
+  closed: ClosedEvent;
 };
 
 /** A request or hello that failed. `code` is the server's `ErrorCode`, or a transport code. */
@@ -45,6 +55,8 @@ export type BlotterClient = {
   hello(traderId: string, codec: CodecName): Promise<WelcomeMsg>;
   getRows(req: SsrmRequest): Promise<RowsResult>;
   setFilterValues(colId: string): Promise<string[]>;
+  /** Asks the server to switch the mock middleware load preset; resolves when the server has published it. */
+  control(preset: LoadPreset): Promise<void>;
   on<E extends keyof ClientEvents>(event: E, handler: (payload: ClientEvents[E]) => void): () => void;
   dispose(): void;
 };
@@ -60,6 +72,7 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
     status: new Set(),
     message: new Set(),
     stats: new Set(),
+    closed: new Set(),
   };
 
   const emit = <E extends keyof ClientEvents>(event: E, payload: ClientEvents[E]): void => {
@@ -76,7 +89,16 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
         emit('message', data.msg);
         return;
       case 'stats':
-        emit('stats', { msgsIn: data.msgsIn, msgsOut: data.msgsOut, rttMs: data.rttMs });
+        emit('stats', {
+          msgsIn: data.msgsIn,
+          msgsOut: data.msgsOut,
+          deltasIn: data.deltasIn,
+          rttMs: data.rttMs,
+          clockOffsetMs: data.clockOffsetMs,
+        });
+        return;
+      case 'closed':
+        emit('closed', { code: data.code });
         return;
       case 'response': {
         const settler = requests.get(data.reqId);
@@ -127,6 +149,11 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
       const msg = await request((reqId) => ({ t: 'setFilterValues', reqId, colId }));
       if (msg.t !== 'filterValues') throw new RequestError({ code: 'INTERNAL', message: `Unexpected reply: ${msg.t}` });
       return msg.values;
+    },
+
+    async control(preset: LoadPreset): Promise<void> {
+      const msg = await request((reqId) => ({ t: 'control', reqId, preset }));
+      if (msg.t !== 'ack') throw new RequestError({ code: 'INTERNAL', message: `Unexpected reply: ${msg.t}` });
     },
 
     on<E extends keyof ClientEvents>(event: E, handler: (payload: ClientEvents[E]) => void): () => void {

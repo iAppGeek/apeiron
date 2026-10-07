@@ -58,4 +58,39 @@ describe('app store', () => {
     resetAppStore();
     expect(state().rowCount).toBe(INITIAL_APP_STATE.rowCount);
   });
+
+  it('records the summary, live figures and load preset', () => {
+    const summary = {
+      byStatus: { PENDING_START: 1, LIVE: 2, PAUSED: 3, FILLED: 4, CANCELLED: 5 },
+      liveNotionalUsd: 9,
+      totalRows: 15,
+    };
+    state().setSummary(summary);
+    state().setLive({ latencyP50Ms: 5, latencyP95Ms: 20, deltasPerSec: 9.9, rowsUpdatedPerSec: 450 });
+    state().setPreset('stress');
+    state().setPresetPending(true);
+    expect(state()).toMatchObject({
+      summary,
+      latencyP50Ms: 5,
+      latencyP95Ms: 20,
+      deltasPerSec: 9.9,
+      rowsUpdatedPerSec: 450,
+      preset: 'stress',
+      presetPending: true,
+    });
+  });
+
+  it('counts new orders for the badge and clears them', () => {
+    state().addNewOrders(3);
+    state().addNewOrders(2);
+    expect(state().newOrders).toBe(5);
+    state().clearNewOrders();
+    expect(state().newOrders).toBe(0);
+  });
+
+  it('does not touch the state when clearing an empty badge', () => {
+    const before = state();
+    state().clearNewOrders();
+    expect(state()).toBe(before);
+  });
 });

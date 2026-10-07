@@ -29,14 +29,41 @@ describe('StatusBar', () => {
     expect(text('status-out')).toBe('2.0 msg/s');
   });
 
-  it('says Groups instead of Rows when the count is of root groups', () => {
-    const { rerender } = render(<StatusBar {...base} rowCount={20} grouped />);
-    expect(screen.getByText('Groups')).toBeInTheDocument();
-    expect(screen.queryByText('Rows')).toBeNull();
-    expect(text('status-rows')).toBe('20');
+  it('shows Rows and Groups when grouped, and only Rows when flat', () => {
+    const { rerender } = render(<StatusBar {...base} rowCount={20} totalRows={1_014_590} grouped />);
+    expect(text('status-rows')).toBe('1,014,590');
+    expect(text('status-groups')).toBe('20');
     rerender(<StatusBar {...base} />);
-    expect(screen.getByText('Rows')).toBeInTheDocument();
-    expect(screen.queryByText('Groups')).toBeNull();
+    expect(text('status-rows')).toBe('1,000,000');
+    expect(screen.queryByTestId('status-groups')).toBeNull();
+  });
+
+  it('prefers the server summary total over the grid count when flat', () => {
+    render(<StatusBar {...base} rowCount={1_000_000} totalRows={1_000_123} />);
+    expect(text('status-rows')).toBe('1,000,123');
+  });
+
+  it('shows latency percentiles, delta rate, rows updated per second and server lag', () => {
+    render(
+      <StatusBar
+        {...base}
+        latencyP50Ms={12.4}
+        latencyP95Ms={48.6}
+        deltasPerSec={9.96}
+        rowsUpdatedPerSec={1170.4}
+        server={{ cpu: 8.3, rssMb: 853, elLagMs: 4.25 }}
+      />,
+    );
+    expect(text('status-latency')).toBe('12 / 49 ms');
+    expect(text('status-deltas')).toBe('10.0/s');
+    expect(text('status-rows-updated')).toBe('1,170/s');
+    expect(text('status-lag')).toBe('4.3 ms');
+  });
+
+  it('shows dashes for latency before the first delta', () => {
+    render(<StatusBar {...base} />);
+    expect(text('status-latency')).toBe('—');
+    expect(text('status-lag')).toBe('—');
   });
 
   it('shows dashes for unknown values and the server placeholders', () => {

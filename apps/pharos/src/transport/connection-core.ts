@@ -7,6 +7,8 @@ import {
   type ServerMsg,
   isServerMsg,
 } from '@apeiron/logos';
+import { createClockOffsetEstimator } from '../metrics/latency';
+import { createDeltaBatcher, type DeltaMsg } from './delta-coalescer';
 import type { Failure, RequestMsg, WorkerToMain } from './messages';
 
 /** The slice of the browser `WebSocket` the core needs, so tests can supply a fake. */
@@ -17,7 +19,7 @@ export type SocketLike = {
   close(): void;
   onopen: (() => void) | null;
   onmessage: ((event: { data: unknown }) => void) | null;
-  onclose: (() => void) | null;
+  onclose: ((event?: { code?: number }) => void) | null;
   onerror: (() => void) | null;
 };
 
@@ -28,6 +30,9 @@ export type Clock = {
   setInterval(fn: () => void, ms: number): unknown;
   clearInterval(handle: unknown): void;
   random(): number;
+  /** Next animation frame; where a worker has no `requestAnimationFrame` the core falls back to a 16ms timeout. */
+  nextFrame?(fn: () => void): unknown;
+  cancelFrame?(handle: unknown): void;
 };
 
 export type CoreOptions = {
@@ -109,7 +114,22 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
 
   let msgsIn = 0;
   let msgsOut = 0;
+  let deltasIn = 0;
   let rttMs: number | null = null;
+  const clockOffset = createClockOffsetEstimator();
+
+  // Deltas pass straight through at normal rates; above 20/s they are merged once per animation frame.
+  const batcher = createDeltaBatcher({
+    now: () => clock.now(),
+    nextFrame: (fn) => (clock.nextFrame !== undefined ? clock.nextFrame(fn) : clock.setTimeout(fn, 16)),
+    cancelFrame: (handle) => {
+      if (clock.cancelFrame !== undefined) clock.cancelFrame(handle);
+      else clock.clearTimeout(handle);
+    },
+    emit: (delta: DeltaMsg) => {
+      emit({ kind: 'message', msg: delta });
+    },
+  });
 
   const isOpen = (): boolean => socket !== null && socket.readyState === OPEN;
 
@@ -159,9 +179,17 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
     }, options.pingIntervalMs);
     statsTimer = clock.setInterval(() => {
       const seconds = options.statsIntervalMs / 1000;
-      emit({ kind: 'stats', msgsIn: msgsIn / seconds, msgsOut: msgsOut / seconds, rttMs });
+      emit({
+        kind: 'stats',
+        msgsIn: msgsIn / seconds,
+        msgsOut: msgsOut / seconds,
+        deltasIn: deltasIn / seconds,
+        rttMs,
+        clockOffsetMs: clockOffset.offsetMs(),
+      });
       msgsIn = 0;
       msgsOut = 0;
+      deltasIn = 0;
     }, options.statsIntervalMs);
   };
 
@@ -192,8 +220,15 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
         emit({ kind: 'message', msg });
         return;
       }
-      case 'pong':
-        rttMs = Math.max(0, clock.now() - msg.ts);
+      case 'pong': {
+        const receivedAt = clock.now();
+        rttMs = Math.max(0, receivedAt - msg.ts);
+        clockOffset.addSample(msg.ts, msg.serverTs, receivedAt);
+        return;
+      }
+      case 'delta':
+        deltasIn += 1;
+        batcher.push(msg);
         return;
       case 'rows':
       case 'filterValues':
@@ -277,7 +312,13 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
       }
       scheduleReconnect();
     };
-    ws.onclose = onGone;
+    ws.onclose = (event): void => {
+      if (socket !== ws) return;
+      // Deltas held back for a frame belong to the old connection; hand them over before it is declared lost.
+      batcher.flush();
+      if (!closedByUser) emit({ kind: 'closed', code: event?.code ?? null });
+      onGone();
+    };
     ws.onerror = (): void => {
       // A close event always follows an error; reconnection is handled there.
     };
@@ -325,6 +366,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
 
     close(): void {
       closedByUser = true;
+      batcher.flush();
       if (reconnectTimer !== null) clock.clearTimeout(reconnectTimer);
       reconnectTimer = null;
       stopTimers();

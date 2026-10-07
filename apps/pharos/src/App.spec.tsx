@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,8 +22,15 @@ const welcome: WelcomeMsg = {
 };
 
 type Handlers = { [E in keyof ClientEvents]?: (payload: ClientEvents[E]) => void };
-const makeClient = (): { client: BlotterClient; handlers: Handlers; hello: ReturnType<typeof vi.fn>; connect: ReturnType<typeof vi.fn> } => {
+const makeClient = (): {
+  client: BlotterClient;
+  handlers: Handlers;
+  hello: ReturnType<typeof vi.fn>;
+  connect: ReturnType<typeof vi.fn>;
+  control: ReturnType<typeof vi.fn>;
+} => {
   const handlers: Handlers = {};
+  const control = vi.fn().mockResolvedValue(undefined);
   const hello = vi.fn().mockResolvedValue(welcome);
   const connect = vi.fn();
   const client = {
@@ -35,9 +42,10 @@ const makeClient = (): { client: BlotterClient; handlers: Handlers; hello: Retur
     hello,
     getRows: vi.fn(),
     setFilterValues: vi.fn(),
+    control,
     dispose: vi.fn(),
   } as unknown as BlotterClient;
-  return { client, handlers, hello, connect };
+  return { client, handlers, hello, connect, control };
 };
 
 describe('App', () => {
@@ -89,7 +97,7 @@ describe('App', () => {
     const { client, handlers } = makeClient();
     render(<App client={client} wsUrl="ws://host/ws" />);
     handlers.status?.({ status: 'connected', attempt: 0, codec: 'json' });
-    handlers.stats?.({ msgsIn: 4, msgsOut: 1, rttMs: 12 });
+    handlers.stats?.({ msgsIn: 4, msgsOut: 1, deltasIn: 0, rttMs: 12, clockOffsetMs: null });
     useAppStore.getState().setRowCount(1_000_000);
     return waitFor(() => {
       expect(screen.getByTestId('status-connection')).toHaveTextContent('Connected');
@@ -103,5 +111,40 @@ describe('App', () => {
     render(<App client={client} wsUrl="ws://host/ws" />);
     useAppStore.getState().pushToast('error', 'Something failed');
     expect(await screen.findByRole('alert')).toHaveTextContent('Something failed');
+  });
+
+  it('shows the summary strip and the server figures from a summary message', async () => {
+    const { client, handlers } = makeClient();
+    render(<App client={client} wsUrl="ws://host/ws" />);
+    expect(screen.getByTestId('summary-LIVE')).toHaveTextContent('LIVE—');
+    act(() => {
+      (handlers.message as (m: unknown) => void)({
+        t: 'summary',
+        byStatus: { PENDING_START: 5, LIVE: 450, PAUSED: 2, FILLED: 900, CANCELLED: 100 },
+        liveNotionalUsd: 4_210_000_000,
+        totalRows: 1_001_234,
+        server: { cpu: 8.3, rssMb: 853, elLagMs: 2.5 },
+      });
+    });
+    expect(screen.getByTestId('summary-LIVE')).toHaveTextContent('LIVE450');
+    expect(screen.getByTestId('summary-notional')).toHaveTextContent('$4.21bn');
+    expect(screen.getByTestId('status-rows')).toHaveTextContent('1,001,234');
+    expect(screen.getByTestId('status-cpu')).toHaveTextContent('8.3%');
+    expect(screen.getByTestId('status-lag')).toHaveTextContent('2.5 ms');
+  });
+
+  it('sends the load preset as a control message from the dev menu and shows it as active', async () => {
+    const { client, control, handlers } = makeClient();
+    render(<App client={client} wsUrl="ws://host/ws" />);
+    act(() => {
+      handlers.message?.(welcome);
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Dev' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Stress' }));
+    expect(control).toHaveBeenCalledWith('stress');
+    await waitFor(() => {
+      expect(screen.getByRole('radio', { name: 'Stress' })).toBeChecked();
+    });
+    expect(screen.getByText(/active: stress/)).toBeInTheDocument();
   });
 });

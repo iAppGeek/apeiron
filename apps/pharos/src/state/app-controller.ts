@@ -1,25 +1,54 @@
-import type { CodecName, ServerMsg } from '@apeiron/logos';
+import type { CodecName, LoadPreset, ServerMsg } from '@apeiron/logos';
+import type { ApplyStats, DeltaMsg } from '../grid/apply-delta';
 import { describeFailure } from '../grid/errors';
+import { createLatencyWindow, tickToScreenMs } from '../metrics/latency';
 import { RequestError, type BlotterClient } from '../transport/client';
 import { useAppStore } from './app-store';
+
+/** Applies a delta to the grid and says how many rows it touched (for the rows-updated-per-second figure). */
+export type DeltaHandler = (delta: DeltaMsg) => ApplyStats | void;
+
+export type ControllerDeps = {
+  /** Wall clock in ms; the same clock the transport worker uses for ping and clock offset. */
+  now?: () => number;
+};
+
+/** The close code the server uses with SLOW_CONSUMER. */
+export const SLOW_CONSUMER_CLOSE_CODE = 1013;
+/** Rolling window of the tick-to-screen latency figures. */
+export const LATENCY_WINDOW_MS = 10_000;
 
 export type AppController = {
   /** Connects the transport and sends the first hello. Returns a function that undoes the wiring. */
   start: (url: string) => () => void;
   changeTrader: (traderId: string) => Promise<void>;
   changeCodec: (codec: CodecName) => Promise<void>;
-  /** The grid registers how to purge its row cache; called after a trader change. */
+  /** Sends the load preset (medium or stress) to the server, which relays it to the mock middleware. */
+  changePreset: (preset: LoadPreset) => Promise<void>;
+  /**
+   * The grid registers how to purge its row cache and forget its live state. Called after a trader or codec change
+   * (the server drops what it tracks on every hello) and after a reconnect, which starts with nothing tracked.
+   */
   setPurge: (purge: (() => void) | null) => void;
-  /** Phase 5 registers the handler that applies `delta` messages. */
-  setDeltaHandler: (handler: ((delta: Extract<ServerMsg, { t: 'delta' }>) => void) | null) => void;
+  /** The grid registers the handler that applies `delta` messages. */
+  setDeltaHandler: (handler: DeltaHandler | null) => void;
 };
 
 /** Glue between the transport client and the app store: wiring, trader and codec changes. */
-export function createAppController(client: BlotterClient): AppController {
+export function createAppController(client: BlotterClient, deps: ControllerDeps = {}): AppController {
+  const now = deps.now ?? ((): number => Date.now());
   let purge: (() => void) | null = null;
   /** Trader hellos sent and not yet answered. */
   let inflightTraderHellos = 0;
-  let deltaHandler: ((delta: Extract<ServerMsg, { t: 'delta' }>) => void) | null = null;
+  let deltaHandler: DeltaHandler | null = null;
+
+  const latency = createLatencyWindow(LATENCY_WINDOW_MS);
+  let clockOffsetMs: number | null = null;
+  let rowsUpdated = 0;
+  let lastPublishAt = now();
+  /** The link dropped (or the server cut us off) after we were welcomed: what the grid holds is no longer being kept up to date. */
+  let resyncPending = false;
+  let slowConsumerToast = false;
 
   const reportFailure = (error: unknown): void => {
     const state = useAppStore.getState();
@@ -32,27 +61,77 @@ export function createAppController(client: BlotterClient): AppController {
     const state = useAppStore.getState();
     state.setConfirmedTrader(traderId);
     state.setRowCount(null);
+    resyncPending = false;
     purge?.();
+  };
+
+  /** The server cut this client off or the link dropped: reload the grid once the connection is back. */
+  const needResync = (): void => {
+    if (useAppStore.getState().welcomed) resyncPending = true;
+  };
+
+  const onSlowConsumer = (): void => {
+    needResync();
+    if (slowConsumerToast) return;
+    slowConsumerToast = true;
+    useAppStore.getState().pushToast('error', 'The blotter fell behind the server. Reconnecting and reloading the rows.');
+  };
+
+  const publishLive = (deltasPerSec: number): void => {
+    const at = now();
+    const snapshot = latency.snapshot(at);
+    const elapsed = Math.max(1, at - lastPublishAt) / 1000;
+    useAppStore.getState().setLive({
+      latencyP50Ms: snapshot.p50,
+      latencyP95Ms: snapshot.p95,
+      deltasPerSec,
+      rowsUpdatedPerSec: rowsUpdated / elapsed,
+    });
+    rowsUpdated = 0;
+    lastPublishAt = at;
+  };
+
+  const onDelta = (delta: DeltaMsg): void => {
+    if (deltaHandler === null) return;
+    const stats = deltaHandler(delta);
+    const appliedAt = now();
+    latency.record(appliedAt, tickToScreenMs(appliedAt, delta.serverTs, clockOffsetMs));
+    if (stats === undefined) return;
+    rowsUpdated += stats.rowsUpdated;
+    if (stats.rootRowCount !== null) {
+      const state = useAppStore.getState();
+      state.setRowCount(stats.rootRowCount, state.grouped);
+    }
   };
 
   const onMessage = (msg: ServerMsg): void => {
     const state = useAppStore.getState();
     switch (msg.t) {
       case 'welcome':
+        slowConsumerToast = false;
         state.setWelcomed(msg.traders);
         // A welcome with no trader change in flight is the answer to a reconnect hello, which carries the
         // requested trader, so the server has now confirmed it.
         if (inflightTraderHellos === 0 && state.requestedTrader !== state.confirmedTrader) {
           confirmTrader(state.requestedTrader);
+        } else if (resyncPending) {
+          // A fresh session tracks nothing, so deltas stop for every row the grid already holds. Reload them.
+          resyncPending = false;
+          purge?.();
         }
         return;
       case 'summary':
         state.setServer(msg.server);
+        state.setSummary({ byStatus: msg.byStatus, liveNotionalUsd: msg.liveNotionalUsd, totalRows: msg.totalRows });
         return;
       case 'delta':
-        deltaHandler?.(msg);
+        onDelta(msg);
         return;
       case 'error':
+        if (msg.code === 'SLOW_CONSUMER') {
+          onSlowConsumer();
+          return;
+        }
         state.pushToast('error', describeFailure(msg.code, msg.message));
         return;
       default:
@@ -67,6 +146,12 @@ export function createAppController(client: BlotterClient): AppController {
       });
       const offStats = client.on('stats', (stats) => {
         useAppStore.getState().setStats(stats);
+        clockOffsetMs = stats.clockOffsetMs;
+        publishLive(stats.deltasIn);
+      });
+      const offClosed = client.on('closed', ({ code }) => {
+        needResync();
+        if (code === SLOW_CONSUMER_CLOSE_CODE) onSlowConsumer();
       });
       const offMessage = client.on('message', onMessage);
       client.connect(url);
@@ -78,6 +163,7 @@ export function createAppController(client: BlotterClient): AppController {
       return (): void => {
         offStatus();
         offStats();
+        offClosed();
         offMessage();
       };
     },
@@ -109,6 +195,21 @@ export function createAppController(client: BlotterClient): AppController {
         return;
       }
       setCodec(codec);
+      // The server forgets which blocks this client holds on every hello, so reload them to keep them live.
+      purge?.();
+    },
+
+    async changePreset(preset: LoadPreset): Promise<void> {
+      const { setPreset, setPresetPending } = useAppStore.getState();
+      setPresetPending(true);
+      try {
+        await client.control(preset);
+        setPreset(preset);
+      } catch (error) {
+        reportFailure(error);
+      } finally {
+        setPresetPending(false);
+      }
     },
 
     setPurge(next: (() => void) | null): void {

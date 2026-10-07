@@ -16,7 +16,7 @@ class FakeSocket implements SocketLike {
   closed = false;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event?: { code?: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   constructor(readonly url: string) {}
   send(data: string | Uint8Array): void {
@@ -29,9 +29,9 @@ class FakeSocket implements SocketLike {
     this.readyState = 1;
     this.onopen?.();
   }
-  drop(): void {
+  drop(code?: number): void {
     this.readyState = 3;
-    this.onclose?.();
+    this.onclose?.(code === undefined ? undefined : { code });
   }
   receive(msg: ServerMsg, codec: 'json' | 'msgpack' = 'json'): void {
     if (codec === 'json') this.onmessage?.({ data: jsonCodec.encode(msg) });
@@ -269,7 +269,7 @@ describe('request matching', () => {
     rig.core.request({ t: 'getRows', reqId: 1, req });
     rig.clock.advance(4999);
     expect(rig.ofKind('response')).toHaveLength(0);
-    rig.clock.advance(2);
+    rig.clock.advance(16);
     expect(rig.ofKind('response')[0]).toMatchObject({ reqId: 1, ok: false, code: 'TIMEOUT' });
   });
 
@@ -422,5 +422,127 @@ describe('ping and stats', () => {
     const before = first.sent.length;
     rig.clock.advance(1500);
     expect(first.sent).toHaveLength(before);
+  });
+});
+
+const delta = (seq: number, patch: Partial<Extract<ServerMsg, { t: 'delta' }>> = {}): ServerMsg => ({
+  t: 'delta',
+  seq,
+  serverTs: 5000 + seq,
+  updates: [],
+  groupUpdates: [],
+  adds: [],
+  dirtyRoutes: [],
+  rowCounts: [],
+  newAbove: 0,
+  ...patch,
+});
+
+const deltas = (rig: Rig): Extract<ServerMsg, { t: 'delta' }>[] =>
+  rig
+    .ofKind('message')
+    .map((e) => e.msg)
+    .filter((m): m is Extract<ServerMsg, { t: 'delta' }> => m.t === 'delta');
+
+describe('clock offset', () => {
+  it('estimates the server clock offset from the pong and reports it with the stats', () => {
+    const rig = makeRig();
+    rig.core.connect('ws://x/ws');
+    rig.last().open();
+    rig.last().receive(welcome);
+    rig.clock.advance(10);
+    // Sent at 1000, received at 1010: the server stamped 1005 + 250 on its own clock, so it is 250ms ahead.
+    rig.last().receive({ t: 'pong', ts: 1000, serverTs: 1255 });
+    rig.clock.advance(1000);
+    expect(rig.ofKind('stats').at(-1)?.clockOffsetMs).toBe(250);
+  });
+
+  it('reports null until a pong has arrived', () => {
+    const rig = makeRig();
+    rig.core.connect('ws://x/ws');
+    rig.last().open();
+    rig.clock.advance(1000);
+    expect(rig.ofKind('stats').at(-1)?.clockOffsetMs).toBeNull();
+  });
+});
+
+describe('deltas', () => {
+  const connected = (): Rig => {
+    const rig = makeRig();
+    rig.core.connect('ws://x/ws');
+    rig.last().open();
+    rig.last().receive(welcome);
+    return rig;
+  };
+
+  it('passes deltas straight through at normal rates and counts them per second', () => {
+    const rig = connected();
+    for (let i = 1; i <= 5; i += 1) {
+      rig.clock.advance(100);
+      rig.last().receive(delta(i));
+    }
+    expect(deltas(rig).map((d) => d.seq)).toEqual([1, 2, 3, 4, 5]);
+    rig.clock.advance(1000);
+    expect(rig.ofKind('stats').find((s) => s.deltasIn > 0)?.deltasIn).toBeGreaterThan(0);
+  });
+
+  it('coalesces deltas arriving faster than 20 per second into one per frame, keeping the latest values', () => {
+    const rig = connected();
+    for (let i = 1; i <= 20; i += 1) {
+      rig.clock.advance(10);
+      rig.last().receive(delta(i, { updates: [{ route: [], rows: [{ orderId: 'A', marketMid: i }] }] }));
+    }
+    const direct = deltas(rig).length;
+    expect(direct).toBe(20);
+    // The 21st within a second starts coalescing: it and the next ones wait for the frame.
+    for (let i = 21; i <= 23; i += 1) {
+      rig.clock.advance(5);
+      rig.last().receive(delta(i, { updates: [{ route: [], rows: [{ orderId: 'A', marketMid: i }] }], newAbove: 1 }));
+    }
+    expect(deltas(rig)).toHaveLength(direct);
+    rig.clock.advance(16);
+    const merged = deltas(rig).slice(direct);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ seq: 23, newAbove: 3 });
+    expect(merged[0]?.updates).toEqual([{ route: [], rows: [{ orderId: 'A', marketMid: 23 }] }]);
+  });
+
+  it('hands over deltas held for a frame before reporting that the socket closed', () => {
+    const rig = connected();
+    for (let i = 1; i <= 22; i += 1) {
+      rig.clock.advance(5);
+      rig.last().receive(delta(i));
+    }
+    const before = deltas(rig).length;
+    expect(before).toBeLessThan(22);
+    rig.last().drop();
+    expect(deltas(rig).length).toBeGreaterThan(before);
+    const kinds = rig.events.map((e) => e.kind);
+    expect(kinds.lastIndexOf('message')).toBeLessThan(kinds.indexOf('closed'));
+  });
+});
+
+describe('close codes', () => {
+  it('reports an unexpected close with its code, and reconnects', () => {
+    const rig = makeRig();
+    rig.core.connect('ws://x/ws');
+    rig.last().open();
+    rig.last().drop(1013);
+    expect(rig.ofKind('closed')).toEqual([{ kind: 'closed', code: 1013 }]);
+    rig.clock.advance(600);
+    expect(rig.sockets).toHaveLength(2);
+  });
+
+  it('reports a missing code as null, and says nothing when the page closed the connection', () => {
+    const rig = makeRig();
+    rig.core.connect('ws://x/ws');
+    rig.last().open();
+    rig.last().drop();
+    expect(rig.ofKind('closed')).toEqual([{ kind: 'closed', code: null }]);
+    const quiet = makeRig();
+    quiet.core.connect('ws://x/ws');
+    quiet.last().open();
+    quiet.core.close();
+    expect(quiet.ofKind('closed')).toEqual([]);
   });
 });
