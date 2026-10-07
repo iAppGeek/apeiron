@@ -36,7 +36,7 @@ describe('startingMids', () => {
   });
 
   it('starts from the generator final mids, not the reference levels', () => {
-    const final = finalMids(42, 100_000, SEED_NOW);
+    const final = finalMids(42, 50_000, SEED_NOW);
     const mids = startingMids(currentOrders());
     for (const p of PAIRS) {
       const dec = PAIR_BY_NAME.get(p.pair)?.decimals ?? 5;
