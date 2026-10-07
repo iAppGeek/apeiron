@@ -226,6 +226,9 @@ Atlas M0 (512MB storage) can't hold 1M × 50 columns, and DocumentDB isn't fully
 | 🔍 | **OPUS REVIEW CP-4: Performance verdict** (covers phases 6 and 7) | See checkpoint table below |
 | 8 | **Ship**: multi-arch ECR workflow, Terraform `infra/aws`, `remote-*` scripts, `docs/hosting.md`, `docs/db-adapters.md`, Playwright E2E | `terraform validate` passes; the scripts pass `shellcheck`; E2E passes against the containerised stack; a remote deploy runs only when the user triggers it (it costs money and needs their AWS credentials) |
 | 🔍 | **OPUS REVIEW CP-5: Release review** | See checkpoint table below |
+| 9 | **Resilience**: an integration suite proving the grid stays complete and in sync through WebSocket drops, flapping, stalls, high latency, low bandwidth and server restarts (Appendix G) | Every Appendix G scenario passes all three checks (model, server, screen) plus the monotonic invariants; the full suite runs locally with `pnpm e2e:resilience`, and a shortened smoke variant runs in CI; the scenarios are documented in `docs/TESTING.md` and the user guide |
+| 🔍 | **OPUS REVIEW CP-6: Resilience** | See checkpoint table below |
+| 10 | **Demo pack** (Opus): local E2E run, Chrome DevTools UI validation and screenshots, user guide (how to start everything), technical overview, benchmarks and timings, resilience results; ready to present to the development team | The guide works from a clean clone; every figure in it comes from a recorded run |
 
 ### Opus review checkpoints
 **How a checkpoint works:**
@@ -249,6 +252,7 @@ Atlas M0 (512MB storage) can't hold 1M × 50 columns, and DocumentDB isn't fully
 | **CP-3 Live updates** | Phase 5 (covers 4 and 5) | The trickiest part of the project: incremental view updates, block tracking, deltas, scroll anchoring. Bugs here are subtle (stale cells, rows that never refresh, scroll jumps). | Appendix D implemented faithfully; the incremental-vs-rebuild property test; which changes count as structural; how closely block tracking follows the grid's cache; partial-merge correctness on the client (no lost fields); the new-on-top, anchoring and badge behaviour (Opus runs the app and watches with browser tools); backpressure and conflation; the order lifecycle state machine; write-behind correctness. Checks the pharos grid integration (phase 4) as well. **Decides whether to use the Appendix F fallbacks.** |
 | **CP-4 Performance verdict** | Phase 7 (covers 6 and 7) | This is where the POC's main question gets answered with data. | Whether the load-test method is sound (realistic client mix, enough duration, no coordinated omission in latency measurement); results against every POC target; JSON vs msgpack conclusions; profiling hotspots (Opus may run `--cpu-prof` or heap snapshots); the Grafana dashboard tells the story; command round-trip validation and security (zod, state checks). Produces a short **findings summary** for the README: what the POC proved, and the limits found. |
 | **CP-5 Release review** | Phase 8 | Before anything touches AWS or gets shared. | Terraform least privilege (IAM, security group limited to your IP, no public ports beyond the web port); no secrets in the repo or images; images run as a non-root user and stay small; the `remote-*` scripts are safe (idempotent, stop rather than destroy by default, show cost warnings); the E2E suite actually covers the manual checks; docs are complete (README quick start, hosting, db-adapters, architecture). Final `/code-review high` across the repo. |
+| **CP-6 Resilience** | Phase 9 | It proves the core promise: what the trader sees is complete and current, even over a bad network. | Whether the checks really are independent (the model is not derived from the server); whether the drop types are realistic (clean close, hard down, half-open stall, mid-request); that no scenario passes vacuously (each must observe at least N reconnects and M deltas); flakiness (each scenario run 3 times); the heartbeat and half-open detection fix; that CI's smoke variant is meaningful. |
 
 **Extra Opus reviews outside the checkpoints.** Sonnet stops and asks for an Opus review whenever:
 - an Appendix contract seems to need changing;
@@ -517,6 +521,51 @@ type ServerMsg =
 | stress | 2,000 | 50 (LIVE cap raised to 5,000) | 3/s per pair |
 
 **Pacing as built (phase 5a, accepted).** Under stress, the fill formula above drained LIVE to about 150 rows. Hermes instead paces fills per order (32 for medium, 64 for stress) over a 1–2 minute order lifetime. That holds LIVE at about 400–500 on medium and about 4,000 on stress.
+
+## Appendix G: Resilience test suite (phase 9)
+**Goal:** after any connection disruption, the grid shows **complete, current data**. It must not miss updates, show stale values, show out-of-sync aggregates or counts, or let a value move backwards.
+
+### Harness
+- **Network faults: Toxiproxy** (`ghcr.io/shopify/toxiproxy`, pinned to the latest minor), a new dependency approved by the user's request.
+  - Compose profile `resilience`: `toxiproxy` (API on `127.0.0.1:8474`) proxies `toxiproxy:4100` → `antikythera:4000`.
+  - A second web container, **`pharos-e2e`**, on `127.0.0.1:8081`. It's the same image, with nginx's `/ws` upstream set by env (`WS_UPSTREAM=toxiproxy:4100`; the default stays `antikythera:4000`) and built with `VITE_TEST_HOOKS=1`.
+  - **Test hooks:** only in that build, `window.__apeironTest` exposes **read-only** helpers: loaded rows via `api.forEachNode`, the root row count, the summary, the connection state, and reconnect and delta counters. The production build has none.
+- **A deterministic update driver** (`e2e/support/driver.ts`, using `@apeiron/iris` and logos `applyFill`, `transition` and the price recompute) replaces hermes during a scenario. Hermes is stopped in setup and restarted in teardown.
+  - **Start:** the "initial image" is the current DB state. It reads `loadCurrent()` and `maxOrderId()`.
+  - **During:** it publishes a **seeded** stream for the scenario's duration: price ticks 3/s per pair; fills on LIVE orders; status transitions (PENDING_START→LIVE, LIVE→FILLED/CANCELLED, PAUSE/RESUME); new orders, about 5/s, with ascending IDs; and changes that move rows between groups and in and out of filters.
+  - **The model:** every event is applied to an **independent in-memory model** of the expected final state.
+- **Fault controller** (`e2e/support/faults.ts`): drives the Toxiproxy API. It can drop a connection cleanly (`reset_peer`), take the proxy fully down for N seconds, add a `timeout` toxic (a half-open stall: data stops and nothing closes), add `latency` with jitter, and add `bandwidth` limits per direction.
+- **Browser:** Playwright `e2e/tests/resilience/*.e2e.ts` opens several pages at once, each with a different view.
+  - **V1:** the default flat view, at the top.
+  - **V2:** flat, scrolled to about row 300,000 (anchoring).
+  - **V3:** grouped by pair, with LIVE drilled open.
+  - **V4:** status = LIVE, sorted by `unrealisedPnlUsd desc`, so the sort key ticks.
+  - **V5:** trader T2 only, using msgpack.
+
+### The three checks (run after the update stream stops)
+Stop the driver, wait for the server to flush and the client to go quiet (no deltas for 2s), then:
+1. **Model vs server.** A fresh WebSocket client reads every changed order, plus the top 500 of each view, from antikythera. Every field must equal the model, apart from fields set by the server's clock (`lastUpdateTime`).
+2. **Server vs screen.** For each page, every row the grid has loaded must equal the fresh server read field for field, including `lastUpdateTime`. The row order of the loaded blocks, the root `rowCount`, the group `childCount`s, the aggregates, and the status-chip summary must match too.
+3. **Invariants during the run.** A sampler reads each page's loaded rows every 500ms. For every order, `filledQty`, `numFills` and `lastUpdateTime` never go backwards, and an order that reached FILLED or CANCELLED never shows as LIVE again. It also counts reconnects and deltas: **a scenario fails unless it saw at least the expected number of reconnects and deltas,** so it can't pass by doing nothing.
+
+Fix the client heartbeat first; S3 depends on it. **The client** treats the connection as dead if no frame arrives for 3 ping intervals (6s), then closes it and reconnects, which detects a half-open socket. **The server** pings clients and closes any that stay silent past the timeout, so stale sessions are cleaned up. Check whether either is missing and add it.
+
+### Scenarios
+| ID | Scenario | Faults | Asserts, beyond the three checks |
+|---|---|---|---|
+| **S1** | **The user's required scenario.** Initial image, then about 5 minutes of updates; drop the WebSocket every 30s | 10 drops, rotating between a clean close, proxy down for 3s, and proxy down for 10s | At least 10 reconnects per page; the final screen state is complete and current on all five views |
+| S2 | Rapid flapping | Drops every 2–5s for 2 minutes, some timed during an in-flight `getRows`, a `hello`, a trader switch or a codec switch | No stuck "switching…" or loading state; no orphaned request promises; same final state |
+| S3 | Half-open stall | A `timeout` toxic: the socket stays open but no data flows, for 20s, 3 times | The client detects it within about 6–8s and reconnects; the data is correct afterwards |
+| S4 | Long outage during a burst | Proxy down for 60s while the driver runs at the stress rate | One reconnect; the backlog clears; the anchor and badge behave on V2 |
+| S5 | High latency | 300ms ± 100ms each way for 3 minutes, plus 2 drops | Eventually consistent; nothing goes backwards; tick-to-screen p95 recorded |
+| S6 | Low bandwidth | Downstream limited to 64KB/s for 3 minutes, then 16KB/s for 1 minute | The server conflates; `SLOW_CONSUMER` is recorded at 16KB/s; the client reconnects and purges; data is correct once bandwidth returns |
+| S7 | Server restart | `docker compose restart antikythera` mid-stream, twice | The client recovers; JetStream replays; the model check passes, proving no event was lost on the server side |
+| S8 | Command across a drop | Send Pause and Cancel, then drop before the `ack` | The client shows an error or timeout and never hangs; the final grid matches the server, whether or not the command was applied |
+
+**Duration and CI:**
+- `pnpm e2e:resilience` runs everything; it's long-running and local.
+- `pnpm e2e:resilience:smoke` runs S1 shortened (60s, drops every 10s) plus S3, and is part of CI's E2E job.
+- Each scenario writes a JSON report to `e2e/results/`: reconnects, deltas, the checks that passed, and timings.
 
 ## Appendix F: Known risks and sanctioned fallbacks
 - **SSRM `add` + anchoring is flaky.** Fallback: send every structural change as `dirtyRoutes` (background refresh). The anchor still works by comparing `getFirstDisplayedRowIndex()` before and after and calling `ensureIndexVisible(prev + newAbove, 'top')` on the `storeRefreshed` event.
