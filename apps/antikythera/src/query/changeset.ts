@@ -45,6 +45,21 @@ export class ChangeSet {
     return this.entries.has(row);
   }
 
+  /**
+   * Folds a later tick into this one, giving the union of the two as if it were a single tick: the first old
+   * value of each field wins (so `prev` still describes the state before the earlier tick), and a row that was
+   * new stays new. Used when a view could not be patched in time and carries its changes into the next tick.
+   */
+  merge(later: ChangeSet): void {
+    for (const e of later.entries.values()) {
+      if (e.isNew) {
+        this.noteNew(e.row);
+        continue;
+      }
+      this.noteUpdate(e.row, [...e.fields], e.prev);
+    }
+  }
+
   noteNew(row: number): void {
     const e = this.entries.get(row);
     if (e !== undefined) {

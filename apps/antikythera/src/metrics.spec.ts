@@ -89,6 +89,21 @@ describe('Metrics', () => {
     expect(sample(text, 'apeiron_backpressure_events_total{event="slow_consumer"}')).toBe(1);
   });
 
+  it('counts what each flush did with the views, and times deferred rebuilds', async () => {
+    const m = new Metrics();
+    m.views({ patched: 3, deferred: 2, unsubscribed: 5, pendingRebuild: 1, stale: 7 });
+    m.views({ patched: 1, deferred: 0, unsubscribed: 0, pendingRebuild: 0, stale: 4 });
+    m.rebuild(0.05);
+    const text = await m.render();
+    expect(sample(text, 'apeiron_flush_views_total{outcome="patched"}')).toBe(4);
+    expect(sample(text, 'apeiron_flush_views_total{outcome="deferred"}')).toBe(2);
+    expect(sample(text, 'apeiron_flush_views_total{outcome="unsubscribed"}')).toBe(5);
+    expect(sample(text, 'apeiron_flush_views_total{outcome="pending_rebuild"}')).toBe(1);
+    expect(sample(text, 'apeiron_views_stale')).toBe(4);
+    expect(sample(text, 'apeiron_views_rebuild_pending')).toBe(0);
+    expect(sample(text, 'apeiron_view_rebuild_duration_seconds_count')).toBe(1);
+  });
+
   it('reads store, cache, client and lag gauges from the bound sources at scrape time', async () => {
     const m = new Metrics();
     expect(sample(await m.render(), 'apeiron_store_rows')).toBe(0);

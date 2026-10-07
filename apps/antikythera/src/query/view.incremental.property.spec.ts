@@ -15,7 +15,7 @@ import type { ColumnarStore } from '../store/columnar-store.js';
 
 const ROWS = 1_200;
 const BIG = 100_000;
-const opts = (extra: Partial<EngineOptions> = {}): EngineOptions => ({ maxViews: 500, maxBytes: 1 << 30, maxBlockRows: BIG, ...extra });
+const opts = (extra: Partial<EngineOptions> = {}): EngineOptions => ({ maxViews: 500, maxBytes: 1 << 30, maxBlockRows: BIG, patchUnsubscribed: true, deferRebuilds: false, ...extra });
 
 const pick = <T>(rng: Rng, items: readonly T[]): T => items[Math.floor(rng() * items.length)] as T;
 
@@ -175,26 +175,57 @@ function buildProbes(engine: QueryEngine, rng: Rng, orders: readonly Order[], co
   return out;
 }
 
-function runProperty(seed: number, ticks: number, engineOptions: Partial<EngineOptions> = {}): { rebuilt: number; patched: number; inconsistencies: number } {
+type Plan = {
+  /** Flush budget for a tick (default unlimited). A budget of 0 defers every view, so its changes are carried over. */
+  budget?: (tick: number) => number;
+  /** Ticks after which every view is compared with a fresh build (default every tick). */
+  compareAt?: (tick: number) => boolean;
+  /** Run deferred rebuilds after each tick, as the runtime does between flushes. */
+  drainRebuilds?: boolean;
+  /** Which views a client tracks (default all). Untracked views go stale and are rebuilt on their next request. */
+  subscribe?: 'all' | 'half' | 'none';
+};
+
+type Counts = { rebuilt: number; patched: number; inconsistencies: number; deferred: number; pending: number; stale: number; rebuilds: number };
+
+function runProperty(seed: number, ticks: number, engineOptions: Partial<EngineOptions> = {}, plan: Plan = {}): Counts {
   const orders = propertyOrders(seed, ROWS);
   const store = storeFrom(orders, ROWS + 8);
   const engine = new QueryEngine(store, opts(engineOptions));
   const rng = mulberry32(seed * 7919);
   const world: World = { store, rng, nextId: 80_000_000, newWords: 0, ids: [] };
   const probes = buildProbes(engine, rng, orders, 26);
-  let rebuilt = 0;
-  let patched = 0;
+  const subscribe = plan.subscribe ?? 'all';
+  [...engine.views()].forEach((v, i) => {
+    if (subscribe === 'all' || (subscribe === 'half' && i % 2 === 0)) v.refs++;
+  });
+  const counts: Counts = { rebuilt: 0, patched: 0, inconsistencies: 0, deferred: 0, pending: 0, stale: 0, rebuilds: 0 };
+  let clock = 1_000_000;
 
   for (let t = 0; t < ticks; t++) {
     const cs = randomTick(world);
-    for (const c of engine.applyChanges(cs)) {
-      if (c.rebuilt) rebuilt++;
-      else patched++;
+    for (const c of engine.applyChanges(cs, plan.budget?.(t) ?? Infinity)) {
+      if (c.rebuilt) counts.rebuilt++;
+      else counts.patched++;
+    }
+    const last = engine.stats().lastApply;
+    counts.deferred += last.deferred;
+    counts.pending += last.pendingRebuild;
+    counts.stale += last.unsubscribed;
+    if (plan.drainRebuilds === true) {
+      for (;;) {
+        clock += 5_000;
+        const view = engine.takeRebuild(clock);
+        if (view === null) break;
+        engine.rebuildView(view, clock);
+        counts.rebuilds++;
+      }
     }
     if (t % 11 === 5) {
       for (const field of store.staleRankFields()) for (const _ of store.refreshStringRanks(field, 200)) void _;
     }
-    // Every tick, and then also the cheap string-rank maintenance, must leave every cached view equal to a fresh build.
+    if (plan.compareAt?.(t) === false) continue;
+    // After the tick (and any deferred work), every cached view must equal a fresh build.
     const fresh = new QueryEngine(store, opts());
     for (const probe of probes) {
       const label = `seed ${seed} tick ${t} ${probe.label} ${JSON.stringify({ trader: probe.traderId, g: probe.req.rowGroupCols.map((c) => c.id), k: probe.req.groupKeys, s: probe.req.sortModel, f: probe.req.filterModel })}`;
@@ -205,9 +236,8 @@ function runProperty(seed: number, ticks: number, engineOptions: Partial<EngineO
       expectSameRows(actual.value.rows, expected.value.rows, probe.req.rowGroupCols.length > probe.req.groupKeys.length, label);
     }
   }
-  let inconsistencies = 0;
-  for (const v of engine.views()) inconsistencies += v.rebuiltAfterInconsistency;
-  return { rebuilt, patched, inconsistencies };
+  for (const v of engine.views()) counts.inconsistencies += v.rebuiltAfterInconsistency;
+  return counts;
 }
 
 describe('incremental view maintenance equals a full rebuild (property)', () => {
@@ -225,5 +255,45 @@ describe('incremental view maintenance equals a full rebuild (property)', () => 
     expect(result.inconsistencies).toBe(0);
     expect(result.rebuilt).toBeGreaterThan(0);
     expect(result.patched).toBeGreaterThan(0);
+  }, 180_000);
+
+  it('carried-over changes: views skipped for lack of flush budget catch up exactly when they are next patched', () => {
+    // Two ticks in three have no budget at all, so every view carries the changes of up to two ticks.
+    const result = runProperty(6, 36, {}, { budget: (t) => (t % 3 === 2 ? Infinity : 0), compareAt: (t) => t % 3 === 2 });
+    expect(result.deferred).toBeGreaterThan(100);
+    expect(result.inconsistencies).toBe(0);
+    expect(result.rebuilt).toBe(0);
+  }, 180_000);
+
+  it('a partial budget defers some views and patches the rest, and the result is still exact once everything has run', () => {
+    const result = runProperty(7, 30, {}, { budget: (t) => (t % 4 === 3 ? Infinity : 0.02), compareAt: (t) => t % 4 === 3 });
+    expect(result.deferred).toBeGreaterThan(0);
+    expect(result.patched).toBeGreaterThan(0);
+    expect(result.inconsistencies).toBe(0);
+  }, 180_000);
+
+  it('deferred rebuilds: a view over the structural threshold waits, is rebuilt between ticks, and equals a fresh build', () => {
+    const result = runProperty(8, 25, { structuralRebuildThreshold: 4, deferRebuilds: true }, { drainRebuilds: true });
+    expect(result.pending).toBeGreaterThan(0);
+    expect(result.rebuilds).toBeGreaterThan(0);
+    expect(result.rebuilt).toBe(0);
+    expect(result.inconsistencies).toBe(0);
+  }, 180_000);
+
+  it('carry and deferred rebuild together', () => {
+    const result = runProperty(9, 30, { structuralRebuildThreshold: 3, deferRebuilds: true }, { budget: (t) => (t % 3 === 2 ? Infinity : 0), compareAt: (t) => t % 3 === 2, drainRebuilds: true });
+    expect(result.deferred).toBeGreaterThan(0);
+    expect(result.rebuilds).toBeGreaterThan(0);
+    expect(result.inconsistencies).toBe(0);
+  }, 180_000);
+
+  it('views nobody tracks are not patched, and are rebuilt correctly on their next request', () => {
+    const none = runProperty(10, 20, { patchUnsubscribed: false }, { subscribe: 'none' });
+    expect(none.patched).toBe(0);
+    expect(none.stale).toBeGreaterThan(0);
+    const half = runProperty(11, 20, { patchUnsubscribed: false }, { subscribe: 'half' });
+    expect(half.patched).toBeGreaterThan(0);
+    expect(half.stale).toBeGreaterThan(0);
+    expect(half.inconsistencies).toBe(0);
   }, 180_000);
 });

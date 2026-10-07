@@ -122,6 +122,11 @@ export class ClientSession {
     this.deps.live?.()?.unregister(this);
   }
 
+  /** The view this client follows was rebuilt outside a flush; the grid must refresh what it holds. */
+  onViewRebuilt(view: View): void {
+    if (!this.closed && this.tracker?.view === view) this.tracker.markAllDirty();
+  }
+
   /** The view this client follows, if it has asked for rows. */
   get trackedView(): View | null {
     return this.tracker?.view ?? null;

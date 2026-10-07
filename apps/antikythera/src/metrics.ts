@@ -22,6 +22,10 @@ export type RuntimeMetrics = {
   ingest(type: IngestType, count?: number): void;
   writeBehind(info: { batchSize: number; seconds: number; ok: boolean }): void;
   command(outcome: string, seconds: number): void;
+  /** What a flush did with the cached views. */
+  views(stats: { patched: number; deferred: number; unsubscribed: number; pendingRebuild: number; stale: number }): void;
+  /** A deferred view rebuild ran. */
+  rebuild(seconds: number): void;
 };
 
 /** Where the scrape-time gauges read their values from. Each returns null while that part of the server is not up. */
@@ -69,6 +73,10 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
   private readonly writeBehindSeconds: Histogram;
   private readonly writeBehindFailures: Counter;
   private readonly commandSeconds: Histogram;
+  private readonly viewOutcomes: Counter;
+  private readonly rebuildSeconds: Histogram;
+  private readonly viewsStale: Gauge;
+  private readonly viewsPending: Gauge;
   private readonly connections: Gauge;
   private sources: MetricSources | null = null;
 
@@ -126,6 +134,15 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
       buckets: SECONDS_SLOW,
       registers,
     });
+    this.viewOutcomes = new Counter({
+      name: 'apeiron_flush_views_total',
+      help: 'Cached views per flush by outcome: patched, deferred (flush budget spent, changes carried over), unsubscribed (no client tracks it, so it is not patched), pending_rebuild (waiting for a deferred rebuild).',
+      labelNames: ['outcome'],
+      registers,
+    });
+    this.rebuildSeconds = new Histogram({ name: 'apeiron_view_rebuild_duration_seconds', help: 'Duration of one deferred view rebuild.', buckets: SECONDS_FAST, registers });
+    this.viewsStale = new Gauge({ name: 'apeiron_views_stale', help: 'Cached views without derived state because no client tracks them.', registers });
+    this.viewsPending = new Gauge({ name: 'apeiron_views_rebuild_pending', help: 'Views waiting for a deferred rebuild after the last flush.', registers });
     this.registerScrapeGauges();
   }
 
@@ -195,6 +212,19 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
 
   command(outcome: string, seconds: number): void {
     this.commandSeconds.labels(outcome).observe(seconds);
+  }
+
+  views(stats: { patched: number; deferred: number; unsubscribed: number; pendingRebuild: number; stale: number }): void {
+    if (stats.patched > 0) this.viewOutcomes.labels('patched').inc(stats.patched);
+    if (stats.deferred > 0) this.viewOutcomes.labels('deferred').inc(stats.deferred);
+    if (stats.unsubscribed > 0) this.viewOutcomes.labels('unsubscribed').inc(stats.unsubscribed);
+    if (stats.pendingRebuild > 0) this.viewOutcomes.labels('pending_rebuild').inc(stats.pendingRebuild);
+    this.viewsStale.set(stats.stale);
+    this.viewsPending.set(stats.pendingRebuild);
+  }
+
+  rebuild(seconds: number): void {
+    this.rebuildSeconds.observe(seconds);
   }
 
   /** The Prometheus text exposition. */

@@ -74,6 +74,11 @@ export class ClientTracker {
     return this.routes.has(routeKey);
   }
 
+  /** A view rebuild was deferred and has now run: every route the client tracks must be refreshed. */
+  markAllDirty(): void {
+    for (const [key, r] of this.routes) this.pending.dirty.set(key, r.route);
+  }
+
   /** Whether any change is waiting to be sent. */
   get hasPending(): boolean {
     const p = this.pending;

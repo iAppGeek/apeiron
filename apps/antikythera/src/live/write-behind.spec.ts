@@ -2,7 +2,7 @@ import { InMemoryOrderRepository } from '@apeiron/mnemosyne';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { makeStore } from '../testing/orders.js';
 import { LiveStore } from './live-store.js';
-import { WriteBehind } from './write-behind.js';
+import { WRITE_CHUNK, WriteBehind } from './write-behind.js';
 
 const log = { warn: vi.fn(), error: vi.fn() };
 
@@ -95,6 +95,27 @@ describe('WriteBehind', () => {
     await wb.flush();
     expect(writeBehind).toHaveBeenLastCalledWith(expect.objectContaining({ batchSize: 1, ok: true }));
     expect(live.dirtyCount).toBe(0);
+  });
+
+  it('writes a large backlog in bounded chunks and acknowledges only after the last one', async () => {
+    const rows = Array.from({ length: WRITE_CHUNK * 2 + 5 }, () => ({ status: 'LIVE' as const, currencyPair: 'EURUSD' as const, numFills: 0 }));
+    const store = makeStore(rows);
+    const live = new LiveStore(store, log);
+    live.init();
+    const repo = new InMemoryOrderRepository();
+    const ack = vi.fn();
+    for (let i = 0; i < store.size; i++) live.enqueueEvent({ type: 'UPDATE', order: { orderId: store.orderAt(i).orderId, numFills: 1 }, ts: 1 }, ack);
+    live.flush(1_000);
+    const sizes: number[] = [];
+    const acksSeen: number[] = [];
+    vi.spyOn(repo, 'upsertMany').mockImplementation(async (orders) => {
+      sizes.push(orders.length);
+      acksSeen.push(ack.mock.calls.length);
+    });
+    await new WriteBehind(live, repo, log, 500).flush();
+    expect(sizes).toEqual([WRITE_CHUNK, WRITE_CHUNK, 5]);
+    expect(acksSeen).toEqual([0, 0, 0]);
+    expect(ack).toHaveBeenCalledTimes(1);
   });
 
   it('runs on its interval and stop() flushes what is left', async () => {

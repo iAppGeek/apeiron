@@ -54,4 +54,25 @@ describe('ChangeSet', () => {
     expect(cs.prevOf(2)).toBeUndefined();
     expect(cs.prevOf(3)).toBeUndefined();
   });
+
+  it('merges a later tick into an earlier one: first old value wins, new rows stay new', () => {
+    const first = new ChangeSet();
+    first.noteUpdate(1, ['venue'], { venue: 'EBS' });
+    first.noteNew(2);
+    first.noteUpdate(4, ['filledQty'], { filledQty: 1 });
+    const later = new ChangeSet();
+    later.noteUpdate(1, ['venue', 'side'], { venue: 'LMAX', side: 'BUY' });
+    later.noteUpdate(2, ['filledQty'], { filledQty: 5 });
+    later.noteNew(3);
+    later.noteUpdate(7, ['orderQty'], { orderQty: 9 });
+    first.merge(later);
+    expect(first.entries.get(1)?.prev).toEqual({ venue: 'EBS', side: 'BUY' });
+    expect([...(first.entries.get(1)?.fields ?? [])].sort()).toEqual(['side', 'venue']);
+    expect(first.entries.get(2)?.isNew).toBe(true);
+    expect(first.entries.get(3)?.isNew).toBe(true);
+    expect(first.entries.get(4)?.prev).toEqual({ filledQty: 1 });
+    expect(first.entries.get(7)?.prev).toEqual({ orderQty: 9 });
+    expect(first.size).toBe(5);
+    expect(later.size).toBe(4);
+  });
 });

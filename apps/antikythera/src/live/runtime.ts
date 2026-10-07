@@ -52,6 +52,8 @@ export type LiveRuntimeOptions = {
   /** Wait between attempts to attach to the streams (hermes creates them, so they may not exist yet). */
   retryMs?: number;
   metrics?: RuntimeMetrics;
+  /** Most time one flush may spend patching views before the rest wait for the next tick (default 40 ms). */
+  flushBudgetMs?: number;
 };
 
 export type FlushStats = {
@@ -88,6 +90,7 @@ export class LiveRuntime implements LiveHooks {
   private timers: ReturnType<typeof setInterval>[] = [];
   private flushing = false;
   private refreshing = false;
+  private rebuilding = false;
   private attachTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private attached = false;
@@ -228,7 +231,12 @@ export class LiveRuntime implements LiveHooks {
       const cs = this.live.flush(now);
       const age = this.live.lastFlushAgeMs;
       if (age !== null) this.options.metrics?.eventAge(age / 1000);
-      const changes: ViewChanges[] = cs.size > 0 ? this.options.engine.applyChanges(cs) : [];
+      const engine = this.options.engine;
+      let changes: ViewChanges[] = [];
+      if (cs.size > 0 || engine.hasDeferredWork()) {
+        changes = engine.applyChanges(cs, this.options.flushBudgetMs ?? 40);
+        this.options.metrics?.views(engine.stats().lastApply);
+      }
       const byView = new Map<View, ViewChanges>(changes.map((c): [View, ViewChanges] => [c.view, c]));
       for (const session of [...this.sessions]) {
         try {
@@ -251,11 +259,42 @@ export class LiveRuntime implements LiveHooks {
       s.lastChanges = cs.size;
       s.totalChanges += cs.size;
       s.lastViews = changes.length;
+      this.scheduleRebuilds();
     } catch (error) {
       this.options.log.error({ err: error }, 'flush failed');
     } finally {
       this.flushing = false;
     }
+  }
+
+  // ---- deferred view rebuilds
+
+  /**
+   * Views a tick could not patch (too many structural changes) are rebuilt after the tick's deltas have gone out,
+   * each at most once a second and one per event-loop turn, so the loop stays responsive. The clients that track a
+   * rebuilt view are told to refresh every route they hold.
+   */
+  private scheduleRebuilds(): void {
+    if (this.rebuilding || this.stopped || this.options.engine.takeRebuild() === null) return;
+    this.rebuilding = true;
+    void (async (): Promise<void> => {
+      try {
+        for (;;) {
+          await yieldToLoop();
+          if (this.stopped) return;
+          const view = this.options.engine.takeRebuild();
+          if (view === null) return;
+          const t0 = performance.now();
+          this.options.engine.rebuildView(view);
+          this.options.metrics?.rebuild((performance.now() - t0) / 1000);
+          for (const session of this.sessions) session.onViewRebuilt(view);
+        }
+      } catch (error) {
+        this.options.log.error({ err: error }, 'deferred view rebuild failed');
+      } finally {
+        this.rebuilding = false;
+      }
+    })();
   }
 
   // ---- string ranks

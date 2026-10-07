@@ -15,7 +15,22 @@ export type EngineOptions = ViewCacheOptions & {
   maxBlockRows: number;
   /** Structural changes in one tick above which a view is rebuilt instead of patched (default 5,000). */
   structuralRebuildThreshold?: number;
+  /**
+   * Keep patching views that no client tracks (default false: they are marked stale and rebuilt on their next
+   * request). Tests that build views without tracking them turn this on.
+   */
+  patchUnsubscribed?: boolean;
+  /**
+   * Mark a view `rebuildPending` instead of rebuilding it inside `applyChanges` when a tick has more structural
+   * changes than the threshold (default true; the caller then runs `takeRebuild` / `rebuildView`).
+   */
+  deferRebuilds?: boolean;
+  /** Least time between deferred rebuilds of one view, in ms (default 1,000). */
+  rebuildIntervalMs?: number;
 };
+
+/** What the last `applyChanges` did with the cached views. */
+export type ApplyStats = { patched: number; deferred: number; unsubscribed: number; pendingRebuild: number; stale: number };
 
 /** What a `getRows` handed back, for the per-client block tracking behind live deltas. */
 export type TrackedBlock = {
@@ -41,7 +56,7 @@ export type RowsResult = {
   track: TrackedBlock;
 };
 
-export type EngineStats = { cache: ViewCacheStats };
+export type EngineStats = { cache: ViewCacheStats; lastApply: ApplyStats; rebuilds: number };
 
 /**
  * Serves SSRM block requests and set-filter value lists from the columnar store. Not tied to any
@@ -52,6 +67,8 @@ export class QueryEngine {
   private readonly filterValueCache = new Map<string, string[]>();
   /** The shared 0..n-1 array that views with no filter use as their root. Only ever appended to. */
   private readonly identity = RowBuf.empty();
+  private lastApply: ApplyStats = { patched: 0, deferred: 0, unsubscribed: 0, pendingRebuild: 0, stale: 0 };
+  private rebuildCount = 0;
 
   constructor(
     private readonly store: ColumnarStore,
@@ -69,7 +86,7 @@ export class QueryEngine {
     const q = query.value;
 
     let view = this.cache.get(q.viewKey);
-    const built = view === undefined;
+    const built = view === undefined || view.stale;
     if (view === undefined) {
       view = this.buildView(q);
       this.cache.set(q.viewKey, view);
@@ -93,14 +110,75 @@ export class QueryEngine {
    * per view, for building client deltas. Set-filter value lists are dropped only when a dictionary gained a
    * value that the list for that trader scope lacks.
    */
-  applyChanges(cs: ChangeSet): ViewChanges[] {
+  applyChanges(cs: ChangeSet, budgetMs = Infinity): ViewChanges[] {
     const grown = this.store.takeDictionaryGrowth();
     this.syncIdentity();
     this.refreshFilterValues(cs, grown);
+    const t0 = performance.now();
+    const stats: ApplyStats = { patched: 0, deferred: 0, unsubscribed: 0, pendingRebuild: 0, stale: 0 };
+    const active: View[] = [];
+    for (const view of this.cache.values()) {
+      if (view.refs === 0 && this.options.patchUnsubscribed !== true) {
+        view.markStale();
+        stats.unsubscribed++;
+        continue;
+      }
+      if (view.rebuildPending) {
+        stats.pendingRebuild++;
+        continue;
+      }
+      view.deferRebuilds = this.options.deferRebuilds !== false;
+      active.push(view);
+    }
+    // The views the most clients are watching go first; a view skipped for several ticks goes ahead of them.
+    active.sort((a, b) => Number(b.deferredTicks >= 3) - Number(a.deferredTicks >= 3) || b.refs - a.refs);
     const out: ViewChanges[] = [];
-    for (const view of this.cache.values()) out.push(view.applyChanges(cs, grown));
+    for (const view of active) {
+      if (performance.now() - t0 >= budgetMs) {
+        view.defer(cs, grown);
+        stats.deferred++;
+        continue;
+      }
+      out.push(view.applyChanges(cs, grown));
+      if (view.rebuildPending) stats.pendingRebuild++;
+      else stats.patched++;
+    }
+    for (const view of this.cache.values()) if (view.stale) stats.stale++;
+    this.lastApply = stats;
     this.cache.rebalance('');
     return out;
+  }
+
+  /** True while some view carries changes it has not patched in, so a flush with an empty ChangeSet still has work. */
+  hasDeferredWork(): boolean {
+    for (const view of this.cache.values()) if (view.hasCarry) return true;
+    return false;
+  }
+
+  /**
+   * The next view due for a deferred rebuild: one that is tracked, waiting, and not rebuilt within the interval.
+   * Views that lost their last client are dropped to stale instead.
+   */
+  takeRebuild(now = Date.now()): View | null {
+    const interval = this.options.rebuildIntervalMs ?? 1_000;
+    for (const view of this.cache.values()) {
+      if (!view.rebuildPending) continue;
+      if (view.refs === 0 && this.options.patchUnsubscribed !== true) {
+        view.markStale();
+        continue;
+      }
+      if (now - view.lastRebuildAt >= interval) return view;
+    }
+    return null;
+  }
+
+  /** Rebuilds a view taken from `takeRebuild`. */
+  rebuildView(view: View, now = Date.now()): void {
+    this.syncIdentity();
+    view.rebuild();
+    view.lastRebuildAt = now;
+    this.rebuildCount++;
+    this.cache.rebalance('');
   }
 
   /** Evicts views nobody has used for `idleMs` and that no client tracks. */
@@ -149,7 +227,7 @@ export class QueryEngine {
   }
 
   stats(): EngineStats {
-    return { cache: this.cache.stats() };
+    return { cache: this.cache.stats(), lastApply: this.lastApply, rebuilds: this.rebuildCount };
   }
 
   /** Drops every cached view (benchmarks use this to measure cold requests). */

@@ -6,7 +6,7 @@ import { applyOrders, applyUpdates } from '../testing/apply.js';
 import { makeOrders, makeStore } from '../testing/orders.js';
 import { ClientTracker } from './tracker.js';
 
-const opts = { maxViews: 50, maxBytes: 1 << 30, maxBlockRows: 10_000 };
+const opts = { maxViews: 50, maxBytes: 1 << 30, maxBlockRows: 10_000, patchUnsubscribed: true, deferRebuilds: false };
 const req = (extra: Partial<SsrmRequest> = {}): SsrmRequest => ({
   startRow: 0,
   endRow: 100,
@@ -338,5 +338,15 @@ describe('ClientTracker: block bookkeeping', () => {
     expect(w.tracker.build(w.store, 1)).toBeNull();
     w.collect([], applyUpdates(w.store, w.engine, [{ orderId: 'T0000001', marketMid: 1 }]).cs);
     expect(w.tracker.hasPending).toBe(false);
+  });
+});
+
+describe('ClientTracker.markAllDirty', () => {
+  it('flags every tracked route for a refresh, as after a deferred rebuild', () => {
+    const w = world();
+    w.get(req());
+    w.tracker.markAllDirty();
+    expect(w.tracker.build(w.store, 1)?.dirtyRoutes).toEqual([[]]);
+    expect(w.tracker.build(w.store, 2)).toBeNull();
   });
 });

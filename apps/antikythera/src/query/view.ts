@@ -1,6 +1,6 @@
 import { COLUMN_BY_FIELD, type OrderField, type Row } from '@apeiron/logos';
 import type { ColumnarStore } from '../store/columnar-store.js';
-import { maskOf, type ChangeSet, type FieldMask } from './changeset.js';
+import { ChangeSet, maskOf, type FieldMask } from './changeset.js';
 import { compileFilter, filterRows, type Predicate } from './filter.js';
 import {
   buildGroupLevel,
@@ -18,6 +18,9 @@ const DAY_MS = 86_400_000;
 
 /** Above this many structural changes in one tick a view is rebuilt instead of patched (Appendix D). */
 export const STRUCTURAL_REBUILD_THRESHOLD = 5_000;
+
+/** A view that carries more changed rows than this many times its rebuild threshold is rebuilt rather than patched. */
+const CARRY_REBUILD_FACTOR = 4;
 
 /** The parts of a query that define a view (everything except the block range and group keys). */
 export type ViewSpec = Pick<NormalizedQuery, 'sort' | 'groupCols' | 'valueCols' | 'filter' | 'traderId'>;
@@ -119,6 +122,19 @@ export class View {
   /** Clients that track blocks of this view; a view with subscribers is never evicted. */
   refs = 0;
   lastUsed = Date.now();
+  /** No client tracks the view, so it is not patched: its derived state was dropped and the next request rebuilds it. */
+  stale = false;
+  /** Too many structural changes for a patch: the view waits for `rebuild()` (the engine schedules it) and is not patched meanwhile. */
+  rebuildPending = false;
+  /** When the view was last rebuilt (ms), for throttling deferred rebuilds. */
+  lastRebuildAt = 0;
+  /** Consecutive ticks the view was skipped for lack of flush budget. */
+  deferredTicks = 0;
+  /** When true, a tick over the rebuild threshold marks the view `rebuildPending` instead of rebuilding inside `applyChanges`. */
+  deferRebuilds = false;
+  /** Changes from ticks the view was too busy to patch, merged into one ChangeSet. */
+  private carry: ChangeSet | null = null;
+  private carryGrown = new Set<OrderField>();
   private root!: RouteNode;
   private ownsRoot = true;
   private preds: Predicate[] = [];
@@ -166,6 +182,7 @@ export class View {
 
   /** Number of rows in a route's block list (groups at a group level, rows at the leaf level), or null if unknown. */
   routeCount(route: readonly string[]): number | null {
+    if (this.stale) this.rebuild();
     const node = this.resolve(route);
     if (node === null) return null;
     if (route.length < this.spec.groupCols.length) return this.groupState(node, route.length).order.length;
@@ -175,6 +192,7 @@ export class View {
   /** Returns rows `[startRow, endRow)` of the route named by `groupKeys`, plus the route's exact row count. */
   getBlock(groupKeys: readonly string[], startRow: number, endRow: number): Block {
     this.lastUsed = Date.now();
+    if (this.stale) this.rebuild();
     const node = this.resolve(groupKeys);
     if (node === null) return { rows: [], rowCount: 0, kind: 'leaf', rowIdx: [], labels: [] };
     const depth = groupKeys.length;
@@ -205,6 +223,7 @@ export class View {
 
   /** Current group rows for the given keys of one group-level route (keys that no longer exist are skipped). */
   groupRows(route: readonly string[], labels: Iterable<string>): Row[] {
+    if (this.stale) this.rebuild();
     const node = this.resolve(route);
     if (node === null || route.length >= this.spec.groupCols.length) return [];
     const st = this.groupState(node, route.length);
@@ -218,7 +237,56 @@ export class View {
 
   /** Discards everything and rebuilds from the store's current contents. */
   rebuild(): void {
+    this.stale = false;
+    this.rebuildPending = false;
+    this.carry = null;
+    this.carryGrown = new Set();
+    this.deferredTicks = 0;
+    this.lastRebuildAt = Date.now();
     this.build();
+    this.bytes = this.measure();
+  }
+
+  /** Whether changes from skipped ticks are waiting to be patched in. */
+  get hasCarry(): boolean {
+    return this.carry !== null;
+  }
+
+  /** Rows carried over from skipped ticks. */
+  get carrySize(): number {
+    return this.carry?.size ?? 0;
+  }
+
+  /**
+   * Drops the derived state of a view nobody tracks (sorted leaves, group levels, the filtered set) so it costs
+   * nothing to keep and is not patched. The next request rebuilds it.
+   */
+  markStale(): void {
+    if (this.stale) return;
+    this.stale = true;
+    this.rebuildPending = false;
+    this.carry = null;
+    this.carryGrown = new Set();
+    this.root = { rows: RowBuf.empty() };
+    this.ownsRoot = true;
+    this.bytes = 0;
+  }
+
+  /**
+   * Skips this tick for lack of time: the tick's changes are folded into one pending ChangeSet that the next
+   * `applyChanges` patches in together with that tick's own (exact, because the first old value of each field
+   * wins). A carry that has grown past the point where a patch pays becomes a pending rebuild instead.
+   */
+  defer(cs: ChangeSet, grown: ReadonlySet<OrderField>): void {
+    this.deferredTicks++;
+    if (this.carry === null) this.carry = new ChangeSet();
+    this.carry.merge(cs);
+    for (const f of grown) this.carryGrown.add(f);
+    if (this.carry.size > this.rebuildThreshold * CARRY_REBUILD_FACTOR && this.deferRebuilds) {
+      this.carry = null;
+      this.carryGrown = new Set();
+      this.rebuildPending = true;
+    }
   }
 
   /**
@@ -228,6 +296,14 @@ export class View {
    */
   applyChanges(cs: ChangeSet, grown: ReadonlySet<OrderField>): ViewChanges {
     const changes: ViewChanges = { view: this, rebuilt: false, routes: new Map(), removedRoutes: [] };
+    if (this.carry !== null) {
+      this.carry.merge(cs);
+      cs = this.carry;
+      grown = new Set([...this.carryGrown, ...grown]);
+      this.carry = null;
+      this.carryGrown = new Set();
+    }
+    this.deferredTicks = 0;
     try {
       this.patch(cs, grown, changes);
     } catch (error) {
@@ -394,6 +470,10 @@ export class View {
     }
     if (entries.length === 0) return;
     if (structural > this.rebuildThreshold) {
+      if (this.deferRebuilds) {
+        this.rebuildPending = true;
+        return;
+      }
       this.build();
       changes.rebuilt = true;
       return;

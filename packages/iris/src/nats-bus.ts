@@ -23,6 +23,9 @@ export type NatsBusOptions = {
 
 const decoder = new TextDecoder();
 
+/** Messages a consumer pulls at a time: a bounded batch, so a stalled loop never has a huge backlog in flight. */
+export const CONSUME_BATCH = 500;
+
 /** The Bus over NATS core plus JetStream. Subjects captured by a stream are published through JetStream. */
 export class NatsBus implements Bus {
   private readonly js: JetStreamClient;
@@ -86,7 +89,7 @@ export class NatsBus implements Bus {
     const jsm = await this.manager();
     await ensureConsumer(jsm, spec);
     const consumer = await this.js.consumers.get(spec.stream, spec.durable);
-    const messages: ConsumerMessages = await consumer.consume({ max_messages: 1_000 });
+    const messages: ConsumerMessages = await consumer.consume({ max_messages: CONSUME_BATCH });
     void (async (): Promise<void> => {
       for await (const m of messages) {
         let payload: unknown;

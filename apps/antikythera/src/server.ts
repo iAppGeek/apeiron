@@ -39,6 +39,8 @@ export type ServerOptions = {
   maxPayload?: number;
   /** A getRows that builds its view in at least this long gets its event-loop lag logged. */
   slowBuildMs?: number;
+  /** Most time one flush may spend patching views (default 40 ms). */
+  flushBudgetMs?: number;
   /** The metrics registry served on `/metrics` (default: a new one). */
   metrics?: Metrics;
 };
@@ -218,6 +220,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
           summaryIntervalMs: options.summaryIntervalMs,
           commandTimeoutMs: options.commandTimeoutMs,
           metrics,
+          flushBudgetMs: options.flushBudgetMs,
         });
         runtime.start();
       }
