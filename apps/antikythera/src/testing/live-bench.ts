@@ -9,6 +9,12 @@ import { generateStore } from './dataset.js';
  * Run with `pnpm --filter @apeiron/antikythera exec tsx src/testing/live-bench.ts`.
  */
 const store = generateStore(1_000_000);
+// Optional second argument: make this many random rows LIVE first (the stress preset holds up to 5,000).
+const extraLive = Number(process.argv[3] ?? 0);
+{
+  const r = mulberry32(99);
+  for (let i = 0; i < extraLive; i++) store.updateRow(Math.floor(r() * store.size), { status: 'LIVE', avgFillPrice: 1.08, filledQty: 1_000_000, currencyPair: 'EURUSD' });
+}
 const engine = new QueryEngine(store, { maxViews: 64, maxBytes: 1 << 30, maxBlockRows: 5_000 });
 const base: SsrmRequest = { startRow: 0, endRow: 100, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [], filterModel: null };
 const agg = [
@@ -41,6 +47,7 @@ const live: number[] = [];
 for (let i = 0; i < store.size; i++) if (statusCol.dict.values[statusCol.codes[i] as number] === 'LIVE') live.push(i);
 console.log(`LIVE rows: ${live.length}, statuses: ${ORDER_STATUSES.length}`);
 
+let lastCount = 0;
 const rng = mulberry32(5);
 let nextId = 2_000_000_000;
 const perTick = Number(process.argv[2] ?? 1500);
@@ -49,8 +56,9 @@ const storeTimes: number[] = [];
 for (let tick = 0; tick < 100; tick++) {
   const s0 = performance.now();
   const cs = new ChangeSet();
-  for (let i = 0; i < perTick; i++) {
-    const row = live[Math.floor(rng() * live.length)] as number;
+  // Distinct rows, as the price join produces (each LIVE row once per tick).
+  const order = live.length <= perTick ? [...live] : Array.from({ length: perTick }, () => live[Math.floor(rng() * live.length)] as number);
+  for (const row of order) {
     const o = store.orderAt(row);
     const mid = o.marketMid * (1 + (rng() - 0.5) * 1e-4);
     const changes = derivePriceFields(o, { bid: mid * 0.99999, ask: mid * 1.00001 }, 1_800_000_000_000 + tick);
@@ -65,13 +73,14 @@ for (let tick = 0; tick < 100; tick++) {
       live.push(r.row);
     }
   }
+  lastCount = order.length;
   const s1 = performance.now();
   engine.applyChanges(cs);
   times.push(performance.now() - s1);
   storeTimes.push(s1 - s0);
 }
 const pct = (xs: number[], p: number): number => [...xs].sort((a, b) => a - b)[Math.floor((p / 100) * xs.length)] as number;
-console.log(`per tick: ${perTick} price-style row updates + 5 new orders against ${engine.stats().cache.views} cached views`);
+console.log(`per tick: ${lastCount} price-style row updates + 5 new orders against ${engine.stats().cache.views} cached views`);
 console.log(`applyChanges ms: p50 ${pct(times, 50).toFixed(2)} p95 ${pct(times, 95).toFixed(2)} max ${Math.max(...times).toFixed(2)}`);
 console.log(`store writes ms (incl. price maths): p50 ${pct(storeTimes, 50).toFixed(2)} max ${Math.max(...storeTimes).toFixed(2)}`);
 console.log(`view memory: ${Math.round(engine.stats().cache.bytes / 1048576)} MB, fallback rebuilds: ${[...engine.views()].reduce((a, v) => a + v.rebuiltAfterInconsistency, 0)}`);
