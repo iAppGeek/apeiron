@@ -611,8 +611,8 @@ docker compose --profile core --profile monitoring up --build   # full container
 | 4 Grid, 5a Live server, 5b Live client | ✅ merged | #4, #5, #6 / `cp-3` | `PHASE-4-review.md`, `PHASE-5A-review.md`, `CP-3-review.md` |
 | 6 Actions | ✅ merged | #7 | `PHASE-6-review.md` |
 | 7 Observability + load test | ✅ merged | #8 / `cp-4` | `CP-4-diagnosis.md`, `CP-4-review.md` |
-| 8 Ship | 🟡 about 95%: CP-5 fixes F1–F8 in progress, then merge | #9 / `cp-5` | `CP-5-review.md` |
-| 9 Resilience suite (Appendix G) | ⏳ next, not started | (none yet) | CP-6 |
+| 8 Ship | ✅ merged (CP-5 F1–F8 applied; AWS paused, never deployed) | #9 / `cp-5` | `CP-5-review.md` |
+| 9 Resilience suite (Appendix G) | 🟡 in progress | (none yet) | CP-6 |
 | 10 Demo pack (Opus) | ⏳ after CP-6 | (none yet) | (none) |
 
 **Working process:**
@@ -677,7 +677,7 @@ The browser holds 103–120 FPS, the anchor holds deep in the grid, and E2E pass
 - **Repo:** `iAppGeek/apeiron` (public). The git remote is HTTPS with a repo-local `gh` credential helper.
 
 ### Open items / next steps
-1. Phase 8: apply CP-5 F1–F8, get CI green, squash-merge PR #9.
+1. ~~Phase 8~~ done (#9 merged as 13b10d6).
 2. Phase 9: build Appendix G. Fix the client and server heartbeat (half-open detection) first. Then CP-6.
 3. Phase 10 (Opus): local E2E, the DevTools pass and screenshots, `docs/USER-GUIDE.md`, `docs/TESTING.md` (including the resilience scenarios), and the presentation deck.
 4. Known limitations to carry into the docs:
