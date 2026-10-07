@@ -69,6 +69,19 @@ export class MongoOrderRepository implements OrderRepository {
     );
   }
 
+  async loadCurrent(): Promise<Order[]> {
+    const docs = await this.orders
+      .find({ status: { $in: ['PENDING_START', 'LIVE', 'PAUSED'] } }, { projection: { _id: 0 } })
+      .sort({ _id: 1 })
+      .toArray();
+    return docs as unknown as Order[];
+  }
+
+  async maxOrderId(): Promise<string | null> {
+    const doc = await this.orders.find({}, { projection: { _id: 1 } }).sort({ _id: -1 }).limit(1).next();
+    return doc === null ? null : doc._id;
+  }
+
   count(): Promise<number> {
     return this.orders.countDocuments({});
   }

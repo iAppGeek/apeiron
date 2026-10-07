@@ -11,6 +11,9 @@ export type GroupSortSpec =
   | { kind: 'key'; desc: boolean }
   | { kind: 'agg'; index: number; desc: boolean };
 
+/** Running sums for one value column, indexed by group: enough to finalise sum, avg and wavg, and to adjust them. */
+export type AggAccum = { sum: Float64Array; cnt: Float64Array; wsum: Float64Array };
+
 export type GroupLevel = {
   field: OrderField;
   /** Group keys in display order. */
@@ -19,6 +22,8 @@ export type GroupLevel = {
   counts: Uint32Array;
   /** `aggs[j][g]` is the aggregate of value column `j` for group `g`; null when every value is null. */
   aggs: (number | null)[][];
+  /** `accum[j]` holds the running sums behind `aggs[j]`, by group in display order. */
+  accum: AggAccum[];
   /** Rows of group `g` are `part[offsets[g] .. offsets[g + 1])`, ascending by row index. */
   offsets: Uint32Array;
   part: Uint32Array;
@@ -82,28 +87,34 @@ function bucketize(store: ColumnarStore, rows: Uint32Array, field: OrderField): 
   throw new Error(`Column ${field} cannot be grouped`);
 }
 
-/** Per-bucket aggregate for one value column; `count` is the row count, the others skip nulls. Rows are visited in ascending row order. */
-function aggregate(
+/** Final value of one aggregate from its running sums (`count` is the group's row count and never null). */
+export function finalizeAgg(agg: ValueCol['agg'], sum: number, cnt: number, wsum: number, rowCount: number): number | null {
+  if (agg === 'count') return rowCount;
+  if (cnt === 0) return null;
+  switch (agg) {
+    case 'sum':
+      return sum;
+    case 'avg':
+      return sum / cnt;
+    case 'wavg':
+      return wsum > 0 ? sum / wsum : null;
+  }
+}
+
+/** Per-bucket running sums for one value column; nulls are skipped (and `count` needs none). Rows are visited in ascending row order. */
+function accumulate(
   store: ColumnarStore,
   rows: Uint32Array,
   bucketOf: Uint32Array,
   nb: number,
   vc: ValueCol,
-): (number | null)[] {
+): AggAccum {
   const m = rows.length;
-  if (vc.agg === 'count') {
-    // `count` is the group's row count (equal to childCount), never null.
-    const counts = new Array<number | null>(nb).fill(0);
-    for (let p = 0; p < m; p++) {
-      const b = bucketOf[p] as number;
-      counts[b] = (counts[b] as number) + 1;
-    }
-    return counts;
-  }
-  const col = store.column(vc.field);
   const sum = new Float64Array(nb);
   const cnt = new Float64Array(nb);
   const wsum = new Float64Array(nb);
+  if (vc.agg === 'count') return { sum, cnt, wsum };
+  const col = store.column(vc.field);
   if (col.kind === 'number') {
     const data = col.data;
     if (vc.agg === 'wavg') {
@@ -135,23 +146,36 @@ function aggregate(
       cnt[b] = (cnt[b] as number) + 1;
     }
   }
-  const out = new Array<number | null>(nb).fill(null);
-  for (let b = 0; b < nb; b++) {
-    const c = cnt[b] as number;
-    if (c === 0) continue;
-    switch (vc.agg) {
-      case 'sum':
-        out[b] = sum[b] as number;
-        break;
-      case 'avg':
-        out[b] = (sum[b] as number) / c;
-        break;
-      case 'wavg':
-        out[b] = (wsum[b] as number) > 0 ? (sum[b] as number) / (wsum[b] as number) : null;
-        break;
-    }
+  return { sum, cnt, wsum };
+}
+
+/** The group key of a raw column value (`YYYY-MM-DD` for dates, `(blank)` for a null date). */
+export function labelOfValue(field: OrderField, value: unknown): string {
+  if (COLUMN_BY_FIELD.get(field)?.type === 'date') {
+    return typeof value === 'number' && value === value ? dayKey(Math.floor(value / DAY_MS)) : BLANK_KEY;
   }
-  return out;
+  return value as string;
+}
+
+/**
+ * The comparator that orders group rows: sort entries in turn (a key or an aggregate, each ascending or
+ * descending), ties ending with the key in the direction of the last entry. Shared by the full build and
+ * the incremental update so both always agree on the order.
+ */
+export function groupOrderComparator<T>(
+  sortSpec: readonly GroupSortSpec[],
+  keyOrder: (item: T) => number,
+  aggValue: (index: number, item: T) => number,
+): (x: T, y: T) => number {
+  const tieDesc = sortSpec.length > 0 ? (sortSpec[sortSpec.length - 1] as GroupSortSpec).desc : false;
+  return (x, y) => {
+    for (const s of sortSpec) {
+      const d = s.desc ? -1 : 1;
+      const r = s.kind === 'key' ? keyOrder(x) - keyOrder(y) : aggValue(s.index, x) - aggValue(s.index, y);
+      if (r !== 0 && !Number.isNaN(r)) return d * Math.sign(r);
+    }
+    return (tieDesc ? -1 : 1) * Math.sign(keyOrder(x) - keyOrder(y));
+  };
 }
 
 /**
@@ -173,21 +197,19 @@ export function buildGroupLevel(
     const b = buckets.bucketOf[p] as number;
     bucketCounts[b] = (bucketCounts[b] as number) + 1;
   }
-  const bucketAggs = valueCols.map((vc) => aggregate(store, rows, buckets.bucketOf, nb, vc));
+  const bucketAccum = valueCols.map((vc) => accumulate(store, rows, buckets.bucketOf, nb, vc));
+  const bucketAggs = valueCols.map((vc, j) => {
+    const a = bucketAccum[j] as AggAccum;
+    return Array.from({ length: nb }, (_, b) =>
+      finalizeAgg(vc.agg, a.sum[b] as number, a.cnt[b] as number, a.wsum[b] as number, bucketCounts[b] as number),
+    );
+  });
 
   const order: number[] = [];
   for (let b = 0; b < nb; b++) if ((bucketCounts[b] as number) > 0) order.push(b);
 
   const aggVal = (j: number, b: number): number => (bucketAggs[j] as (number | null)[])[b] ?? -Infinity;
-  const tieDesc = sortSpec.length > 0 ? (sortSpec[sortSpec.length - 1] as GroupSortSpec).desc : false;
-  order.sort((x, y) => {
-    for (const s of sortSpec) {
-      const d = s.desc ? -1 : 1;
-      const r = s.kind === 'key' ? buckets.keyOrder(x) - buckets.keyOrder(y) : aggVal(s.index, x) - aggVal(s.index, y);
-      if (r !== 0 && !Number.isNaN(r)) return d * Math.sign(r);
-    }
-    return (tieDesc ? -1 : 1) * Math.sign(buckets.keyOrder(x) - buckets.keyOrder(y));
-  });
+  order.sort(groupOrderComparator<number>(sortSpec, (b) => buckets.keyOrder(b), aggVal));
 
   const g = order.length;
   const labels = order.map((b) => buckets.label(b));
@@ -207,12 +229,20 @@ export function buildGroupLevel(
     cursor[d] = (cursor[d] as number) + 1;
   }
   const aggs = bucketAggs.map((a) => order.map((b) => a[b] as number | null));
+  const accum = bucketAccum.map(
+    (a): AggAccum => ({
+      sum: Float64Array.from(order, (b) => a.sum[b] as number),
+      cnt: Float64Array.from(order, (b) => a.cnt[b] as number),
+      wsum: Float64Array.from(order, (b) => a.wsum[b] as number),
+    }),
+  );
   const indexByLabel = new Map(labels.map((l, i): [string, number] => [l, i]));
   return {
     field,
     labels,
     counts,
     aggs,
+    accum,
     offsets,
     part,
     indexByLabel,

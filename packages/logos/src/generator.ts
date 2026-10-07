@@ -56,7 +56,7 @@ export function currentOrderCounts(n: number): CurrentCounts {
 
 type MidTable = Map<CurrencyPair, number>;
 
-type Spec = {
+export type OrderSpec = {
   status: OrderStatus;
   createdAt: number;
   startTime: number;
@@ -73,6 +73,15 @@ const roundTo = (value: number, decimals: number): number => {
   return Math.round(value * f) / f;
 };
 const pad = (n: number): string => String(n).padStart(ID_PAD, '0');
+
+/** `ALG` + 8-digit zero-padded sequence, the only order id format. */
+export const formatOrderId = (seq: number): string => `ALG${pad(seq)}`;
+
+/** The sequence number inside an order id, or null when the id is not in the `ALG` format. */
+export function parseOrderSeq(orderId: string): number | null {
+  const m = /^ALG(\d{8})$/.exec(orderId);
+  return m === null ? null : Number(m[1]);
+}
 const floorDay = (ms: number): number => Math.floor(ms / DAY_MS) * DAY_MS;
 
 function ccyToUsd(ccy: string, mids: MidTable): number {
@@ -133,7 +142,12 @@ function strategyParamsFor(rng: Rng, algo: AlgoType, participation: number): str
   }
 }
 
-class OrderFactory {
+/**
+ * Builds complete 50-field orders with the generator's distributions. The generator drives it with a
+ * seeded stream; the mock middleware reuses it for new live orders (set `mids` to the current price
+ * levels and `seq` to the highest issued sequence number first).
+ */
+export class OrderFactory {
   readonly mids: MidTable = new Map();
   seq = 0;
 
@@ -154,7 +168,7 @@ class OrderFactory {
     return Math.min(100_000_000, Math.max(1_000_000, Math.round(raw / 100_000) * 100_000));
   }
 
-  create(spec: Spec): Order {
+  create(spec: OrderSpec): Order {
     const rng = this.rng;
     const seq = ++this.seq;
     const trader = pickWeighted(rng, TRADER_SPECS, TRADER_WEIGHTS);
@@ -238,7 +252,7 @@ class OrderFactory {
       (spec.status === 'PENDING_START' ? spec.createdAt : Math.max(spec.startTime, spec.now - Math.floor(rng() * 60_000)));
 
     return {
-      orderId: `ALG${pad(seq)}`,
+      orderId: formatOrderId(seq),
       parentOrderId: `PAR${pad(seq)}`,
       clientOrderId: `CL-${trader.traderId}-${seq.toString(36).toUpperCase().padStart(7, '0')}`,
       traderId: trader.traderId,

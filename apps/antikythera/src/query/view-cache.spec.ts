@@ -5,7 +5,7 @@ import { View } from './view.js';
 
 const store = makeStore([{ orderQty: 1 }]);
 const mk = (bytes: number): View => {
-  const v = new View(store, { sort: [], groupCols: [], valueCols: [] }, new Uint32Array(1), true);
+  const v = new View(store, { sort: [], groupCols: [], valueCols: [], filter: {}, traderId: 'ALL' });
   v.bytes = bytes;
   return v;
 };
@@ -58,6 +58,23 @@ describe('ViewCache', () => {
     const cache = new ViewCache({ maxViews: 1, maxBytes: 10 });
     cache.set('big', mk(1_000));
     expect(cache.has('big')).toBe(true);
+  });
+
+  it('never evicts a view that a client tracks, and sweeps idle untracked views', () => {
+    const cache = new ViewCache({ maxViews: 1, maxBytes: 1_000 });
+    const tracked = mk(1);
+    tracked.refs = 1;
+    cache.set('tracked', tracked);
+    cache.set('other', mk(1));
+    expect(cache.has('tracked')).toBe(true);
+    const idle = mk(1);
+    idle.lastUsed = 0;
+    cache.set('idle', idle);
+    tracked.lastUsed = 0;
+    expect(cache.sweep(60_000, 100_000)).toBeGreaterThanOrEqual(1);
+    expect(cache.has('idle')).toBe(false);
+    expect(cache.has('tracked')).toBe(true);
+    expect([...cache.values()]).toContain(tracked);
   });
 
   it('clears everything', () => {

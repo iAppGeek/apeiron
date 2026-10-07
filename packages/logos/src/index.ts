@@ -6,3 +6,7 @@ export * from './protocol.js';
 export * from './codec.js';
 export * from './filter-model.js';
 export * from './fixtures.js';
+export * from './lifecycle.js';
+export * from './events.js';
+export * from './bus.js';
+export * from './memory-bus.js';

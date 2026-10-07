@@ -1,16 +1,33 @@
 import { COLUMN_BY_FIELD, type OrderField, type Row, type SsrmRequest } from '@apeiron/logos';
 import type { ColumnarStore } from '../store/columnar-store.js';
+import type { ChangeSet } from './changeset.js';
 import { fail, ok, type Result } from './errors.js';
-import { TRADER_ALL, compileFilter, filterRows } from './filter.js';
+import { TRADER_ALL } from './filter.js';
 import { normalizeRequest, type NormalizedQuery } from './request.js';
+import { RowBuf } from './row-buf.js';
 import { ViewCache, type ViewCacheOptions, type ViewCacheStats } from './view-cache.js';
-import { View } from './view.js';
+import { View, routeKeyOf, type ViewChanges } from './view.js';
 
 export const SET_FILTER_VALUE_CAP = 5_000;
 
 export type EngineOptions = ViewCacheOptions & {
   /** Largest `endRow - startRow` a client may request. */
   maxBlockRows: number;
+  /** Structural changes in one tick above which a view is rebuilt instead of patched (default 5,000). */
+  structuralRebuildThreshold?: number;
+};
+
+/** What a `getRows` handed back, for the per-client block tracking behind live deltas. */
+export type TrackedBlock = {
+  view: View;
+  route: string[];
+  routeKey: string;
+  startRow: number;
+  kind: 'leaf' | 'group';
+  /** Row indexes of the leaf rows returned. */
+  rowIdx: number[];
+  /** Group keys of the group rows returned. */
+  labels: string[];
 };
 
 export type RowsResult = {
@@ -21,9 +38,10 @@ export type RowsResult = {
   ms: number;
   /** True when the request had to build its view (a cold request). */
   built: boolean;
+  track: TrackedBlock;
 };
 
-export type EngineStats = { cache: ViewCacheStats; storeVersion: number };
+export type EngineStats = { cache: ViewCacheStats };
 
 /**
  * Serves SSRM block requests and set-filter value lists from the columnar store. Not tied to any
@@ -32,20 +50,20 @@ export type EngineStats = { cache: ViewCacheStats; storeVersion: number };
 export class QueryEngine {
   private readonly cache: ViewCache;
   private readonly filterValueCache = new Map<string, string[]>();
-  private identity: Uint32Array | null = null;
-  private seenVersion: number;
+  /** The shared 0..n-1 array that views with no filter use as their root. Only ever appended to. */
+  private readonly identity = RowBuf.empty();
 
   constructor(
     private readonly store: ColumnarStore,
     private readonly options: EngineOptions,
   ) {
     this.cache = new ViewCache(options);
-    this.seenVersion = store.version;
+    this.syncIdentity();
+    store.takeDictionaryGrowth();
   }
 
   getRows(traderId: string, req: SsrmRequest): Result<RowsResult> {
     const t0 = performance.now();
-    this.syncVersion();
     const query = normalizeRequest(traderId, req, this.options);
     if (!query.ok) return query;
     const q = query.value;
@@ -58,12 +76,50 @@ export class QueryEngine {
     }
     const block = view.getBlock(q.groupKeys, q.startRow, q.endRow);
     this.cache.rebalance(q.viewKey);
-    return ok({ rows: block.rows, rowCount: block.rowCount, ms: performance.now() - t0, built });
+    const track: TrackedBlock = {
+      view,
+      route: q.groupKeys,
+      routeKey: routeKeyOf(q.groupKeys),
+      startRow: q.startRow,
+      kind: block.kind,
+      rowIdx: block.rowIdx,
+      labels: block.labels,
+    };
+    return ok({ rows: block.rows, rowCount: block.rowCount, ms: performance.now() - t0, built, track });
+  }
+
+  /**
+   * Applies one flush tick's ChangeSet to every cached view (never clearing them) and returns what changed
+   * per view, for building client deltas. Set-filter value lists are dropped only when a dictionary gained a
+   * value that the list for that trader scope lacks.
+   */
+  applyChanges(cs: ChangeSet): ViewChanges[] {
+    const grown = this.store.takeDictionaryGrowth();
+    this.syncIdentity();
+    this.refreshFilterValues(cs, grown);
+    const out: ViewChanges[] = [];
+    for (const view of this.cache.values()) out.push(view.applyChanges(cs, grown));
+    this.cache.rebalance('');
+    return out;
+  }
+
+  /** Evicts views nobody has used for `idleMs` and that no client tracks. */
+  sweep(idleMs: number, now = Date.now()): number {
+    return this.cache.sweep(idleMs, now);
+  }
+
+  /** Rebuilds every cached view from the store (used when an append breaks ascending `orderId` order). */
+  rebuildAll(): void {
+    this.syncIdentity();
+    for (const view of this.cache.values()) view.rebuild();
+  }
+
+  views(): IterableIterator<View> {
+    return this.cache.values();
   }
 
   /** Distinct values of a set-filter column within the trader's scope, ascending, capped at 5,000. */
   setFilterValues(traderId: string, colId: string): Result<string[]> {
-    this.syncVersion();
     const meta = COLUMN_BY_FIELD.get(colId as OrderField);
     if (meta === undefined) return fail('UNKNOWN_COLUMN', `Unknown column: ${colId}`);
     if (meta.filter !== 'set') return fail('UNSUPPORTED_COLUMN', `Column ${colId} has no set filter`);
@@ -93,7 +149,7 @@ export class QueryEngine {
   }
 
   stats(): EngineStats {
-    return { cache: this.cache.stats(), storeVersion: this.seenVersion };
+    return { cache: this.cache.stats() };
   }
 
   /** Drops every cached view (benchmarks use this to measure cold requests). */
@@ -103,23 +159,35 @@ export class QueryEngine {
   }
 
   private buildView(q: NormalizedQuery): View {
-    const preds = compileFilter(this.store, q.filter, q.traderId);
-    const n = this.store.size;
-    if (preds.length === 0) return new View(this.store, q, this.allRows(n), false);
-    return new View(this.store, q, filterRows(n, preds), true);
+    this.syncIdentity();
+    return new View(this.store, q, this.identity, q.viewKey, this.options.structuralRebuildThreshold);
   }
 
-  private allRows(n: number): Uint32Array {
-    if (this.identity === null || this.identity.length !== n) this.identity = filterRows(n, []);
-    return this.identity;
+  private syncIdentity(): void {
+    this.identity.appendRange(this.identity.len, this.store.size);
   }
 
-  /** Cached views and value lists describe the store as it was; any append invalidates them. */
-  private syncVersion(): void {
-    if (this.store.version === this.seenVersion) return;
-    this.seenVersion = this.store.version;
-    this.cache.clear();
-    this.filterValueCache.clear();
-    this.identity = null;
+  private refreshFilterValues(cs: ChangeSet, grown: ReadonlySet<OrderField>): void {
+    if (this.filterValueCache.size === 0) return;
+    for (const key of [...this.filterValueCache.keys()]) {
+      const [traderId, colId] = key.split('\u0000') as [string, string];
+      const field = colId as OrderField;
+      if (grown.has(field)) {
+        this.filterValueCache.delete(key);
+        continue;
+      }
+      const values = this.filterValueCache.get(key) as string[];
+      const col = this.store.enumColumn(field);
+      const trader = this.store.enumColumn('traderId');
+      for (const e of cs.entries.values()) {
+        if (!e.isNew && !e.fields.has(field)) continue;
+        if (traderId !== TRADER_ALL && trader.dict.values[trader.codes[e.row] as number] !== traderId) continue;
+        const value = col.dict.values[col.codes[e.row] as number] as string;
+        if (!values.includes(value)) {
+          this.filterValueCache.delete(key);
+          break;
+        }
+      }
+    }
   }
 }

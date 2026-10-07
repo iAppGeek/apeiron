@@ -7,10 +7,18 @@ import {
   type ClientMsg,
   type Codec,
   type ErrorCode,
+  type LoadPreset,
   type ServerMsg,
   type TraderInfo,
 } from '@apeiron/logos';
+import type { ChangeSet } from './query/changeset.js';
+import type { ColumnarStore } from './store/columnar-store.js';
 import type { QueryEngine, RowsResult } from './query/engine.js';
+import type { View, ViewChanges } from './query/view.js';
+import { BackpressureGate, type BackpressureOptions } from './live/backpressure.js';
+import type { StatusSummary } from './live/counters.js';
+import type { ServerStats } from './live/system-stats.js';
+import { ClientTracker } from './live/tracker.js';
 import type { Connection, ConnectionHandlers, Frame } from './transport.js';
 
 export type SessionLogger = {
@@ -18,7 +26,24 @@ export type SessionLogger = {
   error(obj: Record<string, unknown>, msg: string): void;
 };
 
+/** What a live session needs from the runtime: registration for flush ticks, the load control, and summary data. */
+export type LiveHooks = {
+  register(session: ClientSession): void;
+  unregister(session: ClientSession): void;
+  setPreset(preset: LoadPreset): Promise<void>;
+  summary(traderId: string): StatusSummary;
+  stats(): ServerStats;
+  maxTrackedBlocks: number;
+  backpressure: BackpressureOptions;
+  summaryIntervalMs: number;
+};
+
+/** One flush tick as seen by a session. */
+export type FlushContext = { cs: ChangeSet; byView: ReadonlyMap<View, ViewChanges>; now: number; store: ColumnarStore };
+
 export type SessionDeps = {
+  /** Null (or returning null) until the store is loaded and the live runtime is up. */
+  live?: () => LiveHooks | null;
   /** Null until the store has finished loading. */
   engine: () => QueryEngine | null;
   log: SessionLogger;
@@ -46,6 +71,9 @@ export class ClientSession {
   private traderId = 'ALL';
   private clientId = '';
   private closed = false;
+  private tracker: ClientTracker | null = null;
+  private gate: BackpressureGate | null = null;
+  private lastSummaryAt = 0;
   private readonly traders: readonly TraderInfo[];
   private readonly now: () => number;
 
@@ -75,6 +103,56 @@ export class ClientSession {
 
   dispose(): void {
     this.closed = true;
+    this.tracker?.dispose();
+    this.deps.live?.()?.unregister(this);
+  }
+
+  /** The view this client follows, if it has asked for rows. */
+  get trackedView(): View | null {
+    return this.tracker?.view ?? null;
+  }
+
+  /**
+   * Called after every flush tick: folds the tick into this client's pending changes, then sends a delta if
+   * the socket has room (a held-back client keeps accumulating and gets one conflated delta once it drains),
+   * and a summary about once a second. A client that stays too far behind gets SLOW_CONSUMER and is closed.
+   */
+  onFlush(ctx: FlushContext): void {
+    const live = this.deps.live?.();
+    if (this.closed || !this.helloDone || live === null || live === undefined) return;
+    this.tracker ??= new ClientTracker(live.maxTrackedBlocks);
+    this.gate ??= new BackpressureGate(live.backpressure);
+    const tracker = this.tracker;
+    const view = tracker.view;
+    if (view !== null) tracker.collect(ctx.byView.get(view), ctx.cs);
+
+    const decision = this.gate.decide(this.connection.bufferedAmount, ctx.now);
+    if (decision === 'close') {
+      this.deps.log.warn({ clientId: this.clientId, buffered: this.connection.bufferedAmount }, 'closing slow consumer');
+      this.send({ t: 'error', code: 'SLOW_CONSUMER', message: 'The client is too far behind the server' });
+      this.connection.close(1013, 'slow consumer');
+      this.dispose();
+      return;
+    }
+    if (decision === 'hold') return;
+    const delta = tracker.build(ctx.store, ctx.now);
+    if (delta !== null) this.send(delta);
+    if (ctx.now - this.lastSummaryAt >= live.summaryIntervalMs) {
+      this.lastSummaryAt = ctx.now;
+      this.sendSummary(live, tracker);
+    }
+  }
+
+  private sendSummary(live: LiveHooks, tracker: ClientTracker): void {
+    const scope = live.summary(this.traderId);
+    const totalRows = tracker.view?.filteredCount ?? Object.values(scope.byStatus).reduce((a, b) => a + b, 0);
+    this.send({
+      t: 'summary',
+      byStatus: scope.byStatus,
+      liveNotionalUsd: scope.liveNotionalUsd,
+      totalRows,
+      server: live.stats(),
+    });
   }
 
   handleFrame(frame: Frame): void {
@@ -132,8 +210,10 @@ export class ClientSession {
       case 'setFilterValues':
         this.onSetFilterValues(msg);
         return;
-      case 'command':
       case 'control':
+        this.onControl(msg);
+        return;
+      case 'command':
         this.sendError(msg.reqId, 'NOT_IMPLEMENTED', `${msg.t} is not implemented yet`);
         return;
     }
@@ -148,6 +228,9 @@ export class ClientSession {
     this.traderId = msg.traderId;
     this.clientId = msg.clientId;
     this.helloDone = true;
+    this.tracker?.reset();
+    this.lastSummaryAt = 0;
+    this.deps.live?.()?.register(this);
     this.send({
       t: 'welcome',
       serverTime: this.now(),
@@ -169,7 +252,27 @@ export class ClientSession {
     }
     const { rows, rowCount, ms, built } = result.value;
     this.deps.onRows?.({ ms, built, rowCount });
+    const live = this.deps.live?.();
+    if (live !== null && live !== undefined) {
+      this.tracker ??= new ClientTracker(live.maxTrackedBlocks);
+      this.tracker.record(result.value.track);
+    }
     this.send({ t: 'rows', reqId: msg.reqId, rows, rowCount, ms: round(ms) });
+  }
+
+  private onControl(msg: Extract<ClientMsg, { t: 'control' }>): void {
+    const live = this.deps.live?.();
+    if (live === null || live === undefined) {
+      this.sendError(msg.reqId, 'NOT_IMPLEMENTED', 'control is not available without a message bus');
+      return;
+    }
+    live.setPreset(msg.preset).then(
+      () => this.send({ t: 'ack', reqId: msg.reqId }),
+      (error: unknown) => {
+        this.deps.log.error({ err: error }, 'failed to publish control.load');
+        this.sendError(msg.reqId, 'INTERNAL', 'Could not publish the load preset');
+      },
+    );
   }
 
   private onSetFilterValues(msg: Extract<ClientMsg, { t: 'setFilterValues' }>): void {

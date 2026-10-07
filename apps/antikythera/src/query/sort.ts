@@ -1,4 +1,4 @@
-import type { OrderField } from '@apeiron/logos';
+import type { Order, OrderField } from '@apeiron/logos';
 import type { ColumnarStore } from '../store/columnar-store.js';
 
 export type SortKey = { field: OrderField; desc: boolean };
@@ -25,9 +25,64 @@ export function sortRows(store: ColumnarStore, rows: Uint32Array, keys: readonly
   if (rows.length <= 1 || effective.length === 0) return rows.slice();
   const tieDesc = (effective[effective.length - 1] as SortKey).desc;
   if (LITTLE_ENDIAN && store.idsAscending) {
-    return radixSort(store, rows, effective, tieDesc);
+    const covered = rankCoverage(store, effective);
+    if (covered >= store.size) return radixSort(store, rows, effective, tieDesc);
+    // The string ranks lag behind appended rows (a background task catches them up). Radix-sort the rows
+    // the ranks cover, comparator-sort the few newer ones, and merge. Row indexes are ascending.
+    const split = lowerBound(rows, covered);
+    const tail = rows.length - split;
+    if (split > 0 && tail <= PARTIAL_TAIL_MAX) {
+      const head = radixSort(store, rows.subarray(0, split), effective, tieDesc);
+      const rest = comparatorSort(store, rows.subarray(split), effective, tieDesc);
+      return mergeSorted(head, rest, makeComparator(store, effective));
+    }
   }
   return comparatorSort(store, rows, effective, tieDesc);
+}
+
+/** Most rows past the string-rank coverage that a sort will merge in rather than fall back to a comparator sort. */
+const PARTIAL_TAIL_MAX = 50_000;
+
+/**
+ * How many leading rows every string key's ranks cover (Infinity when no key is a string column). A string
+ * column that has never been ranked is ranked now, once; after that, appends only make it stale.
+ */
+function rankCoverage(store: ColumnarStore, keys: readonly SortKey[]): number {
+  let covered = Number.POSITIVE_INFINITY;
+  for (const key of keys) {
+    if (key.field === 'orderId') continue;
+    const col = store.column(key.field);
+    if (col.kind !== 'string') continue;
+    let state = store.stringRankState(key.field);
+    if (state === null) {
+      store.stringRank(key.field);
+      state = store.stringRankState(key.field);
+    }
+    covered = Math.min(covered, state === null ? 0 : state.built);
+  }
+  return covered;
+}
+
+function lowerBound(rows: Uint32Array, value: number): number {
+  let lo = 0;
+  let hi = rows.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if ((rows[mid] as number) < value) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function mergeSorted(a: Uint32Array, b: Uint32Array, cmp: Cmp): Uint32Array {
+  const out = new Uint32Array(a.length + b.length);
+  let i = 0;
+  let j = 0;
+  let k = 0;
+  while (i < a.length && j < b.length) out[k++] = cmp(a[i] as number, b[j] as number) <= 0 ? (a[i++] as number) : (b[j++] as number);
+  while (i < a.length) out[k++] = a[i++] as number;
+  while (j < b.length) out[k++] = b[j++] as number;
+  return out;
 }
 
 /** `orderId` is unique, so keys after it can never matter. */
@@ -63,7 +118,7 @@ function radixSort(
       }
       if (radixPass(src, dst, words, 0, counts)) [src, dst] = [dst, src];
     } else if (col.kind === 'string') {
-      const rank = store.stringRank(key.field);
+      const rank = (store.stringRankState(key.field) as { rank: Uint32Array }).rank;
       let max = 0;
       const words = new Uint32Array(m);
       for (let p = 0; p < m; p++) {
@@ -162,14 +217,29 @@ function radixPass(
   return true;
 }
 
-function keyComparator(store: ColumnarStore, key: SortKey): Cmp {
+/** Old values of changed rows: returns the previous values of the fields that changed for `row`, if any. */
+export type PrevOf = (row: number) => Partial<Order> | undefined;
+
+function keyComparator(store: ColumnarStore, key: SortKey, prevOf?: PrevOf): Cmp {
   const col = store.column(key.field);
+  const field = key.field;
   const dir = key.desc ? -1 : 1;
   if (col.kind === 'number') {
     const data = col.data;
+    const get =
+      prevOf === undefined
+        ? (r: number): number => data[r] as number
+        : (r: number): number => {
+            const p = prevOf(r);
+            if (p !== undefined && field in p) {
+              const v = p[field] as number | null | undefined;
+              return typeof v === 'number' ? v : Number.NaN;
+            }
+            return data[r] as number;
+          };
     return (a, b) => {
-      const x = data[a] as number;
-      const y = data[b] as number;
+      const x = get(a);
+      const y = get(b);
       if (x === y) return 0;
       if (x !== x) return y !== y ? 0 : -dir;
       if (y !== y) return dir;
@@ -179,13 +249,62 @@ function keyComparator(store: ColumnarStore, key: SortKey): Cmp {
   if (col.kind === 'enum') {
     const rank = col.dict.rank;
     const codes = col.codes;
-    return (a, b) => dir * ((rank[codes[a] as number] as number) - (rank[codes[b] as number] as number));
+    const dict = col.dict;
+    const get =
+      prevOf === undefined
+        ? (r: number): number => rank[codes[r] as number] as number
+        : (r: number): number => {
+            const p = prevOf(r);
+            if (p !== undefined && field in p) {
+              const code = dict.codeOf(p[field] as string);
+              return code === undefined ? -1 : (rank[code] as number);
+            }
+            return rank[codes[r] as number] as number;
+          };
+    return (a, b) => dir * (get(a) - get(b));
   }
   const data = col.data;
+  const get =
+    prevOf === undefined
+      ? (r: number): string => data[r] as string
+      : (r: number): string => {
+          const p = prevOf(r);
+          return p !== undefined && field in p ? (p[field] as string) : (data[r] as string);
+        };
   return (a, b) => {
-    const x = data[a] as string;
-    const y = data[b] as string;
+    const x = get(a);
+    const y = get(b);
     return x === y ? 0 : x < y ? -dir : dir;
+  };
+}
+
+/**
+ * The total order {@link sortRows} produces, as a comparator over row indexes: the sort keys, then the
+ * `orderId` tiebreak in the direction of the last key. With `prevOf`, rows that have a previous value for
+ * a sort field are compared by that old value, so a row can be located where it sat before it changed.
+ */
+export function makeComparator(store: ColumnarStore, keys: readonly SortKey[], prevOf?: PrevOf): Cmp {
+  const effective = truncateAtOrderId(keys);
+  const tieDir = effective.length > 0 && (effective[effective.length - 1] as SortKey).desc ? -1 : 1;
+  const cmps = effective.filter((k) => k.field !== 'orderId').map((k) => keyComparator(store, k, prevOf));
+  if (store.idsAscending) {
+    return (a, b) => {
+      for (let i = 0; i < cmps.length; i++) {
+        const r = (cmps[i] as Cmp)(a, b);
+        if (r !== 0) return r;
+      }
+      return a === b ? 0 : a < b ? -tieDir : tieDir;
+    };
+  }
+  const ids = store.stringColumn('orderId');
+  return (a, b) => {
+    for (let i = 0; i < cmps.length; i++) {
+      const r = (cmps[i] as Cmp)(a, b);
+      if (r !== 0) return r;
+    }
+    const x = ids[a] as string;
+    const y = ids[b] as string;
+    return x === y ? 0 : x < y ? -tieDir : tieDir;
   };
 }
 

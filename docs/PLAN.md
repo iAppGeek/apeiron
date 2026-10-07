@@ -45,6 +45,7 @@ apeiron/
   packages/
     logos/             [shared]          order schema, column metadata, protocol types, codecs, PRNG
     mnemosyne/         [db]              OrderRepository interface, Mongo adapter, contract tests. Memory.
+    iris/              [bus]             NATS/JetStream adapter (streams, consumers, NatsBus), used by hermes and antikythera. Messenger of the gods. (Added in phase 5a: it can't live in logos, which the browser imports.)
     tsconfig/, eslint-config/            (@apeiron/tsconfig, @apeiron/eslint-config)
   e2e/tests/           Playwright *.e2e.ts
   infra/
@@ -422,6 +423,14 @@ type ServerMsg =
   - Durable consumer `blotter-server` with filter subject `orders.events`; the server also consumes `prices.*`.
   - Durable consumer `hermes-commands` with filter subject `orders.commands`.
 - **Why the per-route counts (CP-1):** with grouping, every route has its own count, so one top-level `rowCount` was ambiguous. `newAbove` applies to the root route, which is the only one where scroll anchoring matters.
+- **Delta semantics (phase 5a, binding for the client):**
+  1. **Apply order:** within a delta, apply `adds` before `updates`.
+  2. **`updates` includes structural rows:** it can contain rows whose change was structural. Those routes are also listed in `dirtyRoutes`, so patching the values and then refreshing in the background is correct.
+  3. **`newAbove`:** counts rows inserted above the start row of the client's last root-block request.
+  4. **Slow consumers:** `SLOW_CONSUMER` is sent just before the server closes the socket with code 1013. The client reconnects and purges.
+  5. **One view per client:** the server tracks blocks for the client's **current** view only (its most recent `getRows` query). A grid has one view at a time.
+- **Server acks after persisting (phase 5a):** the `blotter-server` consumer uses `AckPolicy.All` and acks only after write-behind has persisted the batch. On attach, the consumer is reset so unacked messages replay at once. This needs NATS 2.14 or later; 2.15 is pinned.
+- **Diagnostics:** `GET /debug/lag` on antikythera reports the flush, event-loop-lag and write-behind statistics.
 
 ## Appendix D: Live update algorithms (server)
 **ChangeSet.** Built per flush tick: `Map<rowIdx, { changed: Set<field>, prev: Partial<Order> }>`. `prev` holds the old values of the aggregate, sort, filter and group fields; that's what lets views update without rescanning.
@@ -501,6 +510,8 @@ type ServerMsg =
 |---|---|---|---|
 | medium | 100 | 5 (80% LIVE / 20% PENDING_START, keeping LIVE count around 400–600) | 3/s per pair |
 | stress | 2,000 | 50 (LIVE cap raised to 5,000) | 3/s per pair |
+
+**Pacing as built (phase 5a, accepted).** Under stress, the fill formula above drained LIVE to about 150 rows. Hermes instead paces fills per order (32 for medium, 64 for stress) over a 1–2 minute order lifetime. That holds LIVE at about 400–500 on medium and about 4,000 on stress.
 
 ## Appendix F: Known risks and sanctioned fallbacks
 - **SSRM `add` + anchoring is flaky.** Fallback: send every structural change as `dirtyRoutes` (background refresh). The anchor still works by comparing `getFirstDisplayedRowIndex()` before and after and calling `ensureIndexVisible(prev + newAbove, 'top')` on the `storeRefreshed` event.
