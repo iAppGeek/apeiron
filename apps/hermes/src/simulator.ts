@@ -224,7 +224,13 @@ export class Simulator {
       });
       return;
     }
-    this.commit(order, result.changes, now, command.commandId);
+    // Time spent paused does not count against the order: resuming pushes its end time out by that long, so a
+    // resumed order carries on filling instead of being completed on the spot. `lastUpdateTime` is when it paused.
+    const changes: Partial<Order> =
+      command.action === 'RESUME'
+        ? { ...result.changes, endTime: order.endTime + Math.max(0, now - order.lastUpdateTime) }
+        : result.changes;
+    this.commit(order, changes, now, command.commandId);
   }
 
   private emit(event: OrderEvent): void {

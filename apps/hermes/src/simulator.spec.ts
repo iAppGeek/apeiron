@@ -366,6 +366,20 @@ describe('Simulator commands', () => {
     expect(touching().length).toBeGreaterThan(0);
   });
 
+  it('pushes the end time out by the time spent paused, so a resumed order is not completed at once', () => {
+    const h = harness();
+    const id = liveId(h);
+    const endTime = h.sim.order(id)?.endTime as number;
+    h.sim.command(command(id, 'PAUSE'), SEED_NOW);
+    // Paused for far longer than the order had left.
+    const resumeAt = endTime + 10 * 60_000;
+    h.sim.command(command(id, 'RESUME', 2), resumeAt);
+    expect(last(h)).toMatchObject({ commandId: 'c:2', order: { status: 'LIVE', endTime: endTime + (resumeAt - SEED_NOW) } });
+    h.events.length = 0;
+    h.sim.step(resumeAt + 1_000, 1_000);
+    expect(h.events.filter((e) => e.type === 'UPDATE' && e.order.orderId === id && e.order.status !== undefined)).toEqual([]);
+  });
+
   it('cancels LIVE, PAUSED and PENDING_START orders and then forgets them', () => {
     const h = harness();
     const live = liveId(h);
