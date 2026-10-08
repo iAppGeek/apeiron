@@ -83,6 +83,8 @@ jobs:
         run: curl -fsS localhost:4000/health && curl -fsSI localhost:8080/ | head -1
       - name: End-to-end tests
         run: pnpm e2e:ci
+      - name: Build the workspace packages the resilience driver imports
+        run: pnpm --filter "@apeiron/e2e^..." build
       - name: Build the resilience images (web with test hooks)
         run: docker compose --profile core --profile resilience build pharos-e2e
       - name: Start toxiproxy and the test-hooks web
