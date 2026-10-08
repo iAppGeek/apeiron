@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { readStats } from '../../support/pages';
-import { printSummary, runScenario, waitUntilElapsed } from '../../support/scenario';
+import { plan, printSummary, runScenario, waitUntilElapsed } from '../../support/scenario';
 
 /**
  * S4, a long outage during a burst: the proxy is down for 60 s while the driver runs at the stress rate (2,000
@@ -8,22 +8,23 @@ import { printSummary, runScenario, waitUntilElapsed } from '../../support/scena
  * deep-scrolled view (V2) must come back with its viewport and badge in a sane state.
  */
 test('S4 long outage during a stress burst', async ({ browser }) => {
+  const p = plan().s4;
   const measurements: Record<string, unknown> = {};
   const report = await runScenario(browser, {
     id: 'S4',
-    title: 'Proxy down for 60s while the driver runs at the stress rate',
+    title: `Proxy down for ${p.downMs / 1000}s while the driver runs at the stress rate`,
     rate: 'stress',
     seed: 1004,
     body: async (h) => {
       const v2 = h.pages.find((p) => p.id === 'V2');
       if (v2 === undefined) throw new Error('S4 needs V2');
-      await waitUntilElapsed(h, 10_000);
+      await waitUntilElapsed(h, p.leadMs);
       const before = await readStats(v2.page);
       const badgeBefore = await v2.blotter.badgeCount();
-      h.note('down', '60000ms');
-      await h.faults.down(60_000);
+      h.note('down', `${p.downMs}ms`);
+      await h.faults.down(p.downMs);
       await h.allConnected(90_000);
-      await waitUntilElapsed(h, 10_000 + 60_000 + 20_000);
+      await waitUntilElapsed(h, p.leadMs + p.downMs + p.tailMs);
       const after = await readStats(v2.page);
       measurements['v2FirstRowBefore'] = before.firstDisplayedRow;
       measurements['v2FirstRowAfter'] = after.firstDisplayedRow;

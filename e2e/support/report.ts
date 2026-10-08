@@ -16,6 +16,8 @@ export type ViewReport = {
   reconnects: number;
   deltasApplied: number;
   rowsUpdated: number;
+  /** Updates the server sent for rows the page did not hold. */
+  skipped: number;
   purges: number;
   lastCloseReason: string | null;
   /** Every close reason and every toast the page showed, so a failure can be traced to what the user was told. */
@@ -27,6 +29,8 @@ export type ViewReport = {
 
 export type ScenarioReport = {
   scenario: string;
+  /** quick, full or smoke (support/tiers.ts). */
+  tier: string;
   title: string;
   ok: boolean;
   startedAt: string;

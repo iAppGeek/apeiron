@@ -43,11 +43,18 @@ export function createFaults(options: FaultsOptions = {}): Faults {
   const doFetch = options.fetch ?? fetch;
   const sleep = options.sleep ?? defaultSleep;
 
+  const init = (method: string, body?: unknown): RequestInit => ({
+    method,
+    ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  });
+
   const call = async (method: string, path: string, body?: unknown, okStatuses: readonly number[] = []): Promise<unknown> => {
-    const response = await doFetch(`${api}${path}`, {
-      method,
-      ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
-    });
+    // Toxiproxy's API can answer 503 while it is busy tearing down links; the calls are idempotent, so try again.
+    let response = await doFetch(`${api}${path}`, init(method, body));
+    for (let attempt = 0; attempt < 3 && response.status >= 500; attempt += 1) {
+      await sleep(300 * (attempt + 1));
+      response = await doFetch(`${api}${path}`, init(method, body));
+    }
     if (!response.ok && !okStatuses.includes(response.status)) {
       throw new Error(`Toxiproxy ${method} ${path} failed with ${response.status}: ${await response.text()}`);
     }

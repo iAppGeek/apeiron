@@ -35,7 +35,7 @@ export type PageHooks = {
     pendingRequests: number;
     toastHistory: string[];
   };
-  counters(): { deltasApplied: number; rowsUpdated: number; rowsAdded: number; purges: number; lastDeltaAt: number };
+  counters(): { deltasApplied: number; rowsUpdated: number; rowsAdded: number; skipped: number; purges: number; lastDeltaAt: number };
   viewState(): PageSnapshot['view'] & { expanded: string[][] };
   latency(): { p50: number | null; p95: number | null };
   lastRequest(): PageSnapshot['request'];
@@ -46,6 +46,7 @@ export type PageStats = {
   reconnects: number;
   deltasApplied: number;
   rowsUpdated: number;
+  skipped: number;
   purges: number;
   lastCloseReason: string | null;
   closes: number;
@@ -58,6 +59,8 @@ export type PageStats = {
   sinceLastDeltaMs: number | null;
   firstDisplayedRow: number | null;
   latency: { p50: number | null; p95: number | null };
+  /** True while the grid shows nothing yet, or a group row with no key (its block is still loading). */
+  loading: boolean;
 };
 
 /** Reads the counters and connection state from a page. */
@@ -71,6 +74,7 @@ export async function readStats(page: Page): Promise<PageStats> {
       reconnects: conn.reconnects,
       deltasApplied: c.deltasApplied,
       rowsUpdated: c.rowsUpdated,
+      skipped: c.skipped,
       purges: c.purges,
       lastCloseReason: conn.lastCloseReason,
       closes: conn.closes,
@@ -82,6 +86,7 @@ export async function readStats(page: Page): Promise<PageStats> {
       sinceLastDeltaMs: c.lastDeltaAt === 0 ? null : Date.now() - c.lastDeltaAt,
       firstDisplayedRow: hooks.firstDisplayedRow(),
       latency: hooks.latency(),
+      loading: hooks.loadedRows().length + hooks.groupRows().length === 0 || hooks.groupRows().some((g) => g.key === null),
     };
   });
 }

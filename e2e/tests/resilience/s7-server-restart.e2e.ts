@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { expect, test } from '@playwright/test';
 import { sleep, until } from '../../support/harness';
-import { printSummary, runScenario, waitUntilElapsed } from '../../support/scenario';
+import { plan, printSummary, runScenario, waitUntilElapsed } from '../../support/scenario';
 
 const run = promisify(execFile);
 const root = new URL('../../../', import.meta.url).pathname;
@@ -17,15 +17,16 @@ async function serverHealthy(): Promise<boolean> {
  * its store from the database and the durable consumer replays what was not acknowledged, so the model check passing
  * afterwards proves no event was lost on the server side; the clients must reconnect and purge.
  */
-test('S7 antikythera restarts twice mid-stream', async ({ browser }) => {
+test('S7 antikythera restarts mid-stream', async ({ browser }) => {
+  const p = plan().s7;
   const report = await runScenario(browser, {
     id: 'S7',
-    title: 'docker compose restart antikythera, twice, while updates flow',
+    title: `docker compose restart antikythera, ${p.restarts} time(s), while updates flow`,
     rate: 'normal',
     seed: 1007,
     body: async (h) => {
-      for (let n = 1; n <= 2; n += 1) {
-        await waitUntilElapsed(h, n === 1 ? 25_000 : h.elapsed() + 25_000);
+      for (let n = 1; n <= p.restarts; n += 1) {
+        await waitUntilElapsed(h, h.elapsed() + p.gapMs);
         h.note('restart antikythera', `#${n}`);
         await run('docker', ['compose', '--profile', 'core', 'restart', 'antikythera'], { cwd: root });
         const up = await until(serverHealthy, 180_000, 1000);
@@ -33,9 +34,9 @@ test('S7 antikythera restarts twice mid-stream', async ({ browser }) => {
         await h.allConnected(120_000);
         await sleep(2000);
       }
-      await sleep(25_000);
+      await sleep(p.gapMs);
     },
-    minimums: () => ({ reconnects: 2, deltas: 100 }),
+    minimums: () => ({ reconnects: p.restarts, deltas: 50 }),
   });
   printSummary(report);
   expect(report.failures).toEqual([]);

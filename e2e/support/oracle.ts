@@ -1,4 +1,4 @@
-import type { Row, SsrmRequest } from '@apeiron/logos';
+import { parseOrderSeq, type Row, type SsrmRequest } from '@apeiron/logos';
 import { contiguousRuns, describeDiffs, diffRecords } from './compare';
 import type { Driver } from './driver';
 import type { SamplerReport } from './sampler';
@@ -15,6 +15,8 @@ export type Check = {
 const MAX_FAILURES = 20;
 /** The server's `MAX_BLOCK_ROWS`: the most rows one request may ask for. */
 const BLOCK = 5000;
+/** Orders within this many places of the old top of the table are read in blocks rather than one by one. */
+const NEAR_ROWS = 30_000;
 /** Group aggregates are sums over thousands of rows; the incremental and full computations may differ in the last bits. */
 const AGGREGATE_TOLERANCE = 1e-9;
 
@@ -116,9 +118,41 @@ export async function checkModelVsServer(input: ModelCheckInput): Promise<Check>
   const expectedCount = input.baselineRowCount + created.length;
   if (rootCount !== expectedCount) failures.add(`row count: expected ${expectedCount} (${input.baselineRowCount} + ${created.length} created), the server has ${rootCount}`);
 
-  // Everything else the stream touched, one order at a time.
+  // Blocks are read one at a time: several 5,000-row replies in flight at once pass the server's 8 MB hard cap on a client's
+  // send buffer and it closes the reader with SLOW_CONSUMER.
+  // Everything else the stream touched. Order ids are consecutive, so an order near the old top of the table sits at a
+  // known distance below the new orders: read those as large blocks. Any that are far away (or not found where the
+  // arithmetic says) are looked up one at a time.
   const others = model.idsToVerify().filter((id) => !createdSet.has(id));
-  await pool(others, input.concurrency ?? 8, async (orderId) => {
+  const startSeq = driver.startMaxOrderId() === null ? null : parseOrderSeq(driver.startMaxOrderId() as string);
+  const near: string[] = [];
+  const far: string[] = [];
+  let deepest = 0;
+  for (const id of others) {
+    const seq = parseOrderSeq(id);
+    const distance = seq === null || startSeq === null ? Infinity : startSeq - seq;
+    if (distance >= 0 && distance <= NEAR_ROWS) {
+      near.push(id);
+      deepest = Math.max(deepest, distance);
+    } else far.push(id);
+  }
+  const found = new Set<string>();
+  const blocks: { start: number; end: number }[] = [];
+  for (let start = created.length; start <= created.length + deepest; start += BLOCK) {
+    blocks.push({ start, end: Math.min(start + BLOCK, created.length + deepest + 1) });
+  }
+  const wanted = new Set(near);
+  await pool(blocks, 1, async ({ start, end }) => {
+    const { rows } = await reader.getRows(flat({ startRow: start, endRow: end }));
+    for (const row of rows) {
+      const orderId = String(row['orderId']);
+      if (!wanted.has(orderId)) continue;
+      found.add(orderId);
+      compare(row, orderId);
+    }
+  });
+  for (const id of near) if (!found.has(id)) far.push(id);
+  await pool(far, input.concurrency ?? 8, async (orderId) => {
     const { rows } = await reader.getRows(
       flat({ filterModel: { orderId: { filterType: 'text', type: 'equals', filter: orderId } } }),
     );
@@ -131,6 +165,8 @@ export async function checkModelVsServer(input: ModelCheckInput): Promise<Check>
     ordersCompared: compared,
     created: created.length,
     touchedExisting: others.length,
+    readInBlocks: found.size,
+    readOneByOne: far.length,
     rowCount: rootCount,
     modelEvents: model.events,
     unknownUpdates: model.unknown,

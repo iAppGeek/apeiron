@@ -1,15 +1,14 @@
 import { expect, test } from '@playwright/test';
 import { sleep, until } from '../../support/harness';
 import { readStats } from '../../support/pages';
-import { SMOKE, printSummary, runScenario } from '../../support/scenario';
+import { plan, printSummary, runScenario } from '../../support/scenario';
 
 /**
  * S3, half-open stall: a timeout toxic with timeout 0 stops all data in both directions and closes nothing, so only
  * the client's own heartbeat can notice. It must treat the socket as dead after 3 ping intervals (6 s, checked every
  * 2 s, so within about 6 to 8 s), reconnect, and end up with correct data. Three stalls of 20 s (smoke: one of 12 s).
  */
-const STALLS = SMOKE ? 1 : 3;
-const STALL_MS = SMOKE ? 12_000 : 20_000;
+const { stalls: STALLS, stallMs: STALL_MS } = plan().s3;
 /** The heartbeat threshold is 6 s and is checked every 2 s; allow the poll interval and a little scheduling slack. */
 const DETECT_MIN_MS = 5000;
 const DETECT_MAX_MS = 9500;
@@ -17,7 +16,7 @@ const DETECT_MAX_MS = 9500;
 test('S3 half-open stall is detected by the client heartbeat @smoke', async ({ browser }) => {
   const detections: number[] = [];
   const report = await runScenario(browser, {
-    id: SMOKE ? 'S3-smoke' : 'S3',
+    id: 'S3',
     title: `Half-open stall: ${STALLS} x ${STALL_MS / 1000}s with the socket open and no data`,
     rate: 'normal',
     seed: 1003,

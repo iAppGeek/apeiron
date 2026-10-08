@@ -30,7 +30,7 @@ describe('summariseLatency', () => {
 describe('failuresOf', () => {
   it('lists every failed check with its view', () => {
     const views: ViewReport[] = [
-      { view: 'V1', reconnects: 1, deltasApplied: 1, rowsUpdated: 1, purges: 0, lastCloseReason: null, closeHistory: [], toasts: [], latency: summariseLatency([]), checks: [check('server-vs-screen', false)] },
+      { view: 'V1', reconnects: 1, deltasApplied: 1, rowsUpdated: 1, skipped: 0, purges: 0, lastCloseReason: null, closeHistory: [], toasts: [], latency: summariseLatency([]), checks: [check('server-vs-screen', false)] },
     ];
     expect(failuresOf(views, [check('model-vs-server', true), check('minimums', false)])).toEqual([
       'V1 server-vs-screen: bad thing',

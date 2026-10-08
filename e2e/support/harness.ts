@@ -15,6 +15,7 @@ import { openView, readSnapshot, readStats, type PageStats, type ViewId, type Vi
 import { failuresOf, summariseLatency, writeReport, type ScenarioReport, type ViewReport } from './report';
 import { installSamplerInPage, readSamplerInPage } from './sampler';
 import { createServerProbe, type ServerProbe } from './server-probe';
+import { TIER } from './tiers';
 import { openReader } from './ws-client';
 
 const MONGO_URL = process.env['RESILIENCE_MONGO_URL'] ?? 'mongodb://127.0.0.1:27017';
@@ -201,7 +202,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
       const settled = await until(async () => {
         if (!(await probe.isIdle())) return false;
         const all = await Promise.all(pages.map((p) => readStats(p.page)));
-        return all.every((s) => s.state === 'connected' && !s.busy && (s.sinceLastDeltaMs === null || s.sinceLastDeltaMs > QUIET_MS));
+        return all.every((s) => s.state === 'connected' && !s.busy && !s.loading && (s.sinceLastDeltaMs === null || s.sinceLastDeltaMs > QUIET_MS));
       }, 180_000);
       const settleMs = Date.now() - settleStart;
 
@@ -216,45 +217,55 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
       }
 
       const stats = await Promise.all(pages.map((p) => readStats(p.page)));
-      const reader = await openReader();
-      checks.push(await checkModelVsServer({ driver: runningDriver, reader, baselineRowCount: baselineRows }));
-      reader.close();
-
-      const views: ViewReport[] = [];
-      for (const [i, p] of pages.entries()) {
-        const s = stats[i] as PageStats;
-        const before = baseline[i] as PageStats;
-        const snapshot = await readSnapshot(p.page);
-        const pageReader = await openReader({ traderId: snapshot.view.trader });
-        const screen = await checkServerVsScreen('server-vs-screen', snapshot, pageReader);
-        if (!screen.ok) {
-          // Tell a permanent difference from a late one: look again after a few seconds. The check still fails either way.
-          await sleep(4000);
-          const again = await checkServerVsScreen('server-vs-screen', await readSnapshot(p.page), pageReader);
-          screen.stats['stillWrongAfter4s'] = again.ok ? 'no' : 'yes';
-          if (!again.ok) screen.stats['failuresAfter4s'] = again.stats['failures'] ?? 0;
+      // The model check and every page's check read from the server independently, so run them side by side.
+      const modelCheck = (async (): Promise<Check> => {
+        const reader = await openReader();
+        try {
+          return await checkModelVsServer({ driver: runningDriver, reader, baselineRowCount: baselineRows });
+        } finally {
+          reader.close();
         }
-        pageReader.close();
-        const sampler = await p.page.evaluate(readSamplerInPage);
-        const reconnects = s.reconnects - before.reconnects;
-        const deltas = s.deltasApplied - before.deltasApplied;
-        views.push({
-          view: p.id,
-          reconnects,
-          deltasApplied: deltas,
-          rowsUpdated: s.rowsUpdated - before.rowsUpdated,
-          purges: s.purges - before.purges,
-          lastCloseReason: s.lastCloseReason,
-          closeHistory: s.closeHistory,
-          toasts: s.toastHistory,
-          latency: summariseLatency(latencySamples.get(p.id) ?? []),
-          checks: [screen, checkInvariants('invariants', sampler), checkMinimums('minimums', { reconnects, deltas }, minimums)],
-        });
-      }
+      })();
+      const viewReports = Promise.all(
+        pages.map(async (p, i): Promise<ViewReport> => {
+          const s = stats[i] as PageStats;
+          const before = baseline[i] as PageStats;
+          const snapshot = await readSnapshot(p.page);
+          const pageReader = await openReader({ traderId: snapshot.view.trader });
+          const screen = await checkServerVsScreen('server-vs-screen', snapshot, pageReader);
+          if (!screen.ok) {
+            // Tell a permanent difference from a late one: look again after a few seconds. The check still fails either way.
+            await sleep(4000);
+            const again = await checkServerVsScreen('server-vs-screen', await readSnapshot(p.page), pageReader);
+            screen.stats['stillWrongAfter4s'] = again.ok ? 'no' : 'yes';
+            if (!again.ok) screen.stats['failuresAfter4s'] = again.stats['failures'] ?? 0;
+          }
+          pageReader.close();
+          const sampler = await p.page.evaluate(readSamplerInPage);
+          const reconnects = s.reconnects - before.reconnects;
+          const deltas = s.deltasApplied - before.deltasApplied;
+          return {
+            view: p.id,
+            reconnects,
+            deltasApplied: deltas,
+            rowsUpdated: s.rowsUpdated - before.rowsUpdated,
+            skipped: s.skipped - before.skipped,
+            purges: s.purges - before.purges,
+            lastCloseReason: s.lastCloseReason,
+            closeHistory: s.closeHistory,
+            toasts: s.toastHistory,
+            latency: summariseLatency(latencySamples.get(p.id) ?? []),
+            checks: [screen, checkInvariants('invariants', sampler), checkMinimums('minimums', { reconnects, deltas }, minimums)],
+          };
+        }),
+      );
+      checks.push(await modelCheck);
+      const views = await viewReports;
       const finishedAt = new Date();
       const failures = failuresOf(views, checks);
       const report: ScenarioReport = {
         scenario: options.scenario,
+        tier: TIER,
         title: options.title,
         ok: failures.length === 0,
         startedAt: startedAt.toISOString(),

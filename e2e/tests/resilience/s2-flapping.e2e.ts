@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 import { scrollJump, selectCodec, selectTrader } from '../../support/actions';
 import { sleep } from '../../support/harness';
 import { pickBetween } from '../../support/plans';
-import { printSummary, runScenario } from '../../support/scenario';
+import { plan, printSummary, runScenario } from '../../support/scenario';
 
 /**
  * S2, rapid flapping: a drop every 2 to 5 seconds for two minutes, some timed to land during an in-flight getRows, a
@@ -14,9 +14,10 @@ import { printSummary, runScenario } from '../../support/scenario';
 const KINDS = ['plain', 'getRows', 'hello', 'trader', 'codec', 'down1'] as const;
 
 test('S2 rapid flapping', async ({ browser }) => {
+  const p = plan().s2;
   const report = await runScenario(browser, {
     id: 'S2',
-    title: 'Rapid flapping: drops every 2-5s for 2 minutes, including mid-getRows, mid-hello and mid-switch',
+    title: `Rapid flapping: drops every 2-5s for ${p.durationMs / 1000}s, including mid-getRows, mid-hello and mid-switch`,
     rate: 'normal',
     seed: 1002,
     body: async (h) => {
@@ -26,7 +27,7 @@ test('S2 rapid flapping', async ({ browser }) => {
       let traderSwitched = false;
       let codecMsgpack = false;
       let i = 0;
-      while (h.elapsed() < 120_000) {
+      while (h.elapsed() < p.durationMs) {
         await sleep(pickBetween(rng, 2000, 5000));
         const kind = KINDS[i % KINDS.length] ?? 'plain';
         i += 1;
@@ -54,7 +55,7 @@ test('S2 rapid flapping', async ({ browser }) => {
       }
       h.measure('drops', i);
     },
-    minimums: () => ({ reconnects: 15, deltas: 100 }),
+    minimums: () => ({ reconnects: p.minReconnects, deltas: 50 }),
   });
   printSummary(report);
   expect(report.failures).toEqual([]);

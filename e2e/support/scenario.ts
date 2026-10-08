@@ -1,11 +1,11 @@
 import type { Browser } from '@playwright/test';
+import { scenarioId } from './tiers';
 import { createHarness, sleep, type Harness } from './harness';
 import type { Minimums } from './oracle';
 import type { ViewId } from './pages';
 import type { ScenarioReport } from './report';
 
-/** `RESILIENCE_SMOKE=1` shortens the scenarios that have a smoke variant (CI runs those). */
-export const SMOKE = process.env['RESILIENCE_SMOKE'] === '1';
+export { TIER, plan, scenarioId } from './tiers';
 
 export type ScenarioConfig = {
   id: string;
@@ -23,7 +23,7 @@ export type ScenarioConfig = {
 export async function runScenario(browser: Browser, config: ScenarioConfig): Promise<ScenarioReport> {
   const harness = await createHarness({
     browser,
-    scenario: config.id,
+    scenario: scenarioId(config.id),
     title: config.title,
     views: config.views ?? ['V1', 'V2', 'V3', 'V4', 'V5'],
     rate: config.rate,
@@ -48,7 +48,7 @@ export async function waitUntilElapsed(harness: Harness, atMs: number): Promise<
 
 export function printSummary(report: ScenarioReport): void {
   const lines = [
-    `${report.scenario} ${report.ok ? 'PASS' : 'FAIL'} - ${report.title}`,
+    `${report.scenario} [${report.tier}] ${report.ok ? 'PASS' : 'FAIL'} - ${report.title}`,
     `  run ${(report.timings.runMs / 1000).toFixed(0)}s, settle ${(report.timings.settleMs / 1000).toFixed(1)}s, verify ${(report.timings.verifyMs / 1000).toFixed(1)}s; driver ${report.driver.events} events, ${report.driver.ticks} ticks`,
     ...report.views.map(
       (v) => `  ${v.view}: reconnects ${v.reconnects}, deltas ${v.deltasApplied}, purges ${v.purges}, checks ${v.checks.map((c) => `${c.name}=${c.ok ? 'ok' : 'FAIL'}`).join(' ')}`,

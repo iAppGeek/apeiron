@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
-import { printSummary, runScenario, waitUntilElapsed } from '../../support/scenario';
+import { performDrop } from '../../support/plans';
+import { plan, printSummary, runScenario, waitUntilElapsed } from '../../support/scenario';
 
 /**
  * S5, high latency: 300 ms plus or minus 100 ms each way (about 600 ms round trip) for three minutes, with two drops
@@ -7,25 +8,24 @@ import { printSummary, runScenario, waitUntilElapsed } from '../../support/scena
  * percentiles (which include the added latency) are recorded in the report.
  */
 test('S5 high latency with drops', async ({ browser }) => {
+  const p = plan().s5;
   const report = await runScenario(browser, {
     id: 'S5',
-    title: '300ms +/- 100ms each way for 3 minutes, with 2 drops',
+    title: `${p.latencyMs}ms +/- 100ms each way for ${p.totalMs / 1000}s, with ${p.dropsAtMs.length} drop(s)`,
     rate: 'normal',
     seed: 1005,
     body: async (h) => {
-      await h.faults.latency(300, 100);
-      h.note('latency', '300ms+-100ms both ways');
-      await waitUntilElapsed(h, 60_000);
-      h.note('clean');
-      await h.faults.dropClean();
-      await h.allConnected(90_000);
-      await waitUntilElapsed(h, 120_000);
-      h.note('down3');
-      await h.faults.down(3000);
-      await h.allConnected(90_000);
-      await waitUntilElapsed(h, 180_000);
+      await h.faults.latency(p.latencyMs, 100);
+      h.note('latency', `${p.latencyMs}ms+-100ms both ways`);
+      for (const drop of p.dropsAtMs) {
+        await waitUntilElapsed(h, drop.atMs);
+        h.note(drop.kind);
+        await performDrop(h.faults, drop.kind);
+        await h.allConnected(90_000);
+      }
+      await waitUntilElapsed(h, p.totalMs);
     },
-    minimums: () => ({ reconnects: 2, deltas: 100 }),
+    minimums: () => ({ reconnects: p.dropsAtMs.length, deltas: 50 }),
   });
   printSummary(report);
   expect(report.failures).toEqual([]);

@@ -79,6 +79,14 @@ describe('createFaults', () => {
     expect(calls.at(-1)?.body).toEqual({ enabled: true });
   });
 
+  it('retries a 5xx from the API before giving up', async () => {
+    const statuses = [503, 503, 200];
+    const fetchMock = vi.fn(() => Promise.resolve(new Response(null, { status: statuses.shift() ?? 200 })));
+    const faults = createFaults({ fetch: fetchMock as unknown as typeof fetch, sleep: () => Promise.resolve() });
+    await faults.latency(1, 0);
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(5);
+  });
+
   it('reports an API failure with its status', async () => {
     const faults = createFaults({
       fetch: vi.fn(() => Promise.resolve(new Response('nope', { status: 500 }))) as unknown as typeof fetch,
