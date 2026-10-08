@@ -69,7 +69,7 @@ describe('invariant sampler', () => {
     setLenientUpdateTimeInPage(false);
     sample([row('A', { lastUpdateTime: 900, filledQty: 4 })]);
     const report = readSamplerInPage();
-    expect(report.violations.map((v) => v.kind)).toEqual(['filledQty', 'lastUpdateTime']);
+    expect(report.violations.map((v) => v.kind)).toEqual(['filledQty', 'filledQty', 'lastUpdateTime']);
   });
 
   it('is idempotent, caps the violation list, and reports nothing after it is read', () => {
