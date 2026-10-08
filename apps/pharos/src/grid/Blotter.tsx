@@ -164,6 +164,9 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       },
       topRowProbe: probe,
       currentRowCount: () => useAppStore.getState().rowCount,
+      purgeAgain: () => {
+        api.refreshServerSide({ purge: true });
+      },
       canSetRowCount: () => api.getRowGroupColumns().length === 0,
     });
     applier.current = live;

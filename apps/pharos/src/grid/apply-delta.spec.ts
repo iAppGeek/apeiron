@@ -313,29 +313,6 @@ describe('createDeltaApplier', () => {
       expect(grid.refreshServerSide).toHaveBeenLastCalledWith({ route: [], purge: false });
     });
 
-    it('does not wait for storeRefreshed: a watchdog ends a reload that raised no event, then refreshes once more', () => {
-      const { grid, applier } = setup();
-      applier.reset();
-      applier.beginReload();
-      applier.apply(delta(topAdd('A5')));
-      vi.advanceTimersByTime(3999);
-      expect(grid.refreshServerSide).not.toHaveBeenCalled();
-      vi.advanceTimersByTime(1100);
-      expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
-      expect(grid.refreshServerSide).toHaveBeenLastCalledWith({ route: [], purge: false });
-    });
-
-    it('stops following up after a few rounds even if rows keep landing on top', () => {
-      const { grid, applier } = setup();
-      applier.reset();
-      applier.beginReload();
-      for (let round = 0; round < 8; round += 1) {
-        applier.apply(delta(topAdd(`R${round}`)));
-        vi.advanceTimersByTime(5000);
-      }
-      expect(grid.refreshServerSide.mock.calls.length).toBeLessThanOrEqual(3);
-    });
-
     it('forgets a pending follow-up on reset', () => {
       const { grid, applier } = setup();
       applier.apply(delta({ dirtyRoutes: [[]] }));
@@ -408,6 +385,37 @@ describe('createDeltaApplier', () => {
       top = 430_000;
       vi.advanceTimersByTime(5000);
       expect(grid.ensureIndexVisible).toHaveBeenCalledTimes(2);
+    });
+
+    it('purges the cache once more after the restore, exactly once, and restores again when that reload lands', () => {
+      const purgeAgain = vi.fn();
+      const { grid, applier } = place({ purgeAgain });
+      applier.savePosition();
+      applier.reset();
+      applier.rootLoaded(1_003_000);
+      vi.advanceTimersByTime(2499);
+      expect(purgeAgain).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(purgeAgain).toHaveBeenCalledTimes(1);
+      grid.ensureIndexVisible.mockClear();
+      applier.rootLoaded(1_003_010);
+      vi.advanceTimersByTime(0);
+      // The ten orders that arrived meanwhile move the place down by ten.
+      expect(grid.ensureIndexVisible).toHaveBeenCalledWith(433_010, 'top');
+      vi.advanceTimersByTime(20_000);
+      expect(purgeAgain).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels the second purge when something resets the applier first (a trader switch)', () => {
+      const purgeAgain = vi.fn();
+      const { applier } = place({ purgeAgain });
+      applier.savePosition();
+      applier.reset();
+      applier.rootLoaded(1_003_000);
+      vi.advanceTimersByTime(1000);
+      applier.reset();
+      vi.advanceTimersByTime(20_000);
+      expect(purgeAgain).not.toHaveBeenCalled();
     });
 
     it('does nothing when the user was at the top, and nothing without a saved place', () => {

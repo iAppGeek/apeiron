@@ -18,7 +18,8 @@ test('S1 steady updates with periodic drops @smoke', async ({ browser }) => {
       for (const drop of dropSchedule(p.drops, p.intervalMs, p.firstAtMs)) {
         await waitUntilElapsed(h, drop.atMs);
         // A drop only counts as one when it lands on an established connection.
-        await h.allConnected(60_000);
+        // Every drop must hit every page, so wait for all of them to be connected and settled, not just most.
+        expect(await h.allConnected(60_000), 'every page connected before the drop').toBe(true);
         h.note(drop.kind);
         await performDrop(h.faults, drop.kind, p.shortOutages ? SMOKE_DOWN_MS : DOWN_MS);
       }

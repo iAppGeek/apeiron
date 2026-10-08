@@ -44,6 +44,8 @@ export type DeltaApplierOptions = {
   topRowProbe?: () => number | null;
   /** AG Grid refuses `setRowCount` while rows are grouped (error 28); the host says when it may be called. Default always. */
   canSetRowCount?: () => boolean;
+  /** Reloads the whole cache once more (a purge), used to drop the blocks loaded while the root was briefly at row 0. */
+  purgeAgain?: () => void;
   /** The root row count the grid last loaded (the status bar's), for sizing a reload against what it held before. */
   currentRowCount?: () => number | null;
   timers?: Timers;
@@ -73,12 +75,10 @@ export const REFRESH_INTERVAL_MS = 1000;
 export const SWEEP_INTERVAL_MS = 100;
 /** How far past the rows counted since the last refresh an order may move and still be followed. */
 export const ANCHOR_SLACK_ROWS = 25;
-/** A root reload that raises no `storeRefreshed` is treated as over after this long (ms). */
-export const ROOT_RELOAD_WATCHDOG_MS = 4000;
-/** Most follow-up root refreshes in a row after rows landed on top during one. */
-export const MAX_FOLLOW_UPS = 3;
 /** When the saved order is looked for again after a reload, in ms after the root loaded. */
 export const RESTORE_RETRY_MS: readonly number[] = [0, 100, 250, 500, 1000, 2000];
+/** After the viewport is restored, the cache is purged once more this long after the root loaded (ms). */
+export const SECOND_PURGE_MS = 2500;
 
 /**
  * Applies live `delta` messages to the SSRM grid (Appendix C, "Delta semantics"):
@@ -116,41 +116,13 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
    */
   let rootRefreshing = false;
   let addedWhileRefreshing = false;
-  /** Follow-up refreshes in a row; a stream of adds cannot keep the root reloading for ever. */
-  let followUps = 0;
-  let followUpRequested = false;
-  let watchdog: unknown = null;
-
-  /**
-   * The root reload is over: either AG Grid said so (`storeRefreshed`), or the watchdog did, because a purge may not
-   * raise that event at all. If rows landed on top meanwhile, reload once more.
-   */
-  const finishRootRefresh = (): void => {
-    if (watchdog !== null) timers.clearTimeout(watchdog);
-    watchdog = null;
-    if (!rootRefreshing) return;
-    rootRefreshing = false;
-    if (addedWhileRefreshing && followUps < MAX_FOLLOW_UPS) {
-      addedWhileRefreshing = false;
-      followUpRequested = true;
-      refresh.request([]);
-    }
-  };
-
-  const startRootReload = (): void => {
-    rootRefreshing = true;
-    addedWhileRefreshing = false;
-    if (watchdog !== null) timers.clearTimeout(watchdog);
-    watchdog = timers.setTimeout(finishRootRefresh, ROOT_RELOAD_WATCHDOG_MS);
-  };
 
   const refresh = createRouteDebouncer(
     (route) => {
       if (route.length === 0) {
         takeSnapshot();
-        followUps = followUpRequested ? followUps + 1 : 0;
-        followUpRequested = false;
-        startRootReload();
+        rootRefreshing = true;
+        addedWhileRefreshing = false;
       }
       api.refreshServerSide({ route, purge: false });
     },
@@ -159,7 +131,8 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
   );
 
   /** Where the user was before a purge that keeps their place; used once the reloaded root knows its size. */
-  let saved: { index: number; rowId: string | null; rowCount: number | null } | null = null;
+  let saved: { index: number; rowId: string | null; rowCount: number | null; second: boolean } | null = null;
+  let secondPurgeTimer: unknown = null;
   const restoreTimers: unknown[] = [];
   const clearRestore = (): void => {
     for (const t of restoreTimers.splice(0)) timers.clearTimeout(t);
@@ -300,7 +273,13 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
 
     onStoreRefreshed(route): void {
       if (route !== undefined && route.length > 0) return;
-      finishRootRefresh();
+      if (rootRefreshing) {
+        rootRefreshing = false;
+        if (addedWhileRefreshing) {
+          addedWhileRefreshing = false;
+          refresh.request([]);
+        }
+      }
       const before = snapshot;
       snapshot = null;
       const settled = settledCount;
@@ -319,7 +298,7 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       const index = readTopRow(api, options.topRowProbe);
       const rowId = index > 0 ? api.getDisplayedRowAtIndex(index)?.id : undefined;
       if (index <= 0 || !(options.canSetRowCount?.() ?? true)) return;
-      saved = { index, rowId: typeof rowId === 'string' ? rowId : null, rowCount: options.currentRowCount?.() ?? rootCount };
+      saved = { index, rowId: typeof rowId === 'string' ? rowId : null, rowCount: options.currentRowCount?.() ?? rootCount, second: false };
     },
 
     rootLoaded(rowCount: number): void {
@@ -331,6 +310,17 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       const target = Math.min(rowCount - 1, place.index + grew);
       if (grew > 0) options.onNewAbove?.(grew);
       clearRestore();
+      if (secondPurgeTimer !== null) timers.clearTimeout(secondPurgeTimer);
+      secondPurgeTimer = null;
+      if (!place.second && options.purgeAgain !== undefined) {
+        // While the root was briefly at row 0 the grid cached blocks there; with the viewport now deep they would sit
+        // unwatched and go stale. Purge once more so the cache holds only what is around the restored position.
+        secondPurgeTimer = timers.setTimeout(() => {
+          secondPurgeTimer = null;
+          saved = { index: target, rowId: place.rowId, rowCount, second: true };
+          options.purgeAgain?.();
+        }, SECOND_PURGE_MS);
+      }
       // Scroll first, so the grid loads the blocks there; then, as they land, anchor on the order itself.
       RESTORE_RETRY_MS.forEach((ms) => {
         restoreTimers.push(
@@ -349,12 +339,10 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
     },
 
     reset(): void {
+      if (secondPurgeTimer !== null) timers.clearTimeout(secondPurgeTimer);
+      secondPurgeTimer = null;
       rootRefreshing = false;
       addedWhileRefreshing = false;
-      followUps = 0;
-      followUpRequested = false;
-      if (watchdog !== null) timers.clearTimeout(watchdog);
-      watchdog = null;
       ticks.clear();
       refresh.reset();
       pendingShift = 0;
@@ -366,9 +354,8 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
     },
 
     beginReload(): void {
-      followUps = 0;
-      followUpRequested = false;
-      startRootReload();
+      rootRefreshing = true;
+      addedWhileRefreshing = false;
     },
 
     dispose(): void {
