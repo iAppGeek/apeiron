@@ -87,7 +87,57 @@ Scenario S3 depends on it, and both sides were missing a way to notice a half-op
 
 Every scenario runs against the 1,000,000-row stack, opens all five views, and ends with the three checks. Each writes `e2e/results/<scenario>-<timestamp>.json` (gitignored).
 
-SCENARIOS_PLACEHOLDER
+### Tiers
+
+One table (`e2e/support/tiers.ts`) parameterises every scenario, so the three tiers run the same code with different lengths. Every tier runs all the faults it lists and the same three checks, and its minimum reconnects and deltas scale with it, so none can pass vacuously. Each result file records its tier, and the scenario id carries it (`S1`, `S1-quick`, `S1-smoke`).
+
+| Tier | Command | Use it | Scenarios | Wall time |
+|---|---|---|---|---|
+| quick | `pnpm e2e:resilience:quick` | the standard run, before a merge or after a change to the transport, the tracker or the grid | all eight, shortened (plus the canary) | about 14 minutes (834 s, 843 s, 875 s) |
+| full | `pnpm e2e:resilience` | releases and demos | all eight at the Appendix G lengths (plus the canary) | about 27 minutes (1,619 s) |
+| smoke | `pnpm e2e:resilience:smoke` | CI | S1 for 60 s with drops every 10 s, and S3 once | about 3 minutes (the CI step takes under 4) |
+
+| Scenario | quick | full | smoke |
+|---|---|---|---|
+| S1 steady drops | 6 drops 20 s apart (about 150 s) | 10 drops 30 s apart (about 345 s) | 5 drops 10 s apart, shorter outages (about 75 s) |
+| S2 flapping | 45 s | 120 s | not run |
+| S3 half-open stall | 1 x 20 s | 3 x 20 s | 1 x 12 s |
+| S4 outage in a burst | 30 s down, stress rate | 60 s down, stress rate | not run |
+| S5 latency | 60 s, 1 drop | 180 s, 2 drops | not run |
+| S6 low bandwidth | 60 s at 64 KB/s, then 30 s at 16 KB/s | 180 s then 60 s | not run |
+| S7 server restart | 1 restart | 2 restarts | not run |
+| S8 command across a drop | as full | 4 commands | not run |
+
+Verification is the same in all tiers and is not shortened: the checks read the same fields at the same strictness. It is fast because the five pages' checks and the model check run side by side, and the orders an event touched near the top of the table are read in 5,000-row blocks instead of one request each (the ones further away still go one at a time).
+
+Each scenario below gives what it simulates, why, how sync is proven, the pass criteria, and its latest results. Durations are the full tier's; the quick lengths are in the table above.
+
+**S1: steady updates with periodic drops (the required scenario).** *Simulates* the initial image, then updates for about five minutes (normal rate) while the WebSocket is dropped every 30 s, ten times, rotating a clean reset, the proxy down for 3 s and the proxy down for 10 s. A drop is only made once every page is connected again, so each one lands on an established connection. *Why:* it is the user's own acceptance test: leave the blotter running over a flaky link. *Proof:* the three checks on all five views. *Passes when* every page saw at least one reconnect per drop (10 in the full tier), at least 20 deltas, no check failed.
+
+**S2: rapid flapping.** *Simulates* a drop every 2 to 5 s for two minutes, rotating six kinds: a plain reset; one timed during an in-flight `getRows` (V1 is scrolled 4,000 rows as the drop lands); one during a `hello` (the proxy goes down for 1 s and a reset toxic is armed as it returns, so it fires on the welcome); one during a trader switch (V1); one during a codec switch (V3); and a 1 s outage. *Why:* reconnect logic fails in the overlaps. *Proof:* the three checks; after the quiet period no page may be busy (a trader or codec change unfinished, a request unanswered, the overlay up) or still loading. *Passes when* at least 15 reconnects per page (quick: 6).
+
+**S3: half-open stall.** *Simulates* a `timeout` toxic of 0 in both directions for 20 s, three times: the socket stays open and nothing flows, which only the client's own heartbeat can notice. *Why:* a dead Wi-Fi or a NAT that dropped the mapping looks exactly like this. *Proof:* the time from the toxic to the page's close reason `stale:` is measured on every page; then the three checks. *Passes when* every detection takes between 5.0 and 9.5 s (the heartbeat is 6 s checked every 2 s, so about 6 to 8 s), at least 3 reconnects, and the checks pass.
+
+**S4: a long outage during a burst.** *Simulates* the proxy down for 60 s while the driver runs the stress rate (2,000 updates and 50 new orders a second). *Why:* the backlog and the cost of catching up are the hard part of a reconnect. *Proof:* the three checks (the model check reads about 8,000 orders). *Passes when* every page reconnects exactly once and the checks pass; V2's viewport and badge are recorded. After the reload V2 is back at the top of the table with no badge, not at its old depth (see Known limitations).
+
+**S5: high latency.** *Simulates* 300 ms plus or minus 100 ms each way for three minutes, with a clean reset at 60 s and a 3 s outage at 120 s. *Why:* slow is not down; ordering bugs show when replies and deltas cross. *Proof:* the three checks, and the tick-to-screen p50 and p95 are recorded once a second (they include the 600 ms the proxy adds). *Passes when* at least 2 reconnects, the checks pass and a p95 was recorded for every page.
+
+**S6: low bandwidth.** *Simulates* the downstream limited to 64 KB/s for three minutes, then to 16 KB/s for one minute with the driver switched to the stress rate so the stream outruns the link. *Why:* a slow client must not hold the server hostage, and must come back correct. *Proof:* the server's `apeiron_backpressure_events_total` counters (conflation under the first limit, `slow_consumer` under the second) and the pages' close reasons; then the three checks once the bandwidth is back. *Passes when* the server conflated or cut off at least one client, `slow_consumer` fired, some page was cut off (close code 1013, or its link went so quiet that its own heartbeat abandoned it, which is what the page usually sees because the 1013 frame queues behind the data held for the throttled link) and reconnected, and the checks pass.
+
+**S7: server restart.** *Simulates* `docker compose restart antikythera` in the middle of the stream, twice. *Why:* the server reloads its store from the database and replays the durable consumer; this proves no event was lost on the server side. *Proof:* the model check passes (every created and touched order equals the model), plus the screen check. *Passes when* every page reconnects at least once per restart. During the restart `lastUpdateTime` is allowed to step back (see Known limitations); every other invariant stays on.
+
+**S8: a command across a drop.** *Simulates* four Pause and Cancel commands from the grid, each followed within 150 ms by the proxy going down while the ack is held back by a 1.5 s downstream delay. *Why:* a request that can never be answered must not hang the UI or leave a spinner. *Proof:* an error toast must appear while the link is down; afterwards no row shows the pending spinner, no request is outstanding, and the three checks pass whether or not the server applied the command (the model includes the command's effect either way, because the driver's hermes handled it). *Passes when* every page reconnects once per round.
+
+**Canary.** Not a scenario: it proves the screen check can fail (see above).
+
+### Known limitations the suite surfaced
+
+- **A reload starts at the top.** After a reconnect, the grid reloads from nothing and V2 is back at row 0 (S4 records `v2FirstRowBefore` about 430,000 and `v2FirstRowAfter` 0, with the badge cleared). The orders around the old position have moved by thousands of rows during an outage, so there is nothing exact to return to.
+- **A restart steps `lastUpdateTime` back for a moment.** Price-driven changes are never persisted (by design), so after a restart an open order's `lastUpdateTime` is its last durable one until the next tick (under a second) reprices it. A user sees an update time a few seconds older for under a second, and nothing else. S7 allows this one field to step back from the restart until five seconds after the pages are connected again.
+- **Under a saturated link the page may give up before the server does.** At 16 KB/s the client sees no frame for 6 s and reconnects; its tick-to-screen p95 in S6 reaches 20 s or more while the link is throttled.
+- **The quick tier takes about 14 minutes, not 10 to 12.** Ten minutes of it is the fault durations themselves; the rest is the three-check verification, run at full strictness, and two server load times.
+
+
 
 ### Reading a result file
 
@@ -117,4 +167,39 @@ SCENARIOS_PLACEHOLDER
 - `latency` is the page's own rolling 10-second tick-to-screen p50 and p95 (from `delta.srcTs` to the delta being applied), sampled once a second; the report keeps the median and the worst of those p95 figures. Under S5 it includes the latency the proxy adds.
 - `ordersCompared`, `leafRowsCompared`, `groupsCompared` show how much each check actually looked at; a pass with a count of zero would be suspect.
 
-LATEST_RESULTS_PLACEHOLDER
+## Latest results
+
+Local, against the 1,000,000-row stack on one laptop (Docker VM with 6 GB), commit `2b2f827` plus the CI fixes after it. `reconnects` and `deltas` are the lowest and highest across the five pages; `orders compared` is the model check; `p95` is the median of the pages' once-a-second tick-to-screen p95 (lowest to highest page).
+
+### Full tier, final run (27 minutes, 9 of 9 passed)
+
+| Scenario | Result | Reconnects | Deltas applied | Orders compared | Run / total | Tick-to-screen p95 |
+|---|---|---|---|---|---|---|
+| S1 | pass | 10 | 2,398 to 2,674 | 2,936 | 320 s / 346 s | 62 to 70 ms |
+| S2 | pass | 23 to 27 | 610 to 754 | 1,947 | 122 s / 142 s | 82 to 94 ms |
+| S3 | pass | 3 | 275 to 308 | 1,828 | 96 s / 123 s | 61 to 66 ms |
+| S4 | pass | 1 | 203 to 299 | 8,351 | 90 s / 129 s | 213 to 286 ms |
+| S5 | pass | 2 | 1,682 to 2,129 | 4,448 | 213 s / 242 s | 424 to 442 ms |
+| S6 | pass | 1 to 4 | 705 to 1,907 | 7,880 | 242 s / 263 s | 314 ms to 23 s (throttled link) |
+| S7 | pass | 2 | 587 to 930 | 4,967 | 131 s / 160 s | 70 to 71 ms |
+| S8 | pass | 4 | 359 to 411 | 1,755 | 75 s / 100 s | 64 to 70 ms |
+
+S3 stall detection (15 measurements): 7.2 to 7.9 s, against the 6 to 8 s expected. S6 server counters: 6,698 conflations and 8 `slow_consumer` closes. Earlier full runs on earlier code are in `docs/checkpoints/CP-6.md`; they failed on the bugs listed there.
+
+### Quick tier, the last three runs (all green, 834 s, 843 s and 875 s wall time each, including the canary)
+
+| Scenario | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| S1 (6 drops) | pass, 6 reconnects, 855 to 942 deltas, 154 s | pass, 829 to 936, 154 s | pass, 838 to 937, 150 s |
+| S2 (45 s) | pass, 10 reconnects, 239 to 305 deltas, 63 s | pass, 248 to 316, 64 s | pass, 276 to 327, 65 s |
+| S3 (1 x 20 s) | pass, detect 7.5 s, 59 s | pass, detect 7.1 s, 60 s | pass, detect 7.4 to 7.5 s, 61 s |
+| S4 (30 s down) | pass, 1 reconnect, 6,500 orders, 79 s | pass, 6,513 orders, 80 s | pass, 6,545 orders, 101 s |
+| S5 (60 s, 1 drop) | pass, p95 430 to 447 ms, 76 s | pass, 415 to 444 ms, 78 s | pass, 408 to 446 ms, 86 s |
+| S6 (60 s + 30 s) | pass, 2,103 conflations, 3 `slow_consumer`, 109 s | pass, 2,163 and 2, 109 s | pass, 1,550 and 3, 112 s |
+| S7 (1 restart) | pass, 4,941 orders, 84 s | pass, 4,970 orders, 85 s | pass, 5,045 orders, 86 s |
+| S8 (4 commands) | pass, 4 reconnects, 101 s | pass, 101 s | pass, 103 s |
+
+### Smoke tier
+
+Passes in CI (`e2e` job, the `Resilience smoke` step) on the PR.
+

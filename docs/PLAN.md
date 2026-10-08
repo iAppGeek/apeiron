@@ -613,7 +613,7 @@ docker compose --profile core --profile monitoring up --build   # full container
 | 6 Actions | ✅ merged | #7 | `PHASE-6-review.md` |
 | 7 Observability + load test | ✅ merged | #8 / `cp-4` | `CP-4-diagnosis.md`, `CP-4-review.md` |
 | 8 Ship | ✅ merged (CP-5 F1–F8 applied; AWS paused, never deployed) | #9 / `cp-5` | `CP-5-review.md` |
-| 9 Resilience suite (Appendix G) | 🟡 in progress | (none yet) | CP-6 |
+| 9 Resilience suite (Appendix G) | 🟡 PR open, awaiting CP-6 review | #10 / `cp-6` | `docs/checkpoints/CP-6.md` |
 | 10 Demo pack (Opus) | ⏳ after CP-6 | (none yet) | (none) |
 
 **Working process:**
