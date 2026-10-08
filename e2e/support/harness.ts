@@ -13,7 +13,7 @@ import {
 } from './oracle';
 import { openView, readSnapshot, readStats, type PageStats, type ViewId, type ViewPage } from './pages';
 import { failuresOf, summariseLatency, writeReport, type ScenarioReport, type ViewReport } from './report';
-import { installSamplerInPage, readSamplerInPage } from './sampler';
+import { installSamplerInPage, readSamplerInPage, setLenientUpdateTimeInPage } from './sampler';
 import { createServerProbe, type ServerProbe } from './server-probe';
 import { TIER } from './tiers';
 import { openReader } from './ws-client';
@@ -65,6 +65,8 @@ export type Harness = {
   since(): Promise<{ reconnects: number; deltasApplied: number }[]>;
   /** Waits until every page shows Connected and is not busy. */
   allConnected(timeoutMs: number): Promise<boolean>;
+  /** Lets `lastUpdateTime` step back on every page while a server restart settles (see `setLenientUpdateTimeInPage`). */
+  lenientUpdateTime(on: boolean): Promise<void>;
   /** Runs check 2 on every page right now, without stopping anything. The canary uses it to prove the check can fail. */
   screens(): Promise<Check[]>;
   /** Stops the stream, waits for everything to go quiet, runs the three checks and writes the report. */
@@ -177,6 +179,10 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 
     allConnected: (timeoutMs) =>
       until(async () => (await Promise.all(pages.map((p) => readStats(p.page)))).every((s) => s.state === 'connected' && !s.busy), timeoutMs, 250),
+
+    async lenientUpdateTime(on: boolean): Promise<void> {
+      await Promise.all(pages.map((p) => p.page.evaluate(setLenientUpdateTimeInPage, on)));
+    },
 
     async screens(): Promise<Check[]> {
       const out: Check[] = [];

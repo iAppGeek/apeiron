@@ -58,6 +58,8 @@ export type DeltaApplier = {
   onStoreRefreshed(route: readonly string[] | undefined): void;
   /** Forgets previous values, pending refreshes and pending anchors (trader or codec switch, purge). */
   reset(): void;
+  /** The grid is reloading the root from nothing (a purge): rows added meanwhile need one more refresh once it lands. */
+  beginReload(): void;
   dispose(): void;
 };
 
@@ -222,7 +224,7 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       const topRow = delta.newAbove > 0 || hasRootAdds ? readTopRow(api, options.topRowProbe) : 0;
 
       const insertedAtTop = applyAdds(delta, stats);
-      if (rootRefreshing && insertedAtTop > 0) addedWhileRefreshing = true;
+      if (rootRefreshing && hasRootAdds) addedWhileRefreshing = true;
       applyUpdates(delta, stats);
       applyGroupUpdates(delta, stats);
       for (const route of delta.dirtyRoutes) refresh.request(route);
@@ -281,6 +283,11 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       settledCount = null;
       if (sweepTimer !== null) timers.clearTimeout(sweepTimer);
       sweepTimer = null;
+    },
+
+    beginReload(): void {
+      rootRefreshing = true;
+      addedWhileRefreshing = false;
     },
 
     dispose(): void {

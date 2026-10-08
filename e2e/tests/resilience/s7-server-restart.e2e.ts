@@ -28,11 +28,15 @@ test('S7 antikythera restarts mid-stream', async ({ browser }) => {
       for (let n = 1; n <= p.restarts; n += 1) {
         await waitUntilElapsed(h, h.elapsed() + p.gapMs);
         h.note('restart antikythera', `#${n}`);
+        // A restart returns the server to its last durable state, and price-driven update times are not stored, so an
+        // order's lastUpdateTime is older until the next tick reprices it. The other invariants stay on.
+        await h.lenientUpdateTime(true);
         await run('docker', ['compose', '--profile', 'core', 'restart', 'antikythera'], { cwd: root });
         const up = await until(serverHealthy, 180_000, 1000);
         if (!up) throw new Error('antikythera did not come back after the restart');
         await h.allConnected(120_000);
-        await sleep(2000);
+        await sleep(5000);
+        await h.lenientUpdateTime(false);
       }
       await sleep(p.gapMs);
     },

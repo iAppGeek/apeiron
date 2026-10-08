@@ -175,6 +175,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
     controller.setPurge(() => {
       notePurge();
       live.reset();
+      live.beginReload();
       useAppStore.getState().clearNewOrders();
       api.refreshServerSide({ purge: true });
     });

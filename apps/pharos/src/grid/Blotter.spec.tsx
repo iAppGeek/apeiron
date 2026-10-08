@@ -45,6 +45,7 @@ const makeApplier = (): FakeApplier => ({
   apply: vi.fn(() => stats),
   onStoreRefreshed: vi.fn(),
   reset: vi.fn(),
+  beginReload: vi.fn(),
   dispose: vi.fn(),
 });
 
@@ -168,6 +169,7 @@ describe('Blotter', () => {
     useAppStore.getState().addNewOrders(4);
     const purge = setPurge.mock.calls[0]?.[0] as () => void;
     purge();
+    expect(applier.beginReload).toHaveBeenCalled();
     expect(applier.reset).toHaveBeenCalledTimes(1);
     expect(useAppStore.getState().newOrders).toBe(0);
     expect(api.refreshServerSide).toHaveBeenCalledWith({ purge: true });

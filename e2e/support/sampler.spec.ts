@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { installSamplerInPage, readSamplerInPage } from './sampler';
+import { installSamplerInPage, readSamplerInPage, setLenientUpdateTimeInPage } from './sampler';
 
 type Row = { data: Record<string, unknown> };
 const row = (orderId: string, over: Record<string, unknown> = {}): Row => ({
@@ -58,6 +58,18 @@ describe('invariant sampler', () => {
     sample([]);
     sample([row('A', { filledQty: 4 })]);
     expect(readSamplerInPage().violationCount).toBe(1);
+  });
+
+  it('lets lastUpdateTime step back only while lenient, and still flags the other fields', () => {
+    installSamplerInPage(500);
+    sample([row('A', { lastUpdateTime: 5000, filledQty: 10 })]);
+    setLenientUpdateTimeInPage(true);
+    sample([row('A', { lastUpdateTime: 1000, filledQty: 10 })]);
+    sample([row('A', { lastUpdateTime: 1000, filledQty: 4 })]);
+    setLenientUpdateTimeInPage(false);
+    sample([row('A', { lastUpdateTime: 900, filledQty: 4 })]);
+    const report = readSamplerInPage();
+    expect(report.violations.map((v) => v.kind)).toEqual(['filledQty', 'lastUpdateTime']);
   });
 
   it('is idempotent, caps the violation list, and reports nothing after it is read', () => {

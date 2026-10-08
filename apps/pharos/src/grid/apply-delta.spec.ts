@@ -301,6 +301,18 @@ describe('createDeltaApplier', () => {
       expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
     });
 
+    it('does the same after a purge reload, even when the grid could not take the adds yet', () => {
+      const { grid, applier } = setup();
+      applier.reset();
+      applier.beginReload();
+      grid.applyServerSideTransaction.mockReturnValueOnce(undefined as never);
+      applier.apply(delta(topAdd('A4')));
+      applier.onStoreRefreshed([]);
+      vi.advanceTimersByTime(1000);
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
+      expect(grid.refreshServerSide).toHaveBeenLastCalledWith({ route: [], purge: false });
+    });
+
     it('forgets a pending follow-up on reset', () => {
       const { grid, applier } = setup();
       applier.apply(delta({ dirtyRoutes: [[]] }));

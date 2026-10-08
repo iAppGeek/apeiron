@@ -32,6 +32,8 @@ type SamplerWindow = {
     maxGap: number;
     violationCount: number;
     violations: Violation[];
+    /** While set, `lastUpdateTime` may step back and the baseline follows it. */
+    lenientUpdateTime?: boolean;
     orders: Map<string, { filled: number; fills: number; updated: number; terminal: boolean }>;
   };
 };
@@ -73,13 +75,13 @@ export function installSamplerInPage(intervalMs: number): void {
       if (before !== undefined) {
         if (filled < before.filled) flag('filledQty', before.filled, filled);
         if (fills < before.fills) flag('numFills', before.fills, fills);
-        if (updated < before.updated) flag('lastUpdateTime', before.updated, updated);
+        if (updated < before.updated && state.lenientUpdateTime !== true) flag('lastUpdateTime', before.updated, updated);
         if (before.terminal && !terminal) flag('terminal-regression', 'FILLED or CANCELLED', status);
       }
       state.orders.set(orderId, {
         filled: before === undefined ? filled : Math.max(before.filled, filled),
         fills: before === undefined ? fills : Math.max(before.fills, fills),
-        updated: before === undefined ? updated : Math.max(before.updated, updated),
+        updated: before === undefined || state.lenientUpdateTime === true ? updated : Math.max(before.updated, updated),
         terminal: terminal || before?.terminal === true,
       });
     }
@@ -100,4 +102,14 @@ export function readSamplerInPage(): SamplerReport {
     violations: state.violations,
     maxGapMs: state.maxGap,
   };
+}
+
+/**
+ * Lets `lastUpdateTime` step back while `on` is true (the other invariants still hold). For a server restart, which
+ * returns the server to its last durable state: price-driven update times are not stored, so an order's is older until
+ * the next tick reprices it.
+ */
+export function setLenientUpdateTimeInPage(on: boolean): void {
+  const state = (globalThis as unknown as SamplerWindow).__apeironSampler;
+  if (state !== undefined) state.lenientUpdateTime = on;
 }
