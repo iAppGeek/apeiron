@@ -44,6 +44,8 @@ export type TestCounters = {
   deltasApplied: number;
   rowsUpdated: number;
   rowsAdded: number;
+  /** Row updates the server sent for rows the grid did not hold, which were dropped. */
+  skipped: number;
   purges: number;
   /** `Date.now()` when the last delta was applied; 0 before any. */
   lastDeltaAt: number;
@@ -86,7 +88,7 @@ type HookWindow = Window & { __apeironTest?: ApeironTestHooks };
 
 let lastRequest: SsrmRequest | null = null;
 
-const counters: TestCounters = { deltasApplied: 0, rowsUpdated: 0, rowsAdded: 0, purges: 0, lastDeltaAt: 0 };
+const counters: TestCounters = { deltasApplied: 0, rowsUpdated: 0, rowsAdded: 0, skipped: 0, purges: 0, lastDeltaAt: 0 };
 
 const keysOf = (node: IRowNode): string[] => {
   const keys: string[] = [];
@@ -107,6 +109,7 @@ export function recordDelta(stats: ApplyStats | void): void {
   if (stats === undefined) return;
   counters.rowsUpdated += stats.rowsUpdated;
   counters.rowsAdded += stats.rowsAdded;
+  counters.skipped += stats.skipped;
 }
 
 export function recordRequest(request: SsrmRequest): void {
@@ -219,6 +222,7 @@ export const resetCountersForTest = (): void => {
   counters.deltasApplied = 0;
   counters.rowsUpdated = 0;
   counters.rowsAdded = 0;
+  counters.skipped = 0;
   counters.purges = 0;
   counters.lastDeltaAt = 0;
   lastRequest = null;

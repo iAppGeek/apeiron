@@ -94,9 +94,22 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
     snapshot = typeof rowId === 'string' ? { rowId, topRow } : null;
   };
 
+  /**
+   * A refresh reloads the cached blocks with one request each, and they are answered one after another. Rows added on
+   * top between two of those answers shift the later blocks against the earlier ones and leave a seam of stale rows
+   * that nothing mends (found by S6, where a throttled link stretched the refresh to seconds). So when rows landed on
+   * top while a root refresh was in flight, the root is refreshed once more when it ends.
+   */
+  let rootRefreshing = false;
+  let addedWhileRefreshing = false;
+
   const refresh = createRouteDebouncer(
     (route) => {
-      if (route.length === 0) takeSnapshot();
+      if (route.length === 0) {
+        takeSnapshot();
+        rootRefreshing = true;
+        addedWhileRefreshing = false;
+      }
       api.refreshServerSide({ route, purge: false });
     },
     options.refreshIntervalMs ?? REFRESH_INTERVAL_MS,
@@ -209,6 +222,7 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       const topRow = delta.newAbove > 0 || hasRootAdds ? readTopRow(api, options.topRowProbe) : 0;
 
       const insertedAtTop = applyAdds(delta, stats);
+      if (rootRefreshing && insertedAtTop > 0) addedWhileRefreshing = true;
       applyUpdates(delta, stats);
       applyGroupUpdates(delta, stats);
       for (const route of delta.dirtyRoutes) refresh.request(route);
@@ -237,6 +251,13 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
 
     onStoreRefreshed(route): void {
       if (route !== undefined && route.length > 0) return;
+      if (rootRefreshing) {
+        rootRefreshing = false;
+        if (addedWhileRefreshing) {
+          addedWhileRefreshing = false;
+          refresh.request([]);
+        }
+      }
       const before = snapshot;
       snapshot = null;
       const settled = settledCount;
@@ -250,6 +271,8 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
     },
 
     reset(): void {
+      rootRefreshing = false;
+      addedWhileRefreshing = false;
       ticks.clear();
       refresh.reset();
       pendingShift = 0;

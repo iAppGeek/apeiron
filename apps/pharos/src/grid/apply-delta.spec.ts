@@ -278,6 +278,40 @@ describe('createDeltaApplier', () => {
     });
   });
 
+  describe('rows added while the root refresh is in flight', () => {
+    const topAdd = (id: string): Partial<DeltaMsg> => ({ adds: [{ route: [], addIndex: 0, rows: [{ orderId: id } as never] }] });
+
+    it('refreshes the root once more when it ends, so blocks answered at different moments do not leave a seam', () => {
+      const { grid, applier } = setup();
+      applier.apply(delta({ dirtyRoutes: [[]] }));
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
+      applier.apply(delta(topAdd('A1')));
+      applier.onStoreRefreshed([]);
+      vi.advanceTimersByTime(1000);
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(2);
+      expect(grid.refreshServerSide).toHaveBeenLastCalledWith({ route: [], purge: false });
+    });
+
+    it('does not refresh again when nothing was added during the refresh', () => {
+      const { grid, applier } = setup();
+      applier.apply(delta({ dirtyRoutes: [[]] }));
+      applier.onStoreRefreshed([]);
+      applier.apply(delta(topAdd('A2')));
+      vi.advanceTimersByTime(5000);
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
+    });
+
+    it('forgets a pending follow-up on reset', () => {
+      const { grid, applier } = setup();
+      applier.apply(delta({ dirtyRoutes: [[]] }));
+      applier.apply(delta(topAdd('A3')));
+      applier.reset();
+      applier.onStoreRefreshed([]);
+      vi.advanceTimersByTime(5000);
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('row counts', () => {
     it('sets the root count and reports it, and leaves other routes to the dirty-route refresh', () => {
       const { grid, applier } = setup();
