@@ -510,6 +510,23 @@ describe('deltas', () => {
     expect(merged[0]?.updates).toEqual([{ route: [], rows: [{ orderId: 'A', marketMid: 23 }] }]);
   });
 
+  it('hands over deltas held for a frame before a reply that arrived after them, so they are applied in the order sent', () => {
+    const rig = connected();
+    for (let i = 1; i <= 22; i += 1) {
+      rig.clock.advance(5);
+      rig.last().receive(delta(i));
+    }
+    const heldSeq = 22;
+    expect(deltas(rig).some((d) => d.seq === heldSeq)).toBe(false);
+    rig.core.request({ t: 'getRows', reqId: 9, req: { startRow: 0, endRow: 1, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [] } });
+    rig.last().receive({ t: 'rows', reqId: 9, rows: [], rowCount: 0, ms: 1 });
+    const order = rig.events.filter((e) => (e.kind === 'message' && e.msg.t === 'delta') || e.kind === 'response');
+    const last = order.at(-1);
+    expect(last?.kind).toBe('response');
+    const lastDelta = order.filter((e) => e.kind === 'message').at(-1);
+    expect(lastDelta?.kind === 'message' && lastDelta.msg.t === 'delta' ? lastDelta.msg.seq : null).toBe(heldSeq);
+  });
+
   it('hands over deltas held for a frame before reporting that the socket closed', () => {
     const rig = connected();
     for (let i = 1; i <= 22; i += 1) {

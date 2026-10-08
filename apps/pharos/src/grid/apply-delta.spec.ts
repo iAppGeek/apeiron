@@ -313,6 +313,29 @@ describe('createDeltaApplier', () => {
       expect(grid.refreshServerSide).toHaveBeenLastCalledWith({ route: [], purge: false });
     });
 
+    it('does not wait for storeRefreshed: a watchdog ends a reload that raised no event, then refreshes once more', () => {
+      const { grid, applier } = setup();
+      applier.reset();
+      applier.beginReload();
+      applier.apply(delta(topAdd('A5')));
+      vi.advanceTimersByTime(3999);
+      expect(grid.refreshServerSide).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1100);
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
+      expect(grid.refreshServerSide).toHaveBeenLastCalledWith({ route: [], purge: false });
+    });
+
+    it('stops following up after a few rounds even if rows keep landing on top', () => {
+      const { grid, applier } = setup();
+      applier.reset();
+      applier.beginReload();
+      for (let round = 0; round < 8; round += 1) {
+        applier.apply(delta(topAdd(`R${round}`)));
+        vi.advanceTimersByTime(5000);
+      }
+      expect(grid.refreshServerSide.mock.calls.length).toBeLessThanOrEqual(3);
+    });
+
     it('forgets a pending follow-up on reset', () => {
       const { grid, applier } = setup();
       applier.apply(delta({ dirtyRoutes: [[]] }));

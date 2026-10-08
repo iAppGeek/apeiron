@@ -227,6 +227,10 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
   };
 
   const onServerMsg = (msg: ServerMsg): void => {
+    // Frames are handled in the order the server sent them. A delta held for the next animation frame is older than a
+    // reply that arrives now; if the reply went first, a reload built after those changes would then have them applied
+    // a second time (rows shifted by the adds again, deep blocks misaligned: found by S6 once V2 stayed deep).
+    if (msg.t !== 'delta' && msg.t !== 'pong') batcher.flush();
     switch (msg.t) {
       case 'welcome': {
         attempt = 0;

@@ -73,6 +73,10 @@ export const REFRESH_INTERVAL_MS = 1000;
 export const SWEEP_INTERVAL_MS = 100;
 /** How far past the rows counted since the last refresh an order may move and still be followed. */
 export const ANCHOR_SLACK_ROWS = 25;
+/** A root reload that raises no `storeRefreshed` is treated as over after this long (ms). */
+export const ROOT_RELOAD_WATCHDOG_MS = 4000;
+/** Most follow-up root refreshes in a row after rows landed on top during one. */
+export const MAX_FOLLOW_UPS = 3;
 /** When the saved order is looked for again after a reload, in ms after the root loaded. */
 export const RESTORE_RETRY_MS: readonly number[] = [0, 100, 250, 500, 1000, 2000];
 
@@ -112,13 +116,41 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
    */
   let rootRefreshing = false;
   let addedWhileRefreshing = false;
+  /** Follow-up refreshes in a row; a stream of adds cannot keep the root reloading for ever. */
+  let followUps = 0;
+  let followUpRequested = false;
+  let watchdog: unknown = null;
+
+  /**
+   * The root reload is over: either AG Grid said so (`storeRefreshed`), or the watchdog did, because a purge may not
+   * raise that event at all. If rows landed on top meanwhile, reload once more.
+   */
+  const finishRootRefresh = (): void => {
+    if (watchdog !== null) timers.clearTimeout(watchdog);
+    watchdog = null;
+    if (!rootRefreshing) return;
+    rootRefreshing = false;
+    if (addedWhileRefreshing && followUps < MAX_FOLLOW_UPS) {
+      addedWhileRefreshing = false;
+      followUpRequested = true;
+      refresh.request([]);
+    }
+  };
+
+  const startRootReload = (): void => {
+    rootRefreshing = true;
+    addedWhileRefreshing = false;
+    if (watchdog !== null) timers.clearTimeout(watchdog);
+    watchdog = timers.setTimeout(finishRootRefresh, ROOT_RELOAD_WATCHDOG_MS);
+  };
 
   const refresh = createRouteDebouncer(
     (route) => {
       if (route.length === 0) {
         takeSnapshot();
-        rootRefreshing = true;
-        addedWhileRefreshing = false;
+        followUps = followUpRequested ? followUps + 1 : 0;
+        followUpRequested = false;
+        startRootReload();
       }
       api.refreshServerSide({ route, purge: false });
     },
@@ -268,13 +300,7 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
 
     onStoreRefreshed(route): void {
       if (route !== undefined && route.length > 0) return;
-      if (rootRefreshing) {
-        rootRefreshing = false;
-        if (addedWhileRefreshing) {
-          addedWhileRefreshing = false;
-          refresh.request([]);
-        }
-      }
+      finishRootRefresh();
       const before = snapshot;
       snapshot = null;
       const settled = settledCount;
@@ -325,6 +351,10 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
     reset(): void {
       rootRefreshing = false;
       addedWhileRefreshing = false;
+      followUps = 0;
+      followUpRequested = false;
+      if (watchdog !== null) timers.clearTimeout(watchdog);
+      watchdog = null;
       ticks.clear();
       refresh.reset();
       pendingShift = 0;
@@ -336,8 +366,9 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
     },
 
     beginReload(): void {
-      rootRefreshing = true;
-      addedWhileRefreshing = false;
+      followUps = 0;
+      followUpRequested = false;
+      startRootReload();
     },
 
     dispose(): void {
