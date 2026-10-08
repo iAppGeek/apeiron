@@ -99,6 +99,7 @@ describe('createAppController', () => {
     expect(useAppStore.getState().confirmedTrader).toBe('T1');
     expect(useAppStore.getState().rowCount).toBeNull();
     expect(purge).toHaveBeenCalledTimes(1);
+    expect(purge).toHaveBeenCalledWith(false);
   });
 
   it('keeps the trader and does not purge when the server rejects the hello', async () => {
@@ -114,7 +115,7 @@ describe('createAppController', () => {
     expect(useAppStore.getState().toasts[0]?.text).toMatch(/trader/i);
   });
 
-  it('changes codec by re-sending hello with the current trader, then purges because the server dropped what it tracked', async () => {
+  it('changes codec by re-sending hello with the current trader, then purges (keeping the place) because the server dropped what it tracked', async () => {
     const client = makeClient();
     const controller = createAppController(client);
     const purge = vi.fn();
@@ -124,6 +125,7 @@ describe('createAppController', () => {
     expect(client.hello).toHaveBeenCalledWith('T1', 'msgpack');
     expect(useAppStore.getState().codec).toBe('msgpack');
     expect(purge).toHaveBeenCalledTimes(1);
+    expect(purge).toHaveBeenCalledWith(true);
   });
 
   it('leaves the codec alone and toasts when the hello fails', async () => {
@@ -340,6 +342,7 @@ describe('createAppController', () => {
       expect(purge).toHaveBeenCalledTimes(1);
       emitMessage(client, welcome);
       expect(purge).toHaveBeenCalledTimes(1);
+      expect(purge).toHaveBeenCalledWith(true);
     });
 
     it('treats close code 1013 the same way', () => {

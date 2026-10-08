@@ -135,6 +135,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
         },
         onRootRowCount: (count, grouped) => {
           store.setRowCount(count, grouped);
+          applier.current?.rootLoaded(count);
         },
         onNotReady: store.setNotReady,
         onError: ({ code, message }) => {
@@ -162,6 +163,7 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
         useAppStore.getState().addNewOrders(count);
       },
       topRowProbe: probe,
+      currentRowCount: () => useAppStore.getState().rowCount,
       canSetRowCount: () => api.getRowGroupColumns().length === 0,
     });
     applier.current = live;
@@ -172,8 +174,9 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
       return stats;
     });
     // A purge starts over: forget previous values, pending refreshes and the new-orders badge, then reload.
-    controller.setPurge(() => {
+    controller.setPurge((keepPosition) => {
       notePurge();
+      if (keepPosition) live.savePosition();
       live.reset();
       live.beginReload();
       useAppStore.getState().clearNewOrders();

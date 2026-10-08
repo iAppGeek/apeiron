@@ -21,15 +21,19 @@ test('S4 long outage during a stress burst', async ({ browser }) => {
       await waitUntilElapsed(h, p.leadMs);
       const before = await readStats(v2.page);
       const badgeBefore = await v2.blotter.badgeCount();
+      const rowsBefore = await v2.blotter.statusRows();
       h.note('down', `${p.downMs}ms`);
       await h.faults.down(p.downMs);
       await h.allConnected(90_000);
       await waitUntilElapsed(h, p.leadMs + p.downMs + p.tailMs);
       const after = await readStats(v2.page);
+      const rowsAfter = await v2.blotter.statusRows();
+      measurements['v2Growth'] = rowsAfter - rowsBefore;
       measurements['v2FirstRowBefore'] = before.firstDisplayedRow;
       measurements['v2FirstRowAfter'] = after.firstDisplayedRow;
       measurements['v2BadgeBefore'] = badgeBefore;
       measurements['v2BadgeAfter'] = await v2.blotter.badgeCount();
+      h.measure('v2Growth', rowsAfter - rowsBefore);
       h.measure('v2FirstRowBefore', before.firstDisplayedRow ?? -1);
       h.measure('v2FirstRowAfter', after.firstDisplayedRow ?? -1);
       h.measure('v2BadgeBefore', badgeBefore);
@@ -40,8 +44,12 @@ test('S4 long outage during a stress burst', async ({ browser }) => {
   printSummary(report);
   expect(report.failures).toEqual([]);
   for (const view of report.views) expect(view.reconnects, `${view.view} reconnects`).toBe(1);
-  // A reload starts over from the top (a known limitation, see docs/TESTING.md): the badge must then be clear, not stuck
-  // counting orders above a viewport that is no longer scrolled. If the view did stay deep, it keeps its badge.
-  const firstRowAfter = Number(measurements['v2FirstRowAfter']);
-  expect(firstRowAfter > 0 || Number(measurements['v2BadgeAfter']) === 0, 'V2 badge after the reload').toBe(true);
+  // The reload keeps the user's place: V2 is back at its old depth, moved down by the orders that arrived above it while
+  // the link was down (which is also how many the badge counts), give or take what arrived while it was measured.
+  const before = Number(measurements['v2FirstRowBefore']);
+  const after = Number(measurements['v2FirstRowAfter']);
+  const growth = Number(measurements['v2Growth']);
+  expect(before, 'V2 was scrolled deep before the outage').toBeGreaterThan(10_000);
+  expect(Math.abs(after - (before + growth)), `V2 first row ${after}, before ${before}, table grew by ${growth}`).toBeLessThanOrEqual(2000);
+  expect(Number(measurements['v2BadgeAfter']), 'V2 badge counts the orders that arrived above').toBeGreaterThan(0);
 });

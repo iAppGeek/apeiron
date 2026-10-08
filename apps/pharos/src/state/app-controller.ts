@@ -29,7 +29,7 @@ export type AppController = {
    * The grid registers how to purge its row cache and forget its live state. Called after a trader or codec change
    * (the server drops what it tracks on every hello) and after a reconnect, which starts with nothing tracked.
    */
-  setPurge: (purge: (() => void) | null) => void;
+  setPurge: (purge: ((keepPosition: boolean) => void) | null) => void;
   /** The grid registers the handler that applies `delta` messages. */
   setDeltaHandler: (handler: DeltaHandler | null) => void;
 };
@@ -37,7 +37,7 @@ export type AppController = {
 /** Glue between the transport client and the app store: wiring, trader and codec changes. */
 export function createAppController(client: BlotterClient, deps: ControllerDeps = {}): AppController {
   const now = deps.now ?? ((): number => Date.now());
-  let purge: (() => void) | null = null;
+  let purge: ((keepPosition: boolean) => void) | null = null;
   /** Trader hellos sent and not yet answered. */
   let inflightTraderHellos = 0;
   let deltaHandler: DeltaHandler | null = null;
@@ -62,7 +62,8 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
     state.setConfirmedTrader(traderId);
     state.setRowCount(null);
     resyncPending = false;
-    purge?.();
+    // Another trader is another table: nothing to keep a place in.
+    purge?.(false);
   };
 
   /** The server cut this client off or the link dropped: reload the grid once the connection is back. */
@@ -118,7 +119,8 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
         } else if (resyncPending) {
           // A fresh session tracks nothing, so deltas stop for every row the grid already holds. Reload them.
           resyncPending = false;
-          purge?.();
+          // Same view, same trader: the user keeps their place.
+          purge?.(true);
         }
         return;
       case 'summary':
@@ -200,7 +202,7 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
       }
       setCodec(codec);
       // The server forgets which blocks this client holds on every hello, so reload them to keep them live.
-      purge?.();
+      purge?.(true);
     },
 
     async changePreset(preset: LoadPreset): Promise<void> {
@@ -216,7 +218,7 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
       }
     },
 
-    setPurge(next: (() => void) | null): void {
+    setPurge(next: ((keepPosition: boolean) => void) | null): void {
       purge = next;
     },
 
