@@ -259,6 +259,36 @@ describe('ClientTracker: rows pushed down by many adds', () => {
   });
 });
 
+describe('ClientTracker: a reload of a block that adds pushed rows out of', () => {
+  it('keeps following the rows pushed past its end, which the grid still holds', () => {
+    const w = world();
+    w.get(req({ startRow: 0, endRow: 3 }));
+    const created = makeOrders([{}, {}, {}, {}, { createdAt: 100 }, { createdAt: 101 }]).slice(4);
+    const out = applyOrders(w.store, w.engine, created);
+    w.collect(out.changes, out.cs);
+    w.tracker.build(w.store, 1);
+    // The grid reloads block 0 (three rows: the two new orders and the old top). The old rows 2 and 3 now sit past its end.
+    w.get(req({ startRow: 0, endRow: 3 }));
+    const next = applyUpdates(w.store, w.engine, [{ orderId: 'T0000002', marketMid: 9 }, { orderId: 'T0000003', marketMid: 8 }]);
+    w.collect(next.changes, next.cs);
+    const updated = w.tracker.build(w.store, 2)?.updates.flatMap((u) => u.rows.map((r) => r.orderId)) ?? [];
+    expect(updated.sort()).toEqual(['T0000002', 'T0000003']);
+  });
+
+  it('does not grow without bound over repeated reloads', () => {
+    const w = world();
+    w.get(req({ startRow: 0, endRow: 3 }));
+    for (let i = 0; i < 40; i += 1) {
+      const rows = makeOrders([{}, {}, {}, {}, ...Array.from({ length: 20 }, (_, k) => ({ createdAt: 1000 + i * 20 + k }))]).slice(4);
+      const out = applyOrders(w.store, w.engine, rows.map((r, k) => ({ ...r, orderId: `N${i}_${k}` })));
+      w.collect(out.changes, out.cs);
+      w.tracker.build(w.store, i);
+      w.get(req({ startRow: 0, endRow: 3 }));
+    }
+    expect(w.tracker.trackedRows).toBeLessThanOrEqual(3 + 200);
+  });
+});
+
 describe('ClientTracker: groups', () => {
   const grouped = (extra: Partial<SsrmRequest> = {}): SsrmRequest =>
     req({
