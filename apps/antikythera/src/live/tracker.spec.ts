@@ -221,6 +221,91 @@ describe('ClientTracker: adds, dirty routes and counts', () => {
   });
 });
 
+describe('ClientTracker: rows pushed down by many adds', () => {
+  it('keeps sending updates for rows the client still holds after more than MAX_ADDED_ROWS new orders landed above them', () => {
+    const w = world();
+    w.get(req());
+    const total = 700;
+    const created = makeOrders([{}, {}, {}, {}, ...Array.from({ length: total }, (_, i) => ({ createdAt: 100 + i, venue: 'EBS' as const, status: 'LIVE' as const }))]).slice(4);
+    for (const order of created) {
+      const out = applyOrders(w.store, w.engine, [order]);
+      w.collect(out.changes, out.cs);
+      w.tracker.build(w.store, 1);
+    }
+    // The four original rows are now at positions 700 to 703, still in the client's cache, so they must stay tracked.
+    const out = applyUpdates(w.store, w.engine, [{ orderId: 'T0000001', marketMid: 42 }]);
+    w.collect(out.changes, out.cs);
+    const delta = w.tracker.build(w.store, 2);
+    const updated = delta?.updates.flatMap((u) => u.rows.map((r) => r.orderId)) ?? [];
+    const refreshed = delta?.dirtyRoutes.length ?? 0;
+    expect(updated.includes('T0000001') || refreshed > 0).toBe(true);
+    expect(updated).toContain('T0000001');
+  });
+
+  it('asks the client to reload the route once adds outgrow what it can hold, instead of silently untracking rows', () => {
+    const w = world();
+    w.get(req());
+    const total = 2100;
+    const created = makeOrders([{}, {}, {}, {}, ...Array.from({ length: total }, (_, i) => ({ createdAt: 100 + i, venue: 'EBS' as const, status: 'LIVE' as const }))]).slice(4);
+    let firstDirty = -1;
+    for (const [i, order] of created.entries()) {
+      const out = applyOrders(w.store, w.engine, [order]);
+      w.collect(out.changes, out.cs);
+      const delta = w.tracker.build(w.store, 1);
+      if (firstDirty < 0 && (delta?.dirtyRoutes.length ?? 0) > 0) firstDirty = i;
+    }
+    expect(firstDirty).toBeGreaterThanOrEqual(1990);
+    expect(firstDirty).toBeLessThan(2010);
+  });
+});
+
+describe('ClientTracker: a reload of a block that adds pushed rows out of', () => {
+  it('keeps following the rows pushed past its end, which the grid still holds', () => {
+    const w = world();
+    w.get(req({ startRow: 0, endRow: 3 }));
+    const created = makeOrders([{}, {}, {}, {}, { createdAt: 100 }, { createdAt: 101 }]).slice(4);
+    const out = applyOrders(w.store, w.engine, created);
+    w.collect(out.changes, out.cs);
+    w.tracker.build(w.store, 1);
+    // The grid reloads block 0 (three rows: the two new orders and the old top). The old rows 2 and 3 now sit past its end.
+    w.get(req({ startRow: 0, endRow: 3 }));
+    const next = applyUpdates(w.store, w.engine, [{ orderId: 'T0000002', marketMid: 9 }, { orderId: 'T0000003', marketMid: 8 }]);
+    w.collect(next.changes, next.cs);
+    const updated = w.tracker.build(w.store, 2)?.updates.flatMap((u) => u.rows.map((r) => r.orderId)) ?? [];
+    expect(updated.sort()).toEqual(['T0000002', 'T0000003']);
+  });
+
+  it('still follows rows that a slow reload let more than a couple of hundred new orders push past its end (bug 9)', () => {
+    const w = world();
+    w.get(req({ startRow: 0, endRow: 3 }));
+    const created = makeOrders([{}, {}, {}, {}, ...Array.from({ length: 600 }, (_, i) => ({ createdAt: 100 + i }))]).slice(4);
+    for (const order of created) {
+      const out = applyOrders(w.store, w.engine, [order]);
+      w.collect(out.changes, out.cs);
+      w.tracker.build(w.store, 1);
+    }
+    // The reload answers only after 600 orders arrived: the grid still holds the old top rows, now at positions 600 and below.
+    w.get(req({ startRow: 0, endRow: 3 }));
+    const next = applyUpdates(w.store, w.engine, [{ orderId: 'T0000002', marketMid: 9 }]);
+    w.collect(next.changes, next.cs);
+    const updated = w.tracker.build(w.store, 2)?.updates.flatMap((u) => u.rows.map((r) => r.orderId)) ?? [];
+    expect(updated).toEqual(['T0000002']);
+  });
+
+  it('does not grow without bound over repeated reloads', () => {
+    const w = world();
+    w.get(req({ startRow: 0, endRow: 3 }));
+    for (let i = 0; i < 40; i += 1) {
+      const rows = makeOrders([{}, {}, {}, {}, ...Array.from({ length: 20 }, (_, k) => ({ createdAt: 1000 + i * 20 + k }))]).slice(4);
+      const out = applyOrders(w.store, w.engine, rows.map((r, k) => ({ ...r, orderId: `N${i}_${k}` })));
+      w.collect(out.changes, out.cs);
+      w.tracker.build(w.store, i);
+      w.get(req({ startRow: 0, endRow: 3 }));
+    }
+    expect(w.tracker.trackedRows).toBeLessThanOrEqual(3 + 1000);
+  });
+});
+
 describe('ClientTracker: groups', () => {
   const grouped = (extra: Partial<SsrmRequest> = {}): SsrmRequest =>
     req({

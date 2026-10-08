@@ -171,6 +171,21 @@ describe('createDatasource', () => {
     expect(params.fail).not.toHaveBeenCalled();
   });
 
+  it('asks again after a timeout instead of failing the block, so the grid is not left empty', async () => {
+    const h = makeHarness();
+    const timeout = new RequestError({ code: 'TIMEOUT', message: 'No response after 30000ms' });
+    h.getRows.mockRejectedValueOnce(timeout).mockRejectedValueOnce(timeout).mockResolvedValue(rows);
+    const params = makeParams();
+    createDatasource({ ...h.deps, retry: { baseMs: 100, maxMs: 250, factor: 2 } }).getRows(params);
+    await vi.waitFor(() => {
+      expect(params.success).toHaveBeenCalledWith({ rowData: rows.rows, rowCount: rows.rowCount });
+    });
+    expect(h.getRows).toHaveBeenCalledTimes(3);
+    expect(params.fail).not.toHaveBeenCalled();
+    expect(h.onError).not.toHaveBeenCalled();
+    expect(h.onNotReady).not.toHaveBeenCalledWith(true);
+  });
+
   it('caps the backoff at maxMs', async () => {
     const h = makeHarness();
     const notReady = new RequestError({ code: 'NOT_READY', message: 'loading' });

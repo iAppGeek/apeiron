@@ -510,6 +510,23 @@ describe('deltas', () => {
     expect(merged[0]?.updates).toEqual([{ route: [], rows: [{ orderId: 'A', marketMid: 23 }] }]);
   });
 
+  it('hands over deltas held for a frame before a reply that arrived after them, so they are applied in the order sent', () => {
+    const rig = connected();
+    for (let i = 1; i <= 22; i += 1) {
+      rig.clock.advance(5);
+      rig.last().receive(delta(i));
+    }
+    const heldSeq = 22;
+    expect(deltas(rig).some((d) => d.seq === heldSeq)).toBe(false);
+    rig.core.request({ t: 'getRows', reqId: 9, req: { startRow: 0, endRow: 1, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [] } });
+    rig.last().receive({ t: 'rows', reqId: 9, rows: [], rowCount: 0, ms: 1 });
+    const order = rig.events.filter((e) => (e.kind === 'message' && e.msg.t === 'delta') || e.kind === 'response');
+    const last = order.at(-1);
+    expect(last?.kind).toBe('response');
+    const lastDelta = order.filter((e) => e.kind === 'message').at(-1);
+    expect(lastDelta?.kind === 'message' && lastDelta.msg.t === 'delta' ? lastDelta.msg.seq : null).toBe(heldSeq);
+  });
+
   it('hands over deltas held for a frame before reporting that the socket closed', () => {
     const rig = connected();
     for (let i = 1; i <= 22; i += 1) {
@@ -531,7 +548,7 @@ describe('close codes', () => {
     rig.core.connect('ws://x/ws');
     rig.last().open();
     rig.last().drop(1013);
-    expect(rig.ofKind('closed')).toEqual([{ kind: 'closed', code: 1013 }]);
+    expect(rig.ofKind('closed')).toEqual([{ kind: 'closed', code: 1013, reason: 'code:1013' }]);
     rig.clock.advance(600);
     expect(rig.sockets).toHaveLength(2);
   });
@@ -541,7 +558,7 @@ describe('close codes', () => {
     rig.core.connect('ws://x/ws');
     rig.last().open();
     rig.last().drop();
-    expect(rig.ofKind('closed')).toEqual([{ kind: 'closed', code: null }]);
+    expect(rig.ofKind('closed')).toEqual([{ kind: 'closed', code: null, reason: 'closed' }]);
     const quiet = makeRig();
     quiet.core.connect('ws://x/ws');
     quiet.last().open();
@@ -582,5 +599,92 @@ describe('codec round trip', () => {
     rig.last().receive({ t: 'ack', reqId: 100 }, 'msgpack');
     const acks = rig.ofKind('message').map((e) => e.msg).filter((m) => m.t === 'ack');
     expect(acks).toEqual([{ t: 'ack', reqId: 99 }, { t: 'ack', reqId: 100 }]);
+  });
+});
+
+describe('heartbeat and half-open detection', () => {
+  const connectWelcomed = (options: Partial<CoreOptions> = {}): Rig => {
+    const rig = makeRig({ pingIntervalMs: 2000, staleAfterMs: 6000, ...options });
+    rig.core.connect('ws://x/ws');
+    rig.last().open();
+    rig.core.hello(1, 'ALL', 'json');
+    rig.last().receive(welcome);
+    return rig;
+  };
+
+  it('abandons a socket that has been silent for more than three ping intervals, and reconnects', () => {
+    const rig = connectWelcomed();
+    rig.clock.advance(6000);
+    expect(rig.sockets).toHaveLength(1);
+    rig.clock.advance(2000);
+    expect(rig.ofKind('closed')).toEqual([{ kind: 'closed', code: null, reason: 'stale:8000ms' }]);
+    expect(rig.sockets[0]?.closed).toBe(true);
+    rig.clock.advance(600);
+    expect(rig.sockets).toHaveLength(2);
+    rig.last().open();
+    expect(rig.last().sentMsgs()[0]?.t).toBe('hello');
+  });
+
+  it('counts a delta, a summary, a pong or a reply as life', () => {
+    const rig = connectWelcomed();
+    const frames: ServerMsg[] = [
+      { t: 'ack', reqId: 5 },
+      { t: 'pong', ts: 1, serverTs: 2 },
+      { t: 'error', code: 'INTERNAL', message: 'x' },
+    ];
+    for (let i = 0; i < 12; i += 1) {
+      rig.clock.advance(2000);
+      const frame = frames[i % frames.length];
+      if (frame !== undefined) rig.last().receive(frame);
+    }
+    expect(rig.sockets).toHaveLength(1);
+    expect(rig.ofKind('closed')).toEqual([]);
+  });
+
+  it('ignores the stale socket close event after abandoning it', () => {
+    const rig = connectWelcomed();
+    const first = rig.last();
+    rig.clock.advance(8000);
+    rig.clock.advance(600);
+    rig.last().open();
+    first.drop(1006);
+    expect(rig.ofKind('closed')).toHaveLength(1);
+    expect(rig.sockets).toHaveLength(2);
+  });
+
+  it('fails in-flight requests as DISCONNECTED when it abandons the socket', () => {
+    const rig = connectWelcomed({ requestTimeoutMs: 60_000 });
+    rig.core.request({ t: 'getRows', reqId: 7, req: { startRow: 0, endRow: 1, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [] } });
+    rig.clock.advance(8000);
+    expect(rig.ofKind('response')).toMatchObject([{ reqId: 7, ok: false, code: 'DISCONNECTED' }]);
+  });
+
+  it('abandons a socket that never finishes connecting', () => {
+    const rig = makeRig({ staleAfterMs: 6000 });
+    rig.core.connect('ws://x/ws');
+    rig.clock.advance(5999);
+    expect(rig.ofKind('closed')).toEqual([]);
+    rig.clock.advance(1);
+    expect(rig.ofKind('closed')).toEqual([{ kind: 'closed', code: null, reason: 'connect-timeout:6000ms' }]);
+    rig.clock.advance(600);
+    expect(rig.sockets).toHaveLength(2);
+  });
+
+  it('counts successful reconnects, not the first connection', () => {
+    const rig = connectWelcomed();
+    const status = (): number => rig.ofKind('status').at(-1)?.reconnects ?? -1;
+    expect(status()).toBe(0);
+    rig.last().drop(1006);
+    rig.clock.advance(600);
+    rig.last().open();
+    rig.last().receive(welcome);
+    expect(status()).toBe(1);
+    rig.last().receive(welcome);
+    expect(status()).toBe(1);
+    rig.clock.advance(8000);
+    rig.clock.advance(600);
+    rig.last().open();
+    rig.last().receive(welcome);
+    expect(status()).toBe(2);
   });
 });

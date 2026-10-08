@@ -23,6 +23,10 @@ class FakeSocket extends EventEmitter {
   bufferedAmount = 7;
   send = vi.fn();
   close = vi.fn();
+  ping = vi.fn();
+  terminate = vi.fn(() => {
+    this.emit('close');
+  });
 }
 
 describe('attachWebSocket', () => {
@@ -73,5 +77,64 @@ describe('attachWebSocket', () => {
     expect(conn().bufferedAmount).toBe(7);
     conn().close(1000, 'bye');
     expect(socket.close).toHaveBeenCalledWith(1000, 'bye');
+  });
+});
+
+describe('attachWebSocket heartbeat', () => {
+  function attachBeating(): { socket: FakeSocket; onClose: ReturnType<typeof vi.fn> } {
+    const socket = new FakeSocket();
+    const onClose = vi.fn();
+    attachWebSocket(
+      socket as unknown as WebSocket,
+      () => ({ onFrame: vi.fn(), onClose }),
+      vi.fn(),
+      { intervalMs: 1000, timeoutMs: 3000 },
+    );
+    return { socket, onClose };
+  }
+
+  it('pings every interval and keeps a client that answers', () => {
+    vi.useFakeTimers();
+    const { socket } = attachBeating();
+    for (let i = 0; i < 10; i += 1) {
+      vi.advanceTimersByTime(1000);
+      socket.emit('pong');
+    }
+    expect(socket.ping).toHaveBeenCalledTimes(10);
+    expect(socket.terminate).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('keeps a client that sends frames but never answers pings', () => {
+    vi.useFakeTimers();
+    const { socket } = attachBeating();
+    for (let i = 0; i < 10; i += 1) {
+      vi.advanceTimersByTime(1000);
+      socket.emit('message', Buffer.from('{"t":"ping"}'), false);
+    }
+    expect(socket.terminate).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('terminates a silent client past the timeout, which releases the session', () => {
+    vi.useFakeTimers();
+    const { socket, onClose } = attachBeating();
+    vi.advanceTimersByTime(3000);
+    expect(socket.terminate).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1000);
+    expect(socket.terminate).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(10_000);
+    expect(socket.terminate).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('stops the timer when the socket closes', () => {
+    vi.useFakeTimers();
+    const { socket } = attachBeating();
+    socket.emit('close');
+    vi.advanceTimersByTime(60_000);
+    expect(socket.ping).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 });

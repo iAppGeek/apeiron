@@ -278,6 +278,183 @@ describe('createDeltaApplier', () => {
     });
   });
 
+  describe('rows added while the root refresh is in flight', () => {
+    const topAdd = (id: string): Partial<DeltaMsg> => ({ adds: [{ route: [], addIndex: 0, rows: [{ orderId: id } as never] }] });
+
+    it('refreshes the root once more when it ends, so blocks answered at different moments do not leave a seam', () => {
+      const { grid, applier } = setup();
+      applier.apply(delta({ dirtyRoutes: [[]] }));
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
+      applier.apply(delta(topAdd('A1')));
+      applier.onStoreRefreshed([]);
+      vi.advanceTimersByTime(1000);
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(2);
+      expect(grid.refreshServerSide).toHaveBeenLastCalledWith({ route: [], purge: false });
+    });
+
+    it('does not refresh again when nothing was added during the refresh', () => {
+      const { grid, applier } = setup();
+      applier.apply(delta({ dirtyRoutes: [[]] }));
+      applier.onStoreRefreshed([]);
+      applier.apply(delta(topAdd('A2')));
+      vi.advanceTimersByTime(5000);
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
+    });
+
+    it('does the same after a purge reload, even when the grid could not take the adds yet', () => {
+      const { grid, applier } = setup();
+      applier.reset();
+      applier.beginReload();
+      grid.applyServerSideTransaction.mockReturnValueOnce(undefined as never);
+      applier.apply(delta(topAdd('A4')));
+      applier.onStoreRefreshed([]);
+      vi.advanceTimersByTime(1000);
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
+      expect(grid.refreshServerSide).toHaveBeenLastCalledWith({ route: [], purge: false });
+    });
+
+    it('forgets a pending follow-up on reset', () => {
+      const { grid, applier } = setup();
+      applier.apply(delta({ dirtyRoutes: [[]] }));
+      applier.apply(delta(topAdd('A3')));
+      applier.reset();
+      applier.onStoreRefreshed([]);
+      vi.advanceTimersByTime(5000);
+      expect(grid.refreshServerSide).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('keeping the place across a reload', () => {
+    const place = (extra: Partial<DeltaApplierOptions> = {}): ReturnType<typeof setup> => {
+      const w = setup({ topRowProbe: () => 430_000, currentRowCount: () => 1_000_000, ...extra });
+      w.grid.topId = 'A';
+      return w;
+    };
+    const rowIndexed = (grid: FakeGrid, id: string, rowIndex: number): void => {
+      (grid.node(id, { orderId: id }) as unknown as { rowIndex: number }).rowIndex = rowIndex;
+    };
+
+    it('scrolls back to the saved row plus the rows that arrived while away, and counts them for the badge', () => {
+      const { grid, applier, onNewAbove } = place();
+      applier.savePosition();
+      applier.reset();
+      applier.beginReload();
+      applier.rootLoaded(1_003_000);
+      vi.advanceTimersByTime(0);
+      expect(grid.ensureIndexVisible).toHaveBeenCalledWith(433_000, 'top');
+      expect(onNewAbove).toHaveBeenCalledWith(3000);
+    });
+
+    it('then anchors on the order itself once it is loaded, when it is within the tolerance', () => {
+      const { grid, applier } = place();
+      applier.savePosition();
+      applier.reset();
+      applier.rootLoaded(1_003_000);
+      vi.advanceTimersByTime(0);
+      grid.ensureIndexVisible.mockClear();
+      rowIndexed(grid, 'A', 433_012);
+      vi.advanceTimersByTime(100);
+      expect(grid.ensureIndexVisible).toHaveBeenCalledTimes(1);
+      expect(grid.ensureIndexVisible).toHaveBeenCalledWith(433_012, 'top');
+      vi.advanceTimersByTime(5000);
+      expect(grid.ensureIndexVisible).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores an order that turns up far from where the arrivals say it should be', () => {
+      const { grid, applier } = place();
+      applier.savePosition();
+      applier.reset();
+      applier.rootLoaded(1_003_000);
+      vi.advanceTimersByTime(0);
+      grid.ensureIndexVisible.mockClear();
+      rowIndexed(grid, 'A', 900_000);
+      vi.advanceTimersByTime(5000);
+      expect(grid.ensureIndexVisible).not.toHaveBeenCalledWith(900_000, 'top');
+      expect(grid.ensureIndexVisible).toHaveBeenCalledWith(433_000, 'top');
+    });
+
+    it('asks again until the viewport is where it should be, because the grid may ignore the first scroll', () => {
+      let top = 0;
+      const { grid, applier } = place({ topRowProbe: () => top });
+      top = 430_000;
+      applier.savePosition();
+      top = 0;
+      applier.rootLoaded(1_000_000);
+      vi.advanceTimersByTime(100);
+      expect(grid.ensureIndexVisible).toHaveBeenCalledTimes(2);
+      top = 430_000;
+      vi.advanceTimersByTime(5000);
+      expect(grid.ensureIndexVisible).toHaveBeenCalledTimes(2);
+    });
+
+    it('purges the cache once more after the restore, exactly once, and restores again when that reload lands', () => {
+      const purgeAgain = vi.fn();
+      const { grid, applier } = place({ purgeAgain });
+      applier.savePosition();
+      applier.reset();
+      applier.rootLoaded(1_003_000);
+      vi.advanceTimersByTime(2499);
+      expect(purgeAgain).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(purgeAgain).toHaveBeenCalledTimes(1);
+      grid.ensureIndexVisible.mockClear();
+      applier.rootLoaded(1_003_010);
+      vi.advanceTimersByTime(0);
+      // The ten orders that arrived meanwhile move the place down by ten.
+      expect(grid.ensureIndexVisible).toHaveBeenCalledWith(433_010, 'top');
+      vi.advanceTimersByTime(20_000);
+      expect(purgeAgain).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels the second purge when something resets the applier first (a trader switch)', () => {
+      const purgeAgain = vi.fn();
+      const { applier } = place({ purgeAgain });
+      applier.savePosition();
+      applier.reset();
+      applier.rootLoaded(1_003_000);
+      vi.advanceTimersByTime(1000);
+      applier.reset();
+      vi.advanceTimersByTime(20_000);
+      expect(purgeAgain).not.toHaveBeenCalled();
+    });
+
+    it('does nothing when the user was at the top, and nothing without a saved place', () => {
+      const top = place({ topRowProbe: () => 0 });
+      top.applier.savePosition();
+      top.applier.rootLoaded(1_003_000);
+      vi.advanceTimersByTime(5000);
+      expect(top.grid.ensureIndexVisible).not.toHaveBeenCalled();
+      const none = place();
+      none.applier.rootLoaded(1_003_000);
+      vi.advanceTimersByTime(5000);
+      expect(none.grid.ensureIndexVisible).not.toHaveBeenCalled();
+    });
+
+    it('keeps the first saved place when a second purge comes before the root has loaded (flapping)', () => {
+      let top = 430_000;
+      const { grid, applier } = place({ topRowProbe: () => top });
+      applier.savePosition();
+      top = 0;
+      applier.savePosition();
+      applier.rootLoaded(1_000_000);
+      vi.advanceTimersByTime(0);
+      expect(grid.ensureIndexVisible).toHaveBeenCalledWith(430_000, 'top');
+    });
+
+    it('never scrolls past the end of a table that shrank, and does not save a place in a grouped view', () => {
+      const small = place();
+      small.applier.savePosition();
+      small.applier.rootLoaded(1000);
+      vi.advanceTimersByTime(0);
+      expect(small.grid.ensureIndexVisible).toHaveBeenCalledWith(999, 'top');
+      const grouped = place({ canSetRowCount: () => false });
+      grouped.applier.savePosition();
+      grouped.applier.rootLoaded(1_000_000);
+      vi.advanceTimersByTime(5000);
+      expect(grouped.grid.ensureIndexVisible).not.toHaveBeenCalled();
+    });
+  });
+
   describe('row counts', () => {
     it('sets the root count and reports it, and leaves other routes to the dirty-route refresh', () => {
       const { grid, applier } = setup();

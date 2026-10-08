@@ -30,6 +30,8 @@ const envSchema = z.object({
   MAX_BLOCK_ROWS: posInt('5000'),
   /** Most ms one flush spends patching views; views not reached carry their changes into the next tick. */
   FLUSH_BUDGET_MS: posInt('40'),
+  /** A client silent this long (no frame, no pong) is terminated. */
+  HEARTBEAT_TIMEOUT_MS: posInt('15000'),
 });
 
 export type AntikytheraConfig = {
@@ -50,6 +52,7 @@ export type AntikytheraConfig = {
   maxBlockRows: number;
   loadBatchSize: number;
   flushBudgetMs: number;
+  heartbeatTimeoutMs: number;
 };
 
 export function loadConfig(env: Record<string, string | undefined>): AntikytheraConfig {
@@ -77,5 +80,6 @@ export function loadConfig(env: Record<string, string | undefined>): Antikythera
     maxBlockRows: e.MAX_BLOCK_ROWS,
     loadBatchSize: e.LOAD_BATCH_SIZE,
     flushBudgetMs: e.FLUSH_BUDGET_MS,
+    heartbeatTimeoutMs: e.HEARTBEAT_TIMEOUT_MS,
   };
 }

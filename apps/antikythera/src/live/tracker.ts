@@ -14,6 +14,8 @@ type Block = {
   kind: 'leaf' | 'group';
   /** Leaf rows (row indexes) or group labels this block holds. A set of what is tracked, not a position map. */
   rows: number[];
+  /** How many rows the block's `getRows` returned; `rows` grows beyond it as adds are tracked. */
+  fetched: number;
   labels: string[];
 };
 
@@ -39,8 +41,18 @@ const emptyPending = (): Pending => ({
   srcTs: Infinity,
 });
 
-/** Most rows tracked in a route's top block through `adds` (a scrolled-away client does not accumulate forever). */
-const MAX_ADDED_ROWS = 500;
+/**
+ * Most rows tracked in a route's top block through `adds` (a scrolled-away client does not accumulate forever). It
+ * matches what the grid can hold for one route (20 cached blocks of 100 rows): rows beyond it have been pushed out
+ * of the client's cache by the new orders above them.
+ */
+const MAX_ADDED_ROWS = 2000;
+/**
+ * Rows pushed past a block's end that a reload of the block keeps tracking. The grid keeps every row it loaded until
+ * a refresh reaches it, and a refresh over a slow link can answer after hundreds of new orders arrived, so this
+ * is half of what the grid can hold; the other half leaves room for new adds before the route is reloaded (bug 9).
+ */
+const RETAINED_ROWS = MAX_ADDED_ROWS / 2;
 
 /**
  * What one client currently holds, and what changed under it. Mirrors the grid's block cache: each `getRows`
@@ -82,6 +94,11 @@ export class ClientTracker {
     for (const [key, r] of this.routes) this.pending.dirty.set(key, r.route);
   }
 
+  /** Whether new orders are waiting to be sent. They move every row below them, so a reply built after them must follow them. */
+  get hasPendingAdds(): boolean {
+    return this.pending.adds.length > 0;
+  }
+
   /** Whether any change is waiting to be sent. */
   get hasPending(): boolean {
     const p = this.pending;
@@ -93,9 +110,17 @@ export class ClientTracker {
     if (track.view !== this.currentView) this.follow(track.view);
     const key = `${track.routeKey}#${track.startRow}`;
     const existing = this.blocks.get(key);
+    let rows = track.rowIdx;
     if (existing !== undefined) {
       this.unref(existing);
       this.blocks.delete(key);
+      // New orders on top pushed this block's last rows past its end. A refresh reloads the block's own range only, so
+      // the grid keeps those rows beyond it, untracked and going stale (found by S2). Keep following them.
+      if (track.kind === 'leaf' && existing.kind === 'leaf' && existing.rows.length > existing.fetched) {
+        const fresh = new Set(rows);
+        const carried = existing.rows.slice(rows.length).filter((r) => !fresh.has(r)).slice(0, RETAINED_ROWS);
+        rows = [...rows, ...carried];
+      }
     }
     const block: Block = {
       key,
@@ -103,7 +128,8 @@ export class ClientTracker {
       route: track.route,
       startRow: track.startRow,
       kind: track.kind,
-      rows: track.rowIdx,
+      rows,
+      fetched: track.rowIdx.length,
       labels: track.labels,
     };
     this.blocks.set(key, block);
@@ -215,7 +241,11 @@ export class ClientTracker {
     if (block === undefined) return;
     for (const row of rows) this.refRow(row, block);
     block.rows = [...rows, ...block.rows];
+    if (block.rows.length <= MAX_ADDED_ROWS) return;
     while (block.rows.length > MAX_ADDED_ROWS) this.unrefRow(block.rows.pop() as number);
+    // Rows pushed off the end may still sit in the client's cache, now untracked and going stale. Have the client
+    // reload the route, which records what it really holds.
+    this.pending.dirty.set(routeKey, block.route);
   }
 
   /**

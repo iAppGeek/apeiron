@@ -44,6 +44,10 @@ export type DeltaApplierOptions = {
   topRowProbe?: () => number | null;
   /** AG Grid refuses `setRowCount` while rows are grouped (error 28); the host says when it may be called. Default always. */
   canSetRowCount?: () => boolean;
+  /** Reloads the whole cache once more (a purge), used to drop the blocks loaded while the root was briefly at row 0. */
+  purgeAgain?: () => void;
+  /** The root row count the grid last loaded (the status bar's), for sizing a reload against what it held before. */
+  currentRowCount?: () => number | null;
   timers?: Timers;
   /** Each route is refreshed at most once per this long. Default 1000ms. */
   refreshIntervalMs?: number;
@@ -58,6 +62,12 @@ export type DeltaApplier = {
   onStoreRefreshed(route: readonly string[] | undefined): void;
   /** Forgets previous values, pending refreshes and pending anchors (trader or codec switch, purge). */
   reset(): void;
+  /** The grid is reloading the root from nothing (a purge): rows added meanwhile need one more refresh once it lands. */
+  beginReload(): void;
+  /** Notes where the user is, before a purge that keeps their place. Returns nothing; `rootLoaded` uses it. */
+  savePosition(): void;
+  /** The root of the reloaded grid has its first block and row count: put the viewport back where `savePosition` noted. */
+  rootLoaded(rowCount: number): void;
   dispose(): void;
 };
 
@@ -65,6 +75,10 @@ export const REFRESH_INTERVAL_MS = 1000;
 export const SWEEP_INTERVAL_MS = 100;
 /** How far past the rows counted since the last refresh an order may move and still be followed. */
 export const ANCHOR_SLACK_ROWS = 25;
+/** When the saved order is looked for again after a reload, in ms after the root loaded. */
+export const RESTORE_RETRY_MS: readonly number[] = [0, 100, 250, 500, 1000, 2000];
+/** After the viewport is restored, the cache is purged once more this long after the root loaded (ms). */
+export const SECOND_PURGE_MS = 2500;
 
 /**
  * Applies live `delta` messages to the SSRM grid (Appendix C, "Delta semantics"):
@@ -94,14 +108,35 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
     snapshot = typeof rowId === 'string' ? { rowId, topRow } : null;
   };
 
+  /**
+   * A refresh reloads the cached blocks with one request each, and they are answered one after another. Rows added on
+   * top between two of those answers shift the later blocks against the earlier ones and leave a seam of stale rows
+   * that nothing mends (found by S6, where a throttled link stretched the refresh to seconds). So when rows landed on
+   * top while a root refresh was in flight, the root is refreshed once more when it ends.
+   */
+  let rootRefreshing = false;
+  let addedWhileRefreshing = false;
+
   const refresh = createRouteDebouncer(
     (route) => {
-      if (route.length === 0) takeSnapshot();
+      if (route.length === 0) {
+        takeSnapshot();
+        rootRefreshing = true;
+        addedWhileRefreshing = false;
+      }
       api.refreshServerSide({ route, purge: false });
     },
     options.refreshIntervalMs ?? REFRESH_INTERVAL_MS,
     timers,
   );
+
+  /** Where the user was before a purge that keeps their place; used once the reloaded root knows its size. */
+  let saved: { index: number; rowId: string | null; rowCount: number | null; second: boolean } | null = null;
+  let secondPurgeTimer: unknown = null;
+  const restoreTimers: unknown[] = [];
+  const clearRestore = (): void => {
+    for (const t of restoreTimers.splice(0)) timers.clearTimeout(t);
+  };
 
   let sweepTimer: unknown = null;
   /** Rows inserted above the viewport by a refresh that has not finished yet. */
@@ -209,6 +244,7 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       const topRow = delta.newAbove > 0 || hasRootAdds ? readTopRow(api, options.topRowProbe) : 0;
 
       const insertedAtTop = applyAdds(delta, stats);
+      if (rootRefreshing && hasRootAdds) addedWhileRefreshing = true;
       applyUpdates(delta, stats);
       applyGroupUpdates(delta, stats);
       for (const route of delta.dirtyRoutes) refresh.request(route);
@@ -237,6 +273,13 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
 
     onStoreRefreshed(route): void {
       if (route !== undefined && route.length > 0) return;
+      if (rootRefreshing) {
+        rootRefreshing = false;
+        if (addedWhileRefreshing) {
+          addedWhileRefreshing = false;
+          refresh.request([]);
+        }
+      }
       const before = snapshot;
       snapshot = null;
       const settled = settledCount;
@@ -249,7 +292,57 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       if (top > 0) api.ensureIndexVisible(top + shift, 'top');
     },
 
+    savePosition(): void {
+      // A reload that has not landed yet still owes the place saved by the one before it (flapping reconnects).
+      if (saved !== null) return;
+      const index = readTopRow(api, options.topRowProbe);
+      const rowId = index > 0 ? api.getDisplayedRowAtIndex(index)?.id : undefined;
+      if (index <= 0 || !(options.canSetRowCount?.() ?? true)) return;
+      saved = { index, rowId: typeof rowId === 'string' ? rowId : null, rowCount: options.currentRowCount?.() ?? rootCount, second: false };
+    },
+
+    rootLoaded(rowCount: number): void {
+      const place = saved;
+      saved = null;
+      if (place === null || rowCount <= 0) return;
+      // New orders arrive on top of a createdAt-descending table, so the order the user was reading is that many rows lower.
+      const grew = place.rowCount === null ? 0 : Math.max(0, rowCount - place.rowCount);
+      const target = Math.min(rowCount - 1, place.index + grew);
+      if (grew > 0) options.onNewAbove?.(grew);
+      clearRestore();
+      if (secondPurgeTimer !== null) timers.clearTimeout(secondPurgeTimer);
+      secondPurgeTimer = null;
+      if (!place.second && options.purgeAgain !== undefined) {
+        // While the root was briefly at row 0 the grid cached blocks there; with the viewport now deep they would sit
+        // unwatched and go stale. Purge once more so the cache holds only what is around the restored position.
+        secondPurgeTimer = timers.setTimeout(() => {
+          secondPurgeTimer = null;
+          saved = { index: target, rowId: place.rowId, rowCount, second: true };
+          options.purgeAgain?.();
+        }, SECOND_PURGE_MS);
+      }
+      // Scroll first, so the grid loads the blocks there; then, as they land, anchor on the order itself.
+      RESTORE_RETRY_MS.forEach((ms) => {
+        restoreTimers.push(
+          timers.setTimeout(() => {
+            const node = place.rowId === null ? undefined : api.getRowNode(place.rowId);
+            const found = typeof node?.rowIndex === 'number' ? node.rowIndex : null;
+            const exact = found !== null && Math.abs(found - target) <= grew + ANCHOR_SLACK_ROWS ? found : null;
+            // The grid may not have laid the new root out yet (the first tries can be ignored), so ask again until the
+            // viewport is where it should be; once the order itself is loaded, that settles it.
+            const row = exact ?? target;
+            if (Math.abs(readTopRow(api, options.topRowProbe) - row) > 1) api.ensureIndexVisible(row, 'top');
+            if (exact !== null) clearRestore();
+          }, ms),
+        );
+      });
+    },
+
     reset(): void {
+      if (secondPurgeTimer !== null) timers.clearTimeout(secondPurgeTimer);
+      secondPurgeTimer = null;
+      rootRefreshing = false;
+      addedWhileRefreshing = false;
       ticks.clear();
       refresh.reset();
       pendingShift = 0;
@@ -260,7 +353,14 @@ export function createDeltaApplier(options: DeltaApplierOptions): DeltaApplier {
       sweepTimer = null;
     },
 
+    beginReload(): void {
+      rootRefreshing = true;
+      addedWhileRefreshing = false;
+    },
+
     dispose(): void {
+      clearRestore();
+      saved = null;
       this.reset();
     },
   };

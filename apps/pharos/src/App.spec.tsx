@@ -44,6 +44,7 @@ const makeClient = (): {
     getRows: vi.fn(),
     setFilterValues: vi.fn(),
     control,
+    pending: vi.fn(() => 0),
     dispose: vi.fn(),
   } as unknown as BlotterClient;
   return { client, handlers, hello, connect, control };
@@ -97,7 +98,7 @@ describe('App', () => {
   it('shows connection state and stats from the client in the status bar', () => {
     const { client, handlers } = makeClient();
     render(<App client={client} wsUrl="ws://host/ws" />);
-    handlers.status?.({ status: 'connected', attempt: 0, codec: 'json' });
+    handlers.status?.({ status: 'connected', attempt: 0, codec: 'json', reconnects: 0 });
     handlers.stats?.({ msgsIn: 4, msgsOut: 1, deltasIn: 0, rttMs: 12, clockOffsetMs: null });
     useAppStore.getState().setRowCount(1_000_000);
     return waitFor(() => {

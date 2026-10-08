@@ -10,6 +10,8 @@ const inCi = process.env['CI'] !== undefined && process.env['CI'] !== '';
 export default defineConfig({
   testDir: './tests',
   testMatch: '**/*.e2e.ts',
+  // The resilience suite has its own config (playwright.resilience.config.ts) and its own stack.
+  testIgnore: '**/resilience/**',
   fullyParallel: false,
   workers: 1,
   forbidOnly: inCi,

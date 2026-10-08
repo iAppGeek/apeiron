@@ -130,6 +130,25 @@ describe('ClientSession commands', () => {
   });
 });
 
+describe('ClientSession registration across a slow start', () => {
+  it('joins the flush loop when the runtime comes up after the client said hello', () => {
+    const w = world();
+    const current: { live: LiveHooks | null } = { live: null };
+    const session = new ClientSession(w.connection as unknown as Connection, {
+      engine: () => w.engine,
+      live: () => current.live,
+      log: { warn: vi.fn(), error: vi.fn() },
+      now: () => 1234,
+    });
+    session.handleFrame(json({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'late' }));
+    expect(w.live.register).not.toHaveBeenCalledWith(session);
+    // The store finishes loading and the live runtime starts; the client's next request registers it.
+    current.live = w.live;
+    session.handleFrame(json({ t: 'getRows', reqId: 1, req: req() }));
+    expect(w.live.register).toHaveBeenCalledWith(session);
+  });
+});
+
 describe('ClientSession control and registration', () => {
   it('registers on hello and unregisters on dispose', () => {
     const w = world();
@@ -271,6 +290,24 @@ describe('ClientSession backpressure', () => {
       ]),
     );
     expect(w.connection.close).not.toHaveBeenCalled();
+  });
+
+  it('sends held-back adds before a reply built after them, so the client does not shift the new block twice', () => {
+    const w = world();
+    getRows(w);
+    w.sent.length = 0;
+    w.connection.bufferedAmount = 5_000;
+    const fresh = makeOrders([{}, {}, {}, { createdAt: 99, traderId: 'T1' }]).slice(3) as Order[];
+    w.flush(applyOrders(w.store, w.engine, fresh), 2_000);
+    expect(w.sent).toEqual([]);
+    getRows(w, req(), 2);
+    expect(w.sent.map((m) => m.t)).toEqual(['delta', 'rows']);
+    expect(w.sent[0]).toMatchObject({ t: 'delta', adds: [{ route: [], addIndex: 0 }] });
+    // Nothing is left to send twice once the client drains.
+    w.connection.bufferedAmount = 0;
+    w.sent.length = 0;
+    w.flush(idle(w), 2_100);
+    expect(w.sent.flatMap((m) => (m.t === 'delta' ? m.adds : []))).toEqual([]);
   });
 
   it('sends SLOW_CONSUMER and closes above the hard cap', () => {

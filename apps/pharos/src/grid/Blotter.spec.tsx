@@ -45,6 +45,9 @@ const makeApplier = (): FakeApplier => ({
   apply: vi.fn(() => stats),
   onStoreRefreshed: vi.fn(),
   reset: vi.fn(),
+  beginReload: vi.fn(),
+  savePosition: vi.fn(),
+  rootLoaded: vi.fn(),
   dispose: vi.fn(),
 });
 
@@ -166,13 +169,25 @@ describe('Blotter', () => {
     const { controller, setPurge } = makeController();
     const { unmount } = render(<Blotter client={client} controller={controller} />);
     useAppStore.getState().addNewOrders(4);
-    const purge = setPurge.mock.calls[0]?.[0] as () => void;
-    purge();
+    const purge = setPurge.mock.calls[0]?.[0] as (keepPosition: boolean) => void;
+    purge(true);
+    expect(applier.savePosition).toHaveBeenCalledTimes(1);
+    expect(applier.beginReload).toHaveBeenCalled();
     expect(applier.reset).toHaveBeenCalledTimes(1);
     expect(useAppStore.getState().newOrders).toBe(0);
     expect(api.refreshServerSide).toHaveBeenCalledWith({ purge: true });
     unmount();
     expect(setPurge).toHaveBeenLastCalledWith(null);
+  });
+
+  it('does not keep the place for a purge that changes the table (another trader)', () => {
+    const { client } = makeClient();
+    const { controller, setPurge } = makeController();
+    render(<Blotter client={client} controller={controller} />);
+    const purge = setPurge.mock.calls[0]?.[0] as (keepPosition: boolean) => void;
+    purge(false);
+    expect(applier.savePosition).not.toHaveBeenCalled();
+    expect(applier.reset).toHaveBeenCalledTimes(1);
   });
 
   it('registers a delta handler that applies deltas to the grid and returns the stats, and removes it on unmount', () => {

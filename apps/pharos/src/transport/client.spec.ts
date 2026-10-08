@@ -101,14 +101,14 @@ describe('createBlotterClient', () => {
     const off = client.on('status', status);
     client.on('message', message);
     client.on('stats', stats);
-    w.reply({ kind: 'status', status: 'connected', attempt: 0, codec: 'json' });
+    w.reply({ kind: 'status', status: 'connected', attempt: 0, codec: 'json', reconnects: 0 });
     w.reply({ kind: 'message', msg: welcome });
     w.reply({ kind: 'stats', msgsIn: 1, msgsOut: 2, deltasIn: 4, rttMs: 3, clockOffsetMs: 5 });
-    expect(status).toHaveBeenCalledWith({ status: 'connected', attempt: 0, codec: 'json' });
+    expect(status).toHaveBeenCalledWith({ status: 'connected', attempt: 0, codec: 'json', reconnects: 0 });
     expect(message).toHaveBeenCalledWith(welcome);
     expect(stats).toHaveBeenCalledWith({ msgsIn: 1, msgsOut: 2, deltasIn: 4, rttMs: 3, clockOffsetMs: 5 });
     off();
-    w.reply({ kind: 'status', status: 'closed', attempt: 0, codec: 'json' });
+    w.reply({ kind: 'status', status: 'closed', attempt: 0, codec: 'json', reconnects: 0 });
     expect(status).toHaveBeenCalledTimes(1);
   });
 
@@ -119,6 +119,23 @@ describe('createBlotterClient', () => {
       w.reply({ kind: 'response', reqId: 999, ok: false, code: 'INTERNAL', message: 'x' });
       w.reply({ kind: 'hello-result', id: 999, ok: false, code: 'INTERNAL', message: 'x' });
     }).not.toThrow();
+  });
+
+  it('pending counts requests and hellos until each is answered or failed', async () => {
+    const w = makeWorker();
+    const client = createBlotterClient(w);
+    expect(client.pending()).toBe(0);
+    const p = client.getRows(req);
+    const h = client.hello('ALL', 'json');
+    expect(client.pending()).toBe(2);
+    const reqId = (w.posted[0] as { msg: { reqId: number } }).msg.reqId;
+    w.reply({ kind: 'response', reqId, ok: false, code: 'DISCONNECTED', message: 'gone' });
+    await expect(p).rejects.toMatchObject({ code: 'DISCONNECTED' });
+    expect(client.pending()).toBe(1);
+    const helloId = (w.posted[1] as { id: number }).id;
+    w.reply({ kind: 'hello-result', id: helloId, ok: false, code: 'DISCONNECTED', message: 'gone' });
+    await expect(h).rejects.toMatchObject({ code: 'DISCONNECTED' });
+    expect(client.pending()).toBe(0);
   });
 
   it('dispose closes the worker and rejects what is still pending', async () => {
@@ -192,7 +209,7 @@ describe('createBlotterClient', () => {
     const client = createBlotterClient(w);
     const closed = vi.fn();
     client.on('closed', closed);
-    w.reply({ kind: 'closed', code: 1013 });
-    expect(closed).toHaveBeenCalledWith({ code: 1013 });
+    w.reply({ kind: 'closed', code: 1013, reason: 'test' });
+    expect(closed).toHaveBeenCalledWith({ code: 1013, reason: 'test' });
   });
 });

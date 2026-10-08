@@ -173,10 +173,22 @@ export class LiveStore {
       }
       return;
     }
-    const { changed, prev } = this.store.updateRow(row, event.order);
+    const { changed, prev } = this.store.updateRow(row, this.monotonic(row, event.order));
     this.afterUpdate(row, changed, prev, cs, event.ts);
     if (changed.length > 0) this.dirty.add(event.order.orderId);
     eventRows.add(row);
+  }
+
+  /**
+   * `lastUpdateTime` never moves backwards. Order events carry their producer's clock and repricing uses the
+   * server's, and two clocks disagree by a few milliseconds; without this a row's update time could step back and
+   * a client would see a value older than one it had already shown.
+   */
+  private monotonic<T extends Partial<Order>>(row: number, patch: T): T {
+    const proposed = patch.lastUpdateTime;
+    if (proposed === undefined) return patch;
+    const current = this.store.numberColumn('lastUpdateTime')[row] as number;
+    return current > proposed ? { ...patch, lastUpdateTime: current } : patch;
   }
 
   private afterUpdate(row: number, changed: readonly OrderField[], prev: Partial<Order>, cs: ChangeSet, ts: number): void {
@@ -261,7 +273,7 @@ export class LiveStore {
       orderQty: n('orderQty'),
       notionalUsd: n('notionalUsd'),
     };
-    const { changed, prev } = s.updateRow(row, derivePriceFields(input, tick, now));
+    const { changed, prev } = s.updateRow(row, this.monotonic(row, derivePriceFields(input, tick, now)));
     this.stats.priceRecomputes++;
     cs.noteUpdate(row, changed, prev, ts);
   }

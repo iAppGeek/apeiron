@@ -1,6 +1,6 @@
 name: apeiron
 
-# Profiles: core | seed | monitoring | loadtest | edge
+# Profiles: core | seed | monitoring | loadtest | edge | resilience
 # Paths are resolved against the repo root (project_directory in /compose.yaml).
 services:
   mongo:
@@ -117,6 +117,45 @@ services:
     depends_on:
       antikythera:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  # Resilience suite (docs/TESTING.md): the browser reaches antikythera only through toxiproxy, so the tests can
+  # break, stall, slow and throttle the WebSocket. Needs the core profile too.
+  toxiproxy:
+    profiles: [resilience]
+    # Latest release (v2.12.0); the image has no floating minor tag, so the patch is pinned.
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./infra/toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      - "127.0.0.1:8474:8474"
+    depends_on:
+      antikythera:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The same web image as pharos, built with the test hooks, with /ws going through toxiproxy.
+  pharos-e2e:
+    profiles: [resilience]
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        VITE_TEST_HOOKS: "1"
+    image: ${REGISTRY:-local}/apeiron/pharos-e2e:${TAG:-dev}
+    environment:
+      WS_UPSTREAM: toxiproxy:4100
+    ports:
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      - toxiproxy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
       interval: 5s

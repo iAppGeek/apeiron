@@ -38,6 +38,7 @@ import { GRID_MODULES } from './modules';
 import { buildContextMenuItems, orderTargetOf } from './order-actions';
 import { createPendingCommands } from './pending-commands';
 import { createTickTracker } from './tick-tracker';
+import { installTestHooks, noteDelta, notePurge, noteRequest } from '../testing/hooks-gate';
 import { readFirstVisibleRow } from './viewport-probe';
 
 export type BlotterProps = {
@@ -126,9 +127,15 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
     api.setGridOption(
       'serverSideDatasource',
       createDatasource({
-        client,
+        client: {
+          getRows: (request) => {
+            noteRequest(request);
+            return client.getRows(request);
+          },
+        },
         onRootRowCount: (count, grouped) => {
           store.setRowCount(count, grouped);
+          applier.current?.rootLoaded(count);
         },
         onNotReady: store.setNotReady,
         onError: ({ code, message }) => {
@@ -156,23 +163,36 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
         useAppStore.getState().addNewOrders(count);
       },
       topRowProbe: probe,
+      currentRowCount: () => useAppStore.getState().rowCount,
+      purgeAgain: () => {
+        api.refreshServerSide({ purge: true });
+      },
       canSetRowCount: () => api.getRowGroupColumns().length === 0,
     });
     applier.current = live;
-    controller.setDeltaHandler((delta) => live.apply(delta));
+    const removeHooks = installTestHooks(api, () => client.pending());
+    controller.setDeltaHandler((delta) => {
+      const stats = live.apply(delta);
+      noteDelta(stats);
+      return stats;
+    });
     // A purge starts over: forget previous values, pending refreshes and the new-orders badge, then reload.
-    controller.setPurge(() => {
+    controller.setPurge((keepPosition) => {
+      notePurge();
+      if (keepPosition) live.savePosition();
       live.reset();
+      live.beginReload();
       useAppStore.getState().clearNewOrders();
       api.refreshServerSide({ purge: true });
     });
     return (): void => {
+      removeHooks();
       controller.setPurge(null);
       controller.setDeltaHandler(null);
       live.dispose();
       applier.current = null;
     };
-  }, [api, controller, ticks, probe]);
+  }, [api, controller, ticks, probe, client]);
 
   const onStoreRefreshed = useCallback((event: StoreRefreshedEvent) => {
     applier.current?.onStoreRefreshed(event.route);
