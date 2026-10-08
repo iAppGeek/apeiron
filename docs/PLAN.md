@@ -541,7 +541,7 @@ type ServerMsg =
 - **Browser:** Playwright `e2e/tests/resilience/*.e2e.ts` opens several pages at once, each with a different view.
   - **V1:** the default flat view, at the top.
   - **V2:** flat, scrolled to about row 300,000 (anchoring).
-  - **V3:** grouped by pair, with LIVE drilled open.
+  - **V3:** grouped by status, with LIVE drilled open (CP-6: a LIVE group only exists when grouping by status, and its membership churns).
   - **V4:** status = LIVE, sorted by `unrealisedPnlUsd desc`, so the sort key ticks.
   - **V5:** trader T2 only, using msgpack.
 
