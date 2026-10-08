@@ -613,7 +613,7 @@ docker compose --profile core --profile monitoring up --build   # full container
 | 6 Actions | ✅ merged | #7 | `PHASE-6-review.md` |
 | 7 Observability + load test | ✅ merged | #8 / `cp-4` | `CP-4-diagnosis.md`, `CP-4-review.md` |
 | 8 Ship | ✅ merged (CP-5 F1–F8 applied; AWS paused, never deployed) | #9 / `cp-5` | `CP-5-review.md` |
-| 9 Resilience suite (Appendix G) | 🟡 PR open, awaiting CP-6 review | #10 / `cp-6` | `docs/checkpoints/CP-6.md` |
+| 9 Resilience suite (Appendix G) | ✅ merged (CP-6 fixes F1–F4, bugs 8 and 9, S8 driver hardening applied; quick 9/9 in 11.9 min, full 9/9 in 23.6 min on the final code) | #10 / `cp-6` | `CP-6.md` (incl. "CP-6 fixes"), `CP-6-review.md` |
 | 10 Demo pack (Opus) | ⏳ after CP-6 | (none yet) | (none) |
 
 **Working process:**
@@ -679,7 +679,7 @@ The browser holds 103–120 FPS, the anchor holds deep in the grid, and E2E pass
 
 ### Open items / next steps
 1. ~~Phase 8~~ done (#9 merged as 13b10d6).
-2. Phase 9: build Appendix G. Fix the client and server heartbeat (half-open detection) first. Then CP-6.
+2. ~~Phase 9~~ done (#10 merged). The suite found nine real sync bugs; bug 8 (frames applied out of order) and bug 9 (rows below a slow reload no longer tracked; adds held back past a reply) came after the review. The S8 harness failure "12 publishes failed" was seen once and not reproduced; the driver now retries per order and reports the cause. Details in `CP-6.md`, "CP-6 fixes".
 3. Phase 10 (Opus): local E2E, the DevTools pass and screenshots, `docs/USER-GUIDE.md`, `docs/TESTING.md` (including the resilience scenarios), and the presentation deck.
 4. Known limitations to carry into the docs:
    - non-default-sort anchoring can drift about 1 row on the first refresh after scrolling;

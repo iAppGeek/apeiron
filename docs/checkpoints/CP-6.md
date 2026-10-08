@@ -102,7 +102,7 @@ Node 25.8.2 locally (24 in CI), pnpm 10.33, TypeScript 6.0, Playwright 1.63.0, V
 
 ## 7. Known weaknesses
 
-- **A reload starts at the top.** After a reconnect V2 is back at row 0 (S4: row 430,000 before, 0 after, badge cleared). There is no exact place to return to after an outage, but the user loses their scroll position on every reconnect.
+- **A reload starts at the top.** *Fixed after this review (F1, see "CP-6 fixes" below):* a reconnect now keeps the scroll position.
 - **The model cannot judge the quote fields of closed orders** (whether a tick landed before or after the closing event in one flush); they are excluded from check 1 and the reason is documented. Check 2 still compares them between server and screen.
 - **Group aggregates are compared within a relative 1e-9**, because incremental and from-scratch sums may differ in the last bits.
 - **Check 2 compares the grid's data, not the rendered cells.** Formatting is covered by the unit tests and the normal E2E.
@@ -110,3 +110,48 @@ Node 25.8.2 locally (24 in CI), pnpm 10.33, TypeScript 6.0, Playwright 1.63.0, V
 - **A killed run can leave toxics or a stopped hermes.** The global teardown covers failures and timeouts but not SIGKILL; the commands to restore are in `docs/TESTING.md`.
 - **The suite found seven bugs in the live path in a few hours; the live-delta design (tracked blocks that mirror a client cache the server cannot see) is the common cause.** The fixes make it self-healing (reload when unsure) rather than exact. If more turn up, the next step is a server-side view of what the grid really holds, or reloading on a timer.
 - The quick tier is 14 minutes, not 10 to 12.
+
+## CP-6 fixes
+
+Applied on `phase-9-resilience` after `CP-6-review.md` (APPROVE WITH FIXES), by Sonnet 5.5 under the finishing prompt. **Path taken: c-lite (the fixes, not the fallback).** Every step of the gate passed within the three fix attempts allowed, so the F1 keep-position behaviour stays and S4 keeps its "V2 back at its old depth" assertion.
+
+| Item | Outcome |
+|---|---|
+| **F1** scroll position across a reconnect | Done (`42c88ee`). The grid saves the first visible row and order before a reconnect purge and restores it when the root lands, anchoring on the order itself when it is loaded; the badge counts the orders that arrived meanwhile. S4 asserts V2 returns to its old depth (within 2,000 rows of the old position plus the growth). |
+| **F2** full and quick tier on the final code | Done: quick 9 of 9 in 11.9 minutes (713 s), full 9 of 9 in 23.6 minutes (1,417 s), both on `8820833`. Tables in `TESTING.md`. |
+| **F3** flaky unit test | Done (`ac5fe78`): the system-stats unit test now tolerates load. |
+| **F4** docs | Done (`ac5fe78`): the independence caveat, the S7 `lastUpdateTime` relaxation and V3 by status are in `TESTING.md`. |
+| **Bug 8** frames applied out of order | Fixed (`0527043`). A delta held for the next animation frame could be overtaken by a reply that arrived after it, so a reload built after those adds had them applied twice and deep blocks sat misaligned (found by S6 once F1 kept V2 deep). The transport now flushes held deltas before any reply. |
+| **S1 and the second purge** | After a purge that keeps the view, the cache held blocks loaded while the root was briefly at row 0; one more purge after the viewport is restored leaves only blocks around it (`fb5fe49`). S1 waits for every page. |
+| **Bug 9** stale rows in blocks 3 to 10 after a throttled reconnect (S4, S5, S6) | **Fixed**, two causes, both on the server (`8820833`). See below. |
+| **S8 harness failure** "12 publishes failed" | Hardened, **cause not captured** (see below). |
+
+### Bug 9: diagnosis and fix
+
+Symptom: after a throttled reconnect a few hundred rows (blocks 3 to 10, rows about 300 to 1,000) kept old `filledQty` or quote fields, or sat 100 rows out of place, on V1 and V2, and stayed wrong after four seconds (`stillWrongAfter4s: yes`). The hypothesis in the prompt (a purge drops the tracker's blocks) was not it. A trace of the server's tracker (record, follow, reset, every update sent) next to the pages' skipped updates showed:
+
+1. **The tracker stopped following rows the grid still held.** A reload of the top block keeps tracking rows that new orders pushed past its end, but only 200 of them, so it followed 300 rows in all. A refresh over a slow link answers after hundreds of new orders have arrived, and the grid keeps every row it loaded until a refresh reaches it (a refresh reloads only the blocks in view). The old top rows, now at positions 300 and beyond, were no longer tracked, so no update was ever sent for them. The first stale row was always the first row past 300. The trace showed no `record` of those blocks and no update to those orders after the reload. Fix: keep up to half of what the grid can hold (1,000 rows, `RETAINED_ROWS` in `tracker.ts`); the other half leaves room for new adds before the route is reloaded. Reproducing test: `tracker.spec.ts`, "still follows rows that a slow reload let more than a couple of hundred new orders push past its end (bug 9)".
+2. **Adds held back by backpressure arrived after a reply that already contained them.** A client whose socket is above the soft cap keeps its changes pending. If it asks for a block meanwhile, the reply is built from the current view (adds included) and sent at once, and the held adds follow it, shifting that block a second time while the older blocks are shifted once: rows 100 out of place from the seam down (S6, V2). Fix: when a block is answered and adds are pending for the view, the delta carrying them goes out first (`session.ts`, `onGetRows`). Reproducing test: `session.live.spec.ts`, "sends held-back adds before a reply built after them, so the client does not shift the new block twice".
+
+Neither cause needed a protocol change. Evidence: before the fix S6 failed in two of its first four instrumented attempts; after it, S6, S4 and S5 passed six times each in a row (18 runs), then the quick and full tiers passed.
+
+### S8 harness failure
+
+The full-tier S8 run at 12:40 (right after S7) failed with `driver: 12 publishes failed`, once; no log kept the error. It did not reproduce in five later S8 runs (four full, one quick; one full run came immediately after S7), so its cause is **not established**; the likely one is a JetStream ack that timed out while the bus was busy with the replay after S7's restarts. What changed, without weakening anything:
+
+- The failure now says why: the driver keeps the first five distinct publish error messages and the harness prints them with the count.
+- The driver retries a failed publish up to three times (250 ms, 500 ms apart). Events carry absolute values, so retries must not reorder: publishes for one order go out one after another, so a retry cannot land after a newer event for the same order. A publish that fails all three attempts still counts as a failure and still fails the run; retried successes are counted (`publishRetries`) and recorded in the result file. Tests: `driver.spec.ts` (a retried publish is a retry, not an error; a persistent failure is still an error with its message).
+- One remaining risk: a publish that timed out but was in fact stored is sent again. Events are idempotent on the server (absolute values), so the result is unchanged.
+
+### Results
+
+| Run | Result |
+|---|---|
+| Bug 9 gate: S6 x6, S4 x6, S5 x6 | 18 of 18 green |
+| S8 x2 (full tier) | green, 75 s each, no retries needed |
+| Quick tier, final code | 9 of 9 green, 11.9 minutes (713 s) |
+| Full tier, final code | 9 of 9 green, 23.6 minutes (1,417 s) |
+| `pnpm lint && pnpm typecheck && pnpm test && pnpm build` | green |
+| `pnpm e2e` | 18 of 18 green |
+
+Per-scenario figures are in `TESTING.md`, "Latest results". The seven-bug headline is now nine: bug 8 and bug 9 were found by the same suite after the review, both in the live path's handling of what the grid holds while the link is slow.

@@ -93,8 +93,8 @@ One table (`e2e/support/tiers.ts`) parameterises every scenario, so the three ti
 
 | Tier | Command | Use it | Scenarios | Wall time |
 |---|---|---|---|---|
-| quick | `pnpm e2e:resilience:quick` | the standard run, before a merge or after a change to the transport, the tracker or the grid | all eight, shortened (plus the canary) | about 14 minutes (834 s, 843 s, 875 s) |
-| full | `pnpm e2e:resilience` | releases and demos | all eight at the Appendix G lengths (plus the canary) | about 27 minutes (1,619 s) |
+| quick | `pnpm e2e:resilience:quick` | the standard run, before a merge or after a change to the transport, the tracker or the grid | all eight, shortened (plus the canary) | about 12 minutes (713 s on the final code; 834 to 875 s before the CP-6 fixes) |
+| full | `pnpm e2e:resilience` | releases and demos | all eight at the Appendix G lengths (plus the canary) | about 24 minutes (1,417 s on the final code; 1,619 s before the CP-6 fixes) |
 | smoke | `pnpm e2e:resilience:smoke` | CI | S1 for 60 s with drops every 10 s, and S3 once | about 3 minutes (the CI step takes under 4) |
 
 | Scenario | quick | full | smoke |
@@ -140,7 +140,8 @@ Each scenario below gives what it simulates, why, how sync is proven, the pass c
 
 - **A restart steps `lastUpdateTime` back for a moment.** Price-driven changes are never persisted (by design), so after a restart an open order's `lastUpdateTime` is its last durable one until the next tick (under a second) reprices it. A user sees an update time a few seconds older for under a second, and nothing else. S7 allows this one field to step back from the restart until five seconds after the pages are connected again.
 - **Under a saturated link the page may give up before the server does.** At 16 KB/s the client sees no frame for 6 s and reconnects; its tick-to-screen p95 in S6 reaches 20 s or more while the link is throttled.
-- **The quick tier takes about 14 minutes, not 10 to 12.** Ten minutes of it is the fault durations themselves; the rest is the three-check verification, run at full strictness, and two server load times.
+- **The quick tier takes about 12 minutes.** Ten minutes of it is the fault durations themselves; the rest is the three-check verification, run at full strictness, and two server load times.
+- **The server follows at most 2,000 rows below the top of a route.** That is what the grid's cache can hold (20 blocks of 100). A reload that answers after more than about 1,000 new orders arrived (a throttled link) keeps following the old rows; past 2,000 it asks the client to reload the route instead. Rows beyond that in a cache the client has not refreshed would go stale, which the suite has not seen.
 
 
 
@@ -174,35 +175,37 @@ Each scenario below gives what it simulates, why, how sync is proven, the pass c
 
 ## Latest results
 
-Local, against the 1,000,000-row stack on one laptop (Docker VM with 6 GB), commit `2b2f827` plus the CI fixes after it. `reconnects` and `deltas` are the lowest and highest across the five pages; `orders compared` is the model check; `p95` is the median of the pages' once-a-second tick-to-screen p95 (lowest to highest page).
+Local, against the 1,000,000-row stack on one laptop (Docker VM with 6 GB), on the final code of PR #10 (`8820833`, after the CP-6 fixes). `reconnects` and `deltas` are the lowest and highest across the five pages; `orders compared` is the model check; `p95` is the median of the pages' once-a-second tick-to-screen p95 (lowest to highest page).
 
-### Full tier, final run (27 minutes, 9 of 9 passed)
+### Full tier, final run (23.6 minutes, 9 of 9 passed, 1,417 s wall time including the canary)
 
 | Scenario | Result | Reconnects | Deltas applied | Orders compared | Run / total | Tick-to-screen p95 |
 |---|---|---|---|---|---|---|
-| S1 | pass | 10 | 2,398 to 2,674 | 2,936 | 320 s / 346 s | 62 to 70 ms |
-| S2 | pass | 23 to 27 | 610 to 754 | 1,947 | 122 s / 142 s | 82 to 94 ms |
-| S3 | pass | 3 | 275 to 308 | 1,828 | 96 s / 123 s | 61 to 66 ms |
-| S4 | pass | 1 | 203 to 299 | 8,351 | 90 s / 129 s | 213 to 286 ms |
-| S5 | pass | 2 | 1,682 to 2,129 | 4,448 | 213 s / 242 s | 424 to 442 ms |
-| S6 | pass | 1 to 4 | 705 to 1,907 | 7,880 | 242 s / 263 s | 314 ms to 23 s (throttled link) |
-| S7 | pass | 2 | 587 to 930 | 4,967 | 131 s / 160 s | 70 to 71 ms |
-| S8 | pass | 4 | 359 to 411 | 1,755 | 75 s / 100 s | 64 to 70 ms |
+| S1 | pass | 10 | 2,324 to 2,735 | 2,272 | 320 s / 328 s | 57 to 64 ms |
+| S2 | pass | 28 | 699 to 832 | 1,213 | 125 s / 130 s | 57 to 61 ms |
+| S3 | pass | 3 | 271 to 306 | 1,062 | 95 s / 104 s | 58 to 66 ms |
+| S4 | pass | 1 | 228 to 295 | 7,598 | 90 s / 106 s | 84 to 150 ms |
+| S5 | pass | 2 | 1,247 to 1,804 | 4,848 | 180 s / 189 s | 420 to 430 ms |
+| S6 | pass | 1 to 3 | 701 to 1,988 | 7,102 | 242 s / 245 s | 289 ms to 31 s (throttled link) |
+| S7 | pass | 2 | 526 to 912 | 4,230 | 120 s / 129 s | 62 to 64 ms |
+| S8 | pass | 4 | 293 to 352 | 1,017 | 75 s / 84 s | 56 to 62 ms |
 
-S3 stall detection (15 measurements): 7.2 to 7.9 s, against the 6 to 8 s expected. S6 server counters: 6,698 conflations and 8 `slow_consumer` closes. Earlier full runs on earlier code are in `docs/checkpoints/CP-6.md`; they failed on the bugs listed there.
+Earlier full runs on earlier code are in `docs/checkpoints/CP-6.md`; they failed on the bugs listed there.
 
-### Quick tier, the last three runs (all green, 834 s, 843 s and 875 s wall time each, including the canary)
+### Quick tier, final run (11.9 minutes, 9 of 9 passed, 713 s wall time including the canary)
 
-| Scenario | Run 1 | Run 2 | Run 3 |
-|---|---|---|---|
-| S1 (6 drops) | pass, 6 reconnects, 855 to 942 deltas, 154 s | pass, 829 to 936, 154 s | pass, 838 to 937, 150 s |
-| S2 (45 s) | pass, 10 reconnects, 239 to 305 deltas, 63 s | pass, 248 to 316, 64 s | pass, 276 to 327, 65 s |
-| S3 (1 x 20 s) | pass, detect 7.5 s, 59 s | pass, detect 7.1 s, 60 s | pass, detect 7.4 to 7.5 s, 61 s |
-| S4 (30 s down) | pass, 1 reconnect, 6,500 orders, 79 s | pass, 6,513 orders, 80 s | pass, 6,545 orders, 101 s |
-| S5 (60 s, 1 drop) | pass, p95 430 to 447 ms, 76 s | pass, 415 to 444 ms, 78 s | pass, 408 to 446 ms, 86 s |
-| S6 (60 s + 30 s) | pass, 2,103 conflations, 3 `slow_consumer`, 109 s | pass, 2,163 and 2, 109 s | pass, 1,550 and 3, 112 s |
-| S7 (1 restart) | pass, 4,941 orders, 84 s | pass, 4,970 orders, 85 s | pass, 5,045 orders, 86 s |
-| S8 (4 commands) | pass, 4 reconnects, 101 s | pass, 101 s | pass, 103 s |
+| Scenario | Result | Reconnects | Deltas applied | Orders compared | Run / total | Tick-to-screen p95 |
+|---|---|---|---|---|---|---|
+| S1 (6 drops) | pass | 6 | 790 to 949 | 1,338 | 132 s / 139 s | 59 to 66 ms |
+| S2 (45 s) | pass | 10 | 248 to 331 | 805 | 47 s / 52 s | 57 to 66 ms |
+| S3 (1 x 20 s) | pass | 1 | 127 to 141 | 737 | 35 s / 43 s | 46 to 52 ms |
+| S4 (30 s down) | pass | 1 | 174 to 242 | 5,881 | 55 s / 68 s | 80 to 122 ms |
+| S5 (60 s, 1 drop) | pass | 1 | 324 to 606 | 3,618 | 60 s / 64 s | 426 to 449 ms |
+| S6 (60 s + 30 s) | pass | 0 to 1 | 438 to 686 | 5,423 | 92 s / 97 s | 210 ms to 17 s (throttled link) |
+| S7 (1 restart) | pass | 1 | 264 to 493 | 4,111 | 62 s / 66 s | 66 to 72 ms |
+| S8 (4 commands) | pass | 4 | 482 to 571 | 2,508 | 75 s / 83 s | 60 to 61 ms |
+
+Stability of the gate for bug 9: S6, S4 and S5 each passed six times in a row on the final server code (18 runs), after S6 had failed in two of the previous four attempts. The same code then passed the quick and full tiers above, and S8 twice more on its own.
 
 ### Smoke tier
 
