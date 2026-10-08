@@ -117,6 +117,41 @@ describe('createDriver', () => {
     expect(seen.commands.every((c) => c.requestedBy === 'driver' && c.commandId.startsWith('driver:'))).toBe(true);
   });
 
+  it('retries a publish that fails once and counts it as a retry, not an error', async () => {
+    const bus = new MemoryBus();
+    let failed = 0;
+    const flaky = new Proxy(bus, {
+      get(target, prop, receiver): unknown {
+        if (prop === 'publish') {
+          return (subject: string, payload: unknown): Promise<void> => {
+            if (subject === 'orders.events' && failed < 3) {
+              failed += 1;
+              return Promise.reject(new Error('timeout'));
+            }
+            return target.publish(subject, payload);
+          };
+        }
+        return Reflect.get(target, prop, receiver) as unknown;
+      },
+    });
+    driver = createDriver({
+      bus: flaky,
+      repo: { loadCurrent: () => Promise.resolve(current()), maxOrderId: () => Promise.resolve('ALG00999999') },
+      seed: 1,
+      rate: 'normal',
+      stepMs: 10,
+      pauseEveryMs: 0,
+      retryDelayMs: 1,
+    });
+    await driver.start();
+    await wait(150);
+    await driver.stop();
+    expect(failed).toBe(3);
+    expect(driver.stats().publishRetries).toBeGreaterThan(0);
+    expect(driver.stats().publishErrorSamples).toEqual([]);
+    expect(driver.stats().publishErrors).toBe(0);
+  });
+
   it('counts a failed publish, because the model would then hold an event the bus never got', async () => {
     const bus = new MemoryBus();
     const failing = new Proxy(bus, {
@@ -132,10 +167,12 @@ describe('createDriver', () => {
       rate: 'normal',
       stepMs: 10,
       pauseEveryMs: 0,
+      retryDelayMs: 1,
     });
     await driver.start();
     await wait(100);
     await driver.stop();
     expect(driver.stats().publishErrors).toBeGreaterThan(0);
+    expect(driver.stats().publishErrorSamples).toEqual(['Error: down']);
   });
 });

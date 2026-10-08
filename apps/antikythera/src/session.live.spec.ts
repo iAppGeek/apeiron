@@ -292,6 +292,24 @@ describe('ClientSession backpressure', () => {
     expect(w.connection.close).not.toHaveBeenCalled();
   });
 
+  it('sends held-back adds before a reply built after them, so the client does not shift the new block twice', () => {
+    const w = world();
+    getRows(w);
+    w.sent.length = 0;
+    w.connection.bufferedAmount = 5_000;
+    const fresh = makeOrders([{}, {}, {}, { createdAt: 99, traderId: 'T1' }]).slice(3) as Order[];
+    w.flush(applyOrders(w.store, w.engine, fresh), 2_000);
+    expect(w.sent).toEqual([]);
+    getRows(w, req(), 2);
+    expect(w.sent.map((m) => m.t)).toEqual(['delta', 'rows']);
+    expect(w.sent[0]).toMatchObject({ t: 'delta', adds: [{ route: [], addIndex: 0 }] });
+    // Nothing is left to send twice once the client drains.
+    w.connection.bufferedAmount = 0;
+    w.sent.length = 0;
+    w.flush(idle(w), 2_100);
+    expect(w.sent.flatMap((m) => (m.t === 'delta' ? m.adds : []))).toEqual([]);
+  });
+
   it('sends SLOW_CONSUMER and closes above the hard cap', () => {
     const w = world();
     getRows(w);

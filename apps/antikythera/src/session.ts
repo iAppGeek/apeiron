@@ -87,6 +87,7 @@ export class ClientSession {
   private clientId = '';
   private closed = false;
   private tracker: ClientTracker | null = null;
+  private store: ColumnarStore | null = null;
   private gate: BackpressureGate | null = null;
   private lastSummaryAt = 0;
   private readonly traders: readonly TraderInfo[];
@@ -141,6 +142,7 @@ export class ClientSession {
     const live = this.deps.live?.();
     if (this.closed || !this.helloDone || live === null || live === undefined) return;
     this.tracker ??= new ClientTracker(live.maxTrackedBlocks);
+    this.store = ctx.store;
     this.gate ??= new BackpressureGate(live.backpressure);
     const tracker = this.tracker;
     const view = tracker.view;
@@ -292,6 +294,12 @@ export class ClientSession {
       // Registering twice is harmless.
       live.register(this);
       this.tracker ??= new ClientTracker(live.maxTrackedBlocks);
+      // New orders still held back for this client are already in these rows. Left to follow the reply they would
+      // shift the block a second time (found by S6), so they go out first, whatever the backpressure says.
+      if (this.store !== null && this.tracker.view === result.value.track.view && this.tracker.hasPendingAdds) {
+        const delta = this.tracker.build(this.store, this.now());
+        if (delta !== null) this.send(delta);
+      }
       this.tracker.record(result.value.track);
     }
     this.send({ t: 'rows', reqId: msg.reqId, rows, rowCount, ms: round(ms) });

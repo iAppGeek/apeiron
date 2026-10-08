@@ -275,6 +275,23 @@ describe('ClientTracker: a reload of a block that adds pushed rows out of', () =
     expect(updated.sort()).toEqual(['T0000002', 'T0000003']);
   });
 
+  it('still follows rows that a slow reload let more than a couple of hundred new orders push past its end (bug 9)', () => {
+    const w = world();
+    w.get(req({ startRow: 0, endRow: 3 }));
+    const created = makeOrders([{}, {}, {}, {}, ...Array.from({ length: 600 }, (_, i) => ({ createdAt: 100 + i }))]).slice(4);
+    for (const order of created) {
+      const out = applyOrders(w.store, w.engine, [order]);
+      w.collect(out.changes, out.cs);
+      w.tracker.build(w.store, 1);
+    }
+    // The reload answers only after 600 orders arrived: the grid still holds the old top rows, now at positions 600 and below.
+    w.get(req({ startRow: 0, endRow: 3 }));
+    const next = applyUpdates(w.store, w.engine, [{ orderId: 'T0000002', marketMid: 9 }]);
+    w.collect(next.changes, next.cs);
+    const updated = w.tracker.build(w.store, 2)?.updates.flatMap((u) => u.rows.map((r) => r.orderId)) ?? [];
+    expect(updated).toEqual(['T0000002']);
+  });
+
   it('does not grow without bound over repeated reloads', () => {
     const w = world();
     w.get(req({ startRow: 0, endRow: 3 }));
@@ -285,7 +302,7 @@ describe('ClientTracker: a reload of a block that adds pushed rows out of', () =
       w.tracker.build(w.store, i);
       w.get(req({ startRow: 0, endRow: 3 }));
     }
-    expect(w.tracker.trackedRows).toBeLessThanOrEqual(3 + 200);
+    expect(w.tracker.trackedRows).toBeLessThanOrEqual(3 + 1000);
   });
 });
 

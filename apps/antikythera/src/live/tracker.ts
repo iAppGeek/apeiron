@@ -47,8 +47,12 @@ const emptyPending = (): Pending => ({
  * of the client's cache by the new orders above them.
  */
 const MAX_ADDED_ROWS = 2000;
-/** Rows pushed past a block's end that a reload of the block keeps tracking (a second or two of arrivals). */
-const RETAINED_ROWS = 200;
+/**
+ * Rows pushed past a block's end that a reload of the block keeps tracking. The grid keeps every row it loaded until
+ * a refresh reaches it, and a refresh over a slow link can answer after hundreds of new orders arrived, so this
+ * is half of what the grid can hold; the other half leaves room for new adds before the route is reloaded (bug 9).
+ */
+const RETAINED_ROWS = MAX_ADDED_ROWS / 2;
 
 /**
  * What one client currently holds, and what changed under it. Mirrors the grid's block cache: each `getRows`
@@ -88,6 +92,11 @@ export class ClientTracker {
   /** A view rebuild was deferred and has now run: every route the client tracks must be refreshed. */
   markAllDirty(): void {
     for (const [key, r] of this.routes) this.pending.dirty.set(key, r.route);
+  }
+
+  /** Whether new orders are waiting to be sent. They move every row below them, so a reply built after them must follow them. */
+  get hasPendingAdds(): boolean {
+    return this.pending.adds.length > 0;
   }
 
   /** Whether any change is waiting to be sent. */

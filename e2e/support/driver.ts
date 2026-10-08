@@ -43,6 +43,10 @@ export type DriverStats = {
   ticks: number;
   /** Publishes that failed; any value above zero invalidates the run, since the model holds an event the bus never got. */
   publishErrors: number;
+  /** Publishes that failed once and then got through; they are not errors, but a run with many says the bus is struggling. */
+  publishRetries: number;
+  /** The first distinct messages of those failures, so a failed run says why. */
+  publishErrorSamples: string[];
   created: number;
   commands: { pause: number; resume: number };
 };
@@ -64,6 +68,10 @@ export type DriverOptions = {
   resumeAfterMs?: number;
   /** Added to the local clock for every timestamp the driver stamps, so the stream follows the server's clock. */
   clockOffsetMs?: number;
+  /** Tries per publish before it counts as failed (default 3). */
+  publishAttempts?: number;
+  /** Wait before a retry, times the attempt number (default 250 ms). */
+  retryDelayMs?: number;
 };
 
 export type Driver = {
@@ -94,7 +102,7 @@ const SILENT = {
  */
 export function createDriver(options: DriverOptions): Driver {
   const model: { current: OrderModel } = { current: new OrderModel([]) };
-  const stats: DriverStats = { events: 0, ticks: 0, publishErrors: 0, created: 0, commands: { pause: 0, resume: 0 } };
+  const stats: DriverStats = { events: 0, ticks: 0, publishErrors: 0, publishRetries: 0, publishErrorSamples: [], created: 0, commands: { pause: 0, resume: 0 } };
   const offset = options.clockOffsetMs ?? 0;
   const now = (): number => Date.now() + offset;
   const pending = new Set<Promise<void>>();
@@ -106,13 +114,59 @@ export function createDriver(options: DriverOptions): Driver {
   const resumes: { orderId: string; at: number }[] = [];
 
   const track = (promise: Promise<void>): void => {
-    const settled = promise.catch(() => {
+    const settled = promise.catch((error: unknown) => {
       stats.publishErrors += 1;
+      const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      if (stats.publishErrorSamples.length < 5 && !stats.publishErrorSamples.includes(message)) stats.publishErrorSamples.push(message);
     });
     pending.add(settled);
     void settled.finally(() => {
       pending.delete(settled);
     });
+  };
+
+  const attempts = options.publishAttempts ?? 3;
+  const retryDelay = options.retryDelayMs ?? 250;
+  /** The last publish queued for each order; the next one for that order waits for it (see {@link publishWithRetry}). */
+  const tails = new Map<string, Promise<void>>();
+
+  const orderOf = (subject: string, payload: unknown): string | null => {
+    if (subject !== SUBJECTS.ordersEvents) return null;
+    const event = payload as OrderEvent;
+    return event.type === 'NEW' ? event.order.orderId : event.type === 'UPDATE' ? event.order.orderId : event.orderId;
+  };
+
+  const attempt = async (subject: string, payload: unknown): Promise<void> => {
+    for (let n = 1; ; n += 1) {
+      try {
+        await options.bus.publish(subject, payload);
+        if (n > 1) stats.publishRetries += 1;
+        return;
+      } catch (error) {
+        if (n >= attempts) throw error;
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, retryDelay * n);
+        });
+      }
+    }
+  };
+
+  /**
+   * Publishes, retrying a failure a couple of times, because one JetStream ack can time out while the bus is busy.
+   * Events carry absolute values, so a retried event must not land after a newer one for the same order: each order's
+   * publishes go out one after another, and only a publish that fails every attempt counts as failed.
+   */
+  const publishWithRetry = (subject: string, payload: unknown): Promise<void> => {
+    const order = orderOf(subject, payload);
+    if (order === null) return attempt(subject, payload);
+    const previous = tails.get(order);
+    const run = previous === undefined ? attempt(subject, payload) : previous.then(() => attempt(subject, payload), () => attempt(subject, payload));
+    tails.set(order, run);
+    const forget = (): void => {
+      if (tails.get(order) === run) tails.delete(order);
+    };
+    run.then(forget, forget);
+    return run;
   };
 
   const tee: Bus = {
@@ -126,7 +180,7 @@ export function createDriver(options: DriverOptions): Driver {
         model.current.applyTick(payload as PriceTick);
         stats.ticks += 1;
       }
-      const published = options.bus.publish(subject, payload);
+      const published = publishWithRetry(subject, payload);
       if (subject === SUBJECTS.ordersEvents || subject.startsWith('prices.')) track(published);
       return published;
     },
@@ -139,7 +193,7 @@ export function createDriver(options: DriverOptions): Driver {
     commandSeq += 1;
     const command: OrderCommand = { orderId, action, requestedBy: 'driver', ts: now(), commandId: `driver:${commandSeq}` };
     stats.commands[action === 'PAUSE' ? 'pause' : 'resume'] += 1;
-    track(options.bus.publish(SUBJECTS.ordersCommands, command));
+    track(publishWithRetry(SUBJECTS.ordersCommands, command));
   };
 
   const inject = (pick: () => number): void => {
@@ -203,7 +257,7 @@ export function createDriver(options: DriverOptions): Driver {
     },
 
     model: () => model.current,
-    stats: () => ({ ...stats, commands: { ...stats.commands } }),
+    stats: () => ({ ...stats, publishErrorSamples: [...stats.publishErrorSamples], commands: { ...stats.commands } }),
     startMaxOrderId: () => startMax,
     startedAt: () => startedAt,
   };

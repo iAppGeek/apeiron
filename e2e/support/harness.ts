@@ -219,7 +219,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
       }
       const driverStats = runningDriver.stats();
       if (driverStats.publishErrors > 0) {
-        checks.push({ name: 'driver', ok: false, failures: [`${driverStats.publishErrors} publishes failed, so the model cannot be trusted`], stats: {} });
+        checks.push({ name: 'driver', ok: false, failures: [`${driverStats.publishErrors} publishes failed, so the model cannot be trusted (${driverStats.publishErrorSamples.join('; ')})`], stats: {} });
       }
 
       const stats = await Promise.all(pages.map((p) => readStats(p.page)));
