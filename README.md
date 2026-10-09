@@ -60,6 +60,12 @@ mutate a few orders; `scripts/loadtest-reset.sh` restores the dataset.
 
 | | |
 |---|---|
+| [`docs/TECHNICAL-OVERVIEW.md`](docs/TECHNICAL-OVERVIEW.md) | **start here**: the engineering overview: problem, architecture, server and client internals, protocol, performance results, the CP-4 death spiral, testing strategy, decisions and trade-offs, limitations |
+| [`docs/USER-GUIDE.md`](docs/USER-GUIDE.md) | how to run it, use the blotter, run every test tier and the load test, and troubleshoot |
+| [`docs/TESTING.md`](docs/TESTING.md) | the six test layers and the resilience suite: scenarios, tiers, the three checks, latest results |
+| [`docs/DEMO-SCRIPT.md`](docs/DEMO-SCRIPT.md) | speaker notes for the deck and the live-demo run-sheet (commands, clicks, expected numbers, fallbacks) |
+| [Engineering deck](https://claude.ai/artifact/DkgeXrrCpFVoxPcY3WsPrh) | the 18-slide presentation for the development team (private until shared by its owner) |
+| [`docs/screenshots/demo/`](docs/screenshots/demo) | screenshots from the phase 10 browser pass and Grafana under load |
 | [`docs/architecture.md`](docs/architecture.md) | components, data flow, the key algorithms (columnar store, incremental views, flush loop with a budget, client tracking, anchoring), Mermaid diagrams |
 | [`docs/hosting.md`](docs/hosting.md) | local compose profiles and ports, AWS on demand (Terraform, `remote-*` scripts, costs), GHCR or ECR, alternatives, security notes |
 | [`docs/db-adapters.md`](docs/db-adapters.md) | the `OrderRepository` contract, running the contract suite, Oracle and KDB sketches |
@@ -103,7 +109,9 @@ docker compose --profile core --profile loadtest run --rm talos                 
 | Server RSS median (max) | 1,040 (1,099) MB | 1,019 (1,065) MB |
 | Event-loop lag p99 / p99.9 / longest stall | 23 / 35 / 216 ms | 19 / 32 / 346 ms |
 
-All POC targets are met with both codecs: getRows p95 under 50 ms, view change under 300 ms, end-to-end tick-to-screen p95 under 150 ms, event-loop lag p99 under 50 ms, RSS under 2 GB. msgpack saves about 11% of the bytes (13% on `rows`, 5% on `delta`) and costs a little more server CPU; neither changes a latency target. A 600 s soak with 240 s of stress ran without a stall (CP-4, section 5.3).
+All POC targets are met with both codecs: getRows p95 under 50 ms, view change under 300 ms, end-to-end tick-to-screen p95 under 150 ms, event-loop lag p99 under 50 ms, RSS under 2 GB. msgpack saves about 11% of the bytes (13% on `rows`, 5% on `delta`) and costs a little more server CPU; neither changes a latency target. A 600 s soak with 240 s of stress ran without a stall (CP-4, section 5.3). A reproduction on 2026-10-09 on a 4-vCPU cloud container (4–7× slower per engine operation than the laptop)
+missed four of the five targets without collapsing; see [`docs/checkpoints/PHASE-10.md`](docs/checkpoints/PHASE-10.md) and
+[`docs/TECHNICAL-OVERVIEW.md`](docs/TECHNICAL-OVERVIEW.md) §9.4.
 
 ## What the POC proved
 
