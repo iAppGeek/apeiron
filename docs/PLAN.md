@@ -686,3 +686,4 @@ The browser holds 103–120 FPS, the anchor holds deep in the grid, and E2E pass
    - a connect storm of 50 cold views queues for about 0.2–0.4s;
    - rare single event-loop stalls of 200–350ms show in the max figure;
    - AWS is untested.
+5. **Next plans (agreed drafts, 2026-10-11; open question on whether phase 10 runs before or after PLAN1, see PLAN1):** [`PLAN1-architecture-split.md`](PLAN1-architecture-split.md) (the blotter talks only to NATS; new order service `themis` and pricing service `helios`; users, entitlements and amend), then [`PLAN2-java-blotter.md`](PLAN2-java-blotter.md) (a Java blotter beside Node, switchable per tab), then [`PLAN2.5-comparison-dashboards.md`](PLAN2.5-comparison-dashboards.md) (Node vs Java dashboards and recorded runs).
