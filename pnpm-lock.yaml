@@ -20,9 +20,6 @@ importers:
       '@apeiron/logos':
         specifier: workspace:*
         version: link:../../packages/logos
-      '@apeiron/mnemosyne':
-        specifier: workspace:*
-        version: link:../../packages/mnemosyne
       '@fastify/websocket':
         specifier: ^11.3.3
         version: 11.3.3

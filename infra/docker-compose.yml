@@ -48,14 +48,12 @@ services:
         APP: antikythera
     image: ${REGISTRY:-local}/apeiron/antikythera:${TAG:-dev}
     environment:
-      MONGO_URL: mongodb://mongo:27017
-      MONGO_DB: ${MONGO_DB:-blotter}
-      DB_ADAPTER: ${DB_ADAPTER:-mongo}
       PORT: "4000"
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_OPTIONS: --max-old-space-size=3072
-      LOAD_BATCH_SIZE: ${LOAD_BATCH_SIZE:-200}
       NATS_URL: nats://nats:4222
+      PRICE_WAIT_MS: ${PRICE_WAIT_MS:-10000}
+      CATCHUP_MAX_PENDING: ${CATCHUP_MAX_PENDING:-100}
       FLUSH_MS: ${FLUSH_MS:-50}
       FLUSH_BUDGET_MS: ${FLUSH_BUDGET_MS:-40}
       MAX_TRACKED_BLOCKS: ${MAX_TRACKED_BLOCKS:-100}
@@ -65,8 +63,6 @@ services:
     ports:
       - "127.0.0.1:4000:4000"
     depends_on:
-      mongo:
-        condition: service_healthy
       nats:
         condition: service_healthy
       themis:
@@ -76,7 +72,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
-      start_period: 60s
+      start_period: 120s
     restart: unless-stopped
 
   # The order service of record: owns the database and publishes every order's latest state to the ORDER_STATE

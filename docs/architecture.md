@@ -40,7 +40,7 @@ flowchart LR
   NA -->|"orders.events (durable consumer)"| TH
   TH -->|"group commit"| MO
   TH -->|"ORDER_STATE (after the commit)"| NA
-  MO -->|"loadAll at startup"| AN
+  NA -->|"ORDER_STATE watch at startup, then live"| AN
   GA -->|"upsertMany"| MO
   MO -->|"loadOpen at startup"| TH
   HE -->|"loadOpen at startup"| MO
@@ -51,7 +51,7 @@ flowchart LR
 | Codename | Package | Role |
 |---|---|---|
 | **pharos** | `apps/pharos` | The web app. React 19, AG Grid Enterprise 36 with the server-side row model, a Web Worker that owns the socket and the codec, Zustand for small app state. Served by unprivileged nginx |
-| **antikythera** | `apps/antikythera` | The blotter server (Node, Fastify, `ws`). Holds every order in memory, answers `getRows`, ingests the live feed, and pushes deltas |
+| **antikythera** | `apps/antikythera` | The blotter server (Node, Fastify, `ws`). Holds every order in memory, answers `getRows`, ingests the live feed, and pushes deltas. Connects only to NATS |
 | **themis** | `apps/themis` | The order service of record. Owns the database: it consumes `orders.events` through its own durable consumer, applies them to the full order, stores each batch (group commit, 20 ms or 500 changes), then publishes the order's new version to the `ORDER_STATE` KV bucket and acknowledges the event. Keeps a per-order version `v`, rebuilds the bucket (the "projection") from the database when it is missing, and reconciles anything a crash left unpublished. Never reads prices |
 | **hermes** | `apps/hermes` | Mock middleware: a 20-pair random-walk price feed and the order lifecycle (pending to live, fills, new orders), and it executes commands. Stands in for the real order management system |
 | **gaia** | `apps/gaia` | The seeder: deterministic generation of 1M orders over six months, bulk-loaded into the database; a second run is a no-op |
@@ -61,7 +61,7 @@ flowchart LR
 | **iris** | `packages/iris` | The NATS adapter for the `Bus` port: JetStream stream and consumer definitions |
 
 Two ports keep the infrastructure replaceable: `OrderRepository` (storage) and `Bus` (messaging). The engine, protocol
-and UI depend on neither NATS nor Mongo.
+and UI depend on neither NATS nor Mongo, and only `themis`, `hermes` (until phase 1.5b) and `gaia` touch the database.
 
 ## Data flow
 
@@ -78,7 +78,7 @@ sequenceDiagram
   participant W as Worker
   participant U as AG Grid
   G->>M: upsertMany (1M orders, batches of 10,000)
-  A->>M: loadAll (stream, ascending orderId)
+  A->>N: watch ORDER_STATE (latest state of every order), then lastPerSubject(PRICES)
   Note over A: columnar store filled; /health ok
   H->>M: loadCurrent (PENDING_START, LIVE, PAUSED)
   loop every 330 ms per pair
@@ -102,12 +102,16 @@ sequenceDiagram
 ```
 
 1. **Seed.** `gaia` generates orders deterministically (same `SEED`, same orders) and writes them in batches.
-2. **Load.** At startup `antikythera` streams `loadAll()` from the database into the columnar store (about 10 s for a
-   million rows on a laptop) and then attaches to the bus. `/health` reports the row count and load time.
+2. **Load.** At startup `antikythera` waits for `themis` to mark the `ORDER_STATE` projection ready, reads the bucket's
+   initial values straight into the columnar store (about 12 s for 1.7 million rows in a container), sorts the rows by
+   `orderId`, then catches up on the changes made meanwhile and takes the last price of every pair. `/health` is 503 with
+   its `stage` (`snapshot`, `catchup`, `prices`) until it is `ready`, and the blotter has no database driver at all.
 3. **Live updates.** `hermes` publishes price ticks (`prices.<PAIR>`, 3 per second per pair) and order events
    (`orders.events`: new orders, fills, status changes). Both streams are JetStream, and the server reads them through a
-   durable consumer that acknowledges only after an event has been applied, so a restart replays what was missed. `themis` reads the same
-   events through its own consumer and persists them.
+   durable consumer that acknowledges only after an event has been applied, so a restart replays what was missed. `themis` reads the
+   events and persists them; `antikythera` reads the result: each order's latest state from the `ORDER_STATE` bucket (a record is
+   applied only if its `v` is above the row's), and the prices. Until phase 1.5c it still listens to `orders.events`, plain
+   and without a position, for the answer to a command.
 4. **Deltas.** Every flush tick the server patches its cached views and each client session turns the changes into a
    `delta` for the rows that client holds.
 5. **Grid.** The worker decodes the delta and posts it to the main thread, which applies it synchronously with

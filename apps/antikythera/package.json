@@ -17,7 +17,6 @@
   "dependencies": {
     "@apeiron/iris": "workspace:*",
     "@apeiron/logos": "workspace:*",
-    "@apeiron/mnemosyne": "workspace:*",
     "@fastify/websocket": "^11.3.3",
     "fastify": "^5.12.5",
     "prom-client": "^15.1.3",

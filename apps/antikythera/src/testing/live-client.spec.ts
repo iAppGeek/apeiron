@@ -1,8 +1,8 @@
-import { MemoryBus, type Order } from '@apeiron/logos';
-import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
+import { CURRENCY_PAIRS, MemoryBus, type Order } from '@apeiron/logos';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildServer, type BlotterServer } from '../server.js';
 import { LiveClient, flatRequest, groupedRequest, measureDefaultView, measureGroupedView, median, percentile } from './live-client.js';
+import { publishRecord, seedBucket } from './bucket.js';
 import { makeOrders } from './orders.js';
 
 const ROWS = makeOrders(
@@ -28,9 +28,9 @@ afterEach(async () => {
 
 async function start(): Promise<{ bus: MemoryBus; url: string }> {
   const bus = new MemoryBus();
-  const repo = new InMemoryOrderRepository();
-  await repo.upsertMany(ROWS.map(toStoredOrder));
-  server = await buildServer({ repo, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, summaryIntervalMs: 100 });
+  await seedBucket(bus, ROWS);
+  await Promise.all(CURRENCY_PAIRS.map((pair) => bus.publish(`prices.${pair}`, { pair, bid: 1.08, ask: 1.0802, ts: 1 })));
+  server = await buildServer({ bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, summaryIntervalMs: 100, priceWaitMs: 20, snapshotPollMs: 5 });
   await server.app.listen({ port: 0, host: '127.0.0.1' });
   await server.load();
   const addr = server.app.server.address();
@@ -62,7 +62,7 @@ describe('LiveClient and the measurements', () => {
         void bus.publish(`prices.${pair}`, { pair, bid: mid + n * 1e-5, ask: mid + n * 1e-5 + 2e-4, ts: n });
       }
       const order: Order = { ...(ROWS[0] as Order), orderId: `T${String(5_000 + n).padStart(7, '0')}`, createdAt: 10_000 + n };
-      if (n % 4 === 0) void bus.publish('orders.events', { type: 'NEW', order, ts: n });
+      if (n % 4 === 0) void publishRecord(bus, order);
     }, 40);
     const report = await measureDefaultView(client, 1.2);
     clearInterval(feed);
@@ -83,8 +83,8 @@ describe('LiveClient and the measurements', () => {
     const feed = setInterval(() => {
       n++;
       void bus.publish('prices.EURUSD', { pair: 'EURUSD', bid: 1.08 + n * 1e-5, ask: 1.0802 + n * 1e-5, ts: n });
-      void bus.publish('orders.events', { type: 'UPDATE', order: { orderId: 'T0000001', filledQty: 100_000 + n * 1000, remainingQty: 900_000 - n * 1000 }, ts: n });
-      if (n === 3) void bus.publish('orders.events', { type: 'UPDATE', order: { orderId: 'T0000003', status: 'PAUSED' }, ts: n });
+      void publishRecord(bus, { ...(ROWS[0] as Order), filledQty: 100_000 + n * 1000, remainingQty: 900_000 - n * 1000 }, n + 1);
+      if (n === 3) void publishRecord(bus, { ...(ROWS[2] as Order), status: 'PAUSED' }, 2);
     }, 40);
     const report = await measureGroupedView(client, 1.2);
     clearInterval(feed);

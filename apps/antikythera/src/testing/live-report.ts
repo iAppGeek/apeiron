@@ -1,9 +1,10 @@
-import { MongoOrderRepository } from '@apeiron/mnemosyne';
+import { NatsBus } from '@apeiron/iris';
+import { BUCKETS, type KvBucket, type OrderStateRecord } from '@apeiron/logos';
 import { LiveClient, groupedRequest, flatRequest, measureDefaultView, measureGroupedView, percentile } from './live-client.js';
 
 /**
  * Live verification against a running stack:
- *   tsx src/testing/live-report.ts --scenario default|grouped|stress|writebehind|restart-check [--seconds 15]
+ *   tsx src/testing/live-report.ts --scenario default|grouped|stress|persistence|consistency|restart-check [--seconds 15]
  * Prints one JSON document per scenario.
  */
 const arg = (name: string, fallback: string): string => {
@@ -12,7 +13,7 @@ const arg = (name: string, fallback: string): string => {
 };
 const url = arg('url', 'ws://127.0.0.1:4000/ws');
 const http = arg('http', 'http://127.0.0.1:4000');
-const mongo = arg('mongo', 'mongodb://127.0.0.1:27017');
+const natsUrl = arg('nats', 'nats://127.0.0.1:4222');
 const scenario = arg('scenario', 'default');
 const seconds = Number(arg('seconds', '15'));
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -49,11 +50,20 @@ async function stress(): Promise<void> {
   await client.close();
 }
 
-async function writeBehind(): Promise<void> {
+/** The order-state bucket, to compare what the server serves with what the order service published. */
+async function openState(): Promise<{ bus: NatsBus; kv: KvBucket }> {
+  const bus = await NatsBus.connect({ url: natsUrl, name: 'live-report' });
+  return { bus, kv: bus.kv(BUCKETS.orderState) };
+}
+
+const recordOf = async (kv: KvBucket, orderId: string): Promise<OrderStateRecord['order'] | null> =>
+  ((await kv.get(orderId))?.value as OrderStateRecord | undefined)?.order ?? null;
+
+/** How long after a client sees a fill until the order service has published it (and so stored it). */
+async function persistence(): Promise<void> {
   const client = await LiveClient.connect(url);
   await client.getRows(flatRequest());
-  const repo = await MongoOrderRepository.connect({ url: mongo, db: 'blotter' });
-  const col = repo.database.collection<{ _id: string; filledQty: number; status: string }>('orders');
+  const { bus, kv } = await openState();
   const samples: { orderId: string; filledQty: number; status: string; latencyMs: number; viaDelta: number }[] = [];
   const seen = new Set<string>();
   const end = Date.now() + seconds * 1000;
@@ -69,10 +79,10 @@ async function writeBehind(): Promise<void> {
           seen.add(row.orderId);
           const filledQty = row.filledQty;
           const t0 = r.at;
-          let doc = await col.findOne({ _id: row.orderId });
+          let doc = await recordOf(kv, row.orderId);
           while ((doc?.filledQty ?? 0) < filledQty && Date.now() - t0 < 5_000) {
             await sleep(25);
-            doc = await col.findOne({ _id: row.orderId });
+            doc = await recordOf(kv, row.orderId);
           }
           samples.push({ orderId: row.orderId, filledQty, status: String(row.status ?? ''), latencyMs: Date.now() - t0, viaDelta: r.at - t0 });
         }
@@ -81,13 +91,13 @@ async function writeBehind(): Promise<void> {
     await sleep(100);
   }
   const lat = samples.map((s) => s.latencyMs);
-  print('writebehind', {
+  print('persistence', {
     samples: samples.length,
     latencyMs: { p50: percentile(lat, 50), p95: percentile(lat, 95), max: Math.max(...lat) },
     notPersistedWithin5s: samples.filter((s) => s.latencyMs >= 5_000).length,
     sample: samples.slice(0, 5),
   });
-  await repo.close();
+  await bus.close();
   await client.close();
 }
 
@@ -103,12 +113,11 @@ async function restartCheck(): Promise<void> {
   await client.close();
 }
 
-/** Compares what the server serves with what Mongo holds, for the newest orders and the LIVE ones. Run when the feed is quiet. */
+/** Compares what the server serves with what the order service published, for the newest orders and the LIVE ones. Run when the feed is quiet. */
 async function consistency(): Promise<void> {
   await sleep(1_500); // let the order service persist
   const client = await LiveClient.connect(url);
-  const repo = await MongoOrderRepository.connect({ url: mongo, db: 'blotter' });
-  const col = repo.database.collection('orders');
+  const { bus, kv } = await openState();
   const fields = ['status', 'filledQty', 'remainingQty', 'numFills', 'avgFillPrice', 'lastFillQty', 'completedAt', 'orderQty'];
   const live = { ...flatRequest(0, 1_000), filterModel: { status: { filterType: 'set', values: ['LIVE', 'PAUSED', 'PENDING_START'] } } };
   const blocks = [await client.getRows(flatRequest(0, 100)), await client.getRows(live)];
@@ -116,20 +125,20 @@ async function consistency(): Promise<void> {
   const mismatches: unknown[] = [];
   for (const block of blocks) {
     for (const row of block.rows) {
-      const doc = await col.findOne({ _id: String(row.orderId) as never });
+      const doc = await recordOf(kv, String(row.orderId));
       checked++;
       if (doc === null) {
-        mismatches.push({ orderId: row.orderId, problem: 'missing in mongo' });
+        mismatches.push({ orderId: row.orderId, problem: 'missing in the bucket' });
         continue;
       }
       const diff = fields.filter((f) => (doc as Record<string, unknown>)[f] !== row[f]);
-      if (diff.length > 0) mismatches.push({ orderId: row.orderId, fields: diff, server: diff.map((f) => row[f]), mongo: diff.map((f) => (doc as Record<string, unknown>)[f]) });
+      if (diff.length > 0) mismatches.push({ orderId: row.orderId, fields: diff, server: diff.map((f) => row[f]), bucket: diff.map((f) => (doc as Record<string, unknown>)[f]) });
     }
   }
-  const mongoCount = await col.countDocuments({});
+  const bucketCount = (await kv.status()).values;
   const health = (await getJson('/health')) as { rows: number };
-  print('consistency', { rowsChecked: checked, mismatches: mismatches.length, firstMismatches: mismatches.slice(0, 3), serverRows: health.rows, mongoRows: mongoCount, rowCountsEqual: health.rows === mongoCount });
-  await repo.close();
+  print('consistency', { rowsChecked: checked, mismatches: mismatches.length, firstMismatches: mismatches.slice(0, 3), serverRows: health.rows, bucketRows: bucketCount, rowCountsEqual: health.rows === bucketCount });
+  await bus.close();
   await client.close();
 }
 
@@ -152,8 +161,8 @@ switch (scenario) {
   case 'stress':
     await stress();
     break;
-  case 'writebehind':
-    await writeBehind();
+  case 'persistence':
+    await persistence();
     break;
   case 'restart-check':
     await restartCheck();

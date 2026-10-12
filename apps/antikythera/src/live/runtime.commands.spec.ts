@@ -1,9 +1,9 @@
-import { MemoryBus, jsonCodec, type ClientMsg, type Order, type OrderCommand, type OrderEvent, type ServerMsg } from '@apeiron/logos';
-import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
+import { BUCKETS, MemoryBus, jsonCodec, type ClientMsg, type Order, type OrderCommand, type OrderEvent, type ServerMsg } from '@apeiron/logos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryEngine } from '../query/engine.js';
 import { ClientSession } from '../session.js';
 import { ColumnarStore } from '../store/columnar-store.js';
+import { ensureBuckets, publishRecord } from '../testing/bucket.js';
 import { makeOrders } from '../testing/orders.js';
 import type { Connection, Frame } from '../transport.js';
 import { LiveRuntime } from './runtime.js';
@@ -24,14 +24,15 @@ const LIVE: Partial<Order> = {
   marketMid: 1.08,
 };
 
-type Rig = { bus: MemoryBus; runtime: LiveRuntime; engine: QueryEngine; published: OrderCommand[] };
+type Rig = { bus: MemoryBus; store: ColumnarStore; runtime: LiveRuntime; engine: QueryEngine; published: OrderCommand[] };
 
 async function rig(): Promise<Rig> {
   const bus = new MemoryBus();
-  const repo = new InMemoryOrderRepository();
-  await repo.upsertMany(makeOrders([{ ...LIVE }, { ...LIVE, status: 'PAUSED' }, { ...LIVE, status: 'FILLED' }]).map(toStoredOrder));
+  await ensureBuckets(bus);
+  const orders = makeOrders([{ ...LIVE }, { ...LIVE, status: 'PAUSED' }, { ...LIVE, status: 'FILLED' }]);
   const store = new ColumnarStore({ capacity: 16 });
-  for await (const batch of repo.loadAll()) store.appendBatch(batch.map((r) => r.order));
+  store.appendBatch(orders, orders.map(() => 1));
+  const watch = await bus.kv(BUCKETS.orderState).watch({ updatesOnly: true });
   const engine = new QueryEngine(store, { maxViews: 16, maxBytes: 1 << 26, maxBlockRows: 10_000 });
   const runtime = new LiveRuntime({
     store,
@@ -41,12 +42,13 @@ async function rig(): Promise<Rig> {
     flushMs: 100,
     maxTrackedBlocks: 20,
     commandTimeoutMs: 5_000,
+    snapshot: { entries: watch[Symbol.asyncIterator](), watch, revision: 0 },
   });
   runtime.start();
   await vi.advanceTimersByTimeAsync(0);
   const published: OrderCommand[] = [];
   await bus.subscribe('orders.commands', (p) => void published.push(p as OrderCommand));
-  return { bus, runtime, engine, published };
+  return { bus, store, runtime, engine, published };
 }
 
 type Client = { sent: ServerMsg[]; session: ClientSession; send: (m: ClientMsg) => void };
@@ -74,6 +76,17 @@ const hermesUpdate = (commandId: string, orderId: string, order: Partial<Order>)
   ts: 1,
   commandId,
 });
+
+/**
+ * What answers a command: hermes's UPDATE on `orders.events`, and the order service's new record for the order
+ * (one version up) on the bucket. The blotter acks once the record shows the new status.
+ */
+async function answer(r: Rig, commandId: string, orderId: string, patch: Partial<Order>, options: { record?: boolean } = {}): Promise<void> {
+  await r.bus.publish('orders.events', hermesUpdate(commandId, orderId, patch));
+  if (options.record === false) return;
+  const row = r.store.rowIndexOf(orderId) as number;
+  await publishRecord(r.bus, { ...r.store.orderAt(row), ...patch }, r.store.versionAt(row) + 1);
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -118,7 +131,7 @@ describe('LiveRuntime command correlation', () => {
     expect(c.sent).toEqual([]);
     expect(r.runtime.commands.size).toBe(1);
 
-    await r.bus.publish('orders.events', hermesUpdate('client-9:7', 'T0000001', { status: 'PAUSED' }));
+    await answer(r, 'client-9:7', 'T0000001', { status: 'PAUSED' });
     expect(c.sent).toEqual([]);
     await vi.advanceTimersByTimeAsync(100);
     expect(types(c)).toEqual(['delta', 'ack']);
@@ -129,13 +142,30 @@ describe('LiveRuntime command correlation', () => {
     await r.runtime.stop();
   });
 
-  it('applies the UPDATE for every client but acks only the one that asked', async () => {
+  it('does not ack until the store shows the status the order service published', async () => {
+    vi.useFakeTimers({ now: 50_000 });
+    const r = await rig();
+    const c = client(r);
+    c.send(command(8, 'T0000001', 'PAUSE'));
+    await answer(r, 'c1:8', 'T0000001', { status: 'PAUSED' }, { record: false });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(types(c)).toEqual([]);
+    expect(r.runtime.commands.size).toBe(1);
+    const row = r.store.rowIndexOf('T0000001') as number;
+    await publishRecord(r.bus, { ...r.store.orderAt(row), status: 'PAUSED' }, 2);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(types(c)).toEqual(['delta', 'ack']);
+    expect(r.runtime.commands.size).toBe(0);
+    await r.runtime.stop();
+  });
+
+  it('applies the record for every client but acks only the one that asked', async () => {
     vi.useFakeTimers();
     const r = await rig();
     const asker = client(r, 'a');
     const watcher = client(r, 'b');
     asker.send(command(1, 'T0000001', 'PAUSE'));
-    await r.bus.publish('orders.events', hermesUpdate('a:1', 'T0000001', { status: 'PAUSED' }));
+    await answer(r, 'a:1', 'T0000001', { status: 'PAUSED' });
     await vi.advanceTimersByTimeAsync(100);
     expect(types(asker)).toEqual(['delta', 'ack']);
     expect(types(watcher)).toEqual(['delta']);
@@ -170,7 +200,7 @@ describe('LiveRuntime command correlation', () => {
     await vi.advanceTimersByTimeAsync(200);
     expect(c.sent.filter((m) => m.t === 'error')).toEqual([{ t: 'error', reqId: 3, code: 'INTERNAL', message: 'command timed out' }]);
     c.sent.length = 0;
-    await r.bus.publish('orders.events', hermesUpdate('c1:3', 'T0000001', { status: 'CANCELLED' }));
+    await answer(r, 'c1:3', 'T0000001', { status: 'CANCELLED' });
     await vi.advanceTimersByTimeAsync(100);
     expect(types(c)).toEqual(['delta']);
     await r.runtime.stop();
@@ -185,7 +215,7 @@ describe('LiveRuntime command correlation', () => {
     expect(r.runtime.commands.size).toBe(2);
     c.session.dispose();
     expect(r.runtime.commands.size).toBe(0);
-    await r.bus.publish('orders.events', hermesUpdate('c1:4', 'T0000001', { status: 'PAUSED' }));
+    await answer(r, 'c1:4', 'T0000001', { status: 'PAUSED' });
     await vi.advanceTimersByTimeAsync(6_000);
     expect(c.sent).toEqual([]);
     await r.runtime.stop();
@@ -221,7 +251,7 @@ describe('LiveRuntime command correlation', () => {
     vi.useFakeTimers();
     const r = await rig();
     const c = client(r);
-    await r.bus.publish('orders.events', hermesUpdate('other-process:1', 'T0000001', { status: 'PAUSED' }));
+    await answer(r, 'other-process:1', 'T0000001', { status: 'PAUSED' });
     await r.bus.publish('orders.events', {
       type: 'REJECT',
       commandId: 'other-process:2',
@@ -231,7 +261,9 @@ describe('LiveRuntime command correlation', () => {
       ts: 1,
     } satisfies OrderEvent);
     await vi.advanceTimersByTimeAsync(100);
+    // The record is applied for everyone; nobody is waiting for the answer, so nobody is acked.
     expect(types(c)).toEqual(['delta']);
+    expect(r.runtime.commands.size).toBe(0);
     await r.runtime.stop();
   });
 });

@@ -1,4 +1,6 @@
 import {
+  CURRENCY_PAIRS,
+  MemoryBus,
   getCodec,
   jsonCodec,
   type ClientMsg,
@@ -7,10 +9,10 @@ import {
   type ServerMsg,
   type SsrmRequest,
 } from '@apeiron/logos';
-import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import WebSocket, { type RawData } from 'ws';
 import { buildServer, type BlotterServer } from './server.js';
+import { seedBucket } from './testing/bucket.js';
 import { propertyOrders } from './testing/dataset.js';
 
 const ORDERS = propertyOrders(7, 1_200);
@@ -74,13 +76,23 @@ const req = (r: Partial<SsrmRequest> = {}): SsrmRequest => ({
 });
 
 let server: BlotterServer;
+let bus: MemoryBus;
 let base: string;
 let wsUrl: string;
 
+const FAST = { priceWaitMs: 20, snapshotPollMs: 5, snapshotRetryMs: 20 } as const;
+
+/** What the order service leaves in the bucket, last-changed order first, as a watch would deliver it. */
+const seeded = async (target: MemoryBus, rows: Order[] = ORDERS): Promise<void> => seedBucket(target, [...rows].reverse());
+
+const publishAllPrices = (target: MemoryBus): Promise<void[]> =>
+  Promise.all(CURRENCY_PAIRS.map((pair) => target.publish(`prices.${pair}`, { pair, bid: 1, ask: 1.0002, ts: 1 })));
+
 beforeEach(async () => {
-  const repo = new InMemoryOrderRepository();
-  await repo.upsertMany(ORDERS.map(toStoredOrder));
-  server = await buildServer({ repo, logLevel: 'silent', storeCapacity: 2_000 });
+  bus = new MemoryBus();
+  await seeded(bus);
+  await publishAllPrices(bus);
+  server = await buildServer({ bus, logLevel: 'silent', storeCapacity: 2_000, ...FAST });
   await server.app.listen({ port: 0, host: '127.0.0.1' });
   const addr = server.app.server.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
@@ -96,26 +108,72 @@ describe('GET /health', () => {
   it('is 503 until loading finishes, then 200 with load figures', async () => {
     const before = await fetch(`${base}/health`);
     expect(before.status).toBe(503);
-    expect(await before.json()).toMatchObject({ status: 'loading', rows: 0 });
+    expect(await before.json()).toMatchObject({ status: 'loading', stage: 'snapshot', rows: 0 });
 
     const report = await server.load();
     expect(report.rows).toBe(ORDERS.length);
     const after = await fetch(`${base}/health`);
     expect(after.status).toBe(200);
     const body = (await after.json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ status: 'ok', rows: ORDERS.length });
+    expect(body).toMatchObject({ status: 'ok', stage: 'ready', rows: ORDERS.length });
     expect(body.loadMs).toBeTypeOf('number');
     expect(body.heapMb).toBeGreaterThan(0);
     expect(body.rssMb).toBeGreaterThan(0);
   });
 
+  it('serves the orders in ascending id order even though the bucket delivers them in the order they changed', async () => {
+    await server.load();
+    const ids = [...Array(server.store.size).keys()].map((r) => server.store.orderAt(r).orderId);
+    expect(ids).toEqual([...ids].sort());
+    expect(server.store.idsAscending).toBe(true);
+  });
+
+  it('stays in the snapshot stage and never reports ok against a bucket with no projection marker', async () => {
+    const empty = new MemoryBus();
+    const s = await buildServer({ bus: empty, logLevel: 'silent', storeCapacity: 10, ...FAST });
+    const loading = s.load();
+    await new Promise((r) => setTimeout(r, 60));
+    const res = await s.app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ status: 'loading', stage: 'snapshot', rows: 0 });
+    await seeded(empty, ORDERS.slice(0, 5));
+    await publishAllPrices(empty);
+    await loading;
+    expect((await s.app.inject({ method: 'GET', url: '/health' })).json()).toMatchObject({ status: 'ok', rows: 5 });
+    await s.app.close();
+  });
+
+  it('answers NOT_READY until it has prices, then serves rows', async () => {
+    const quiet = new MemoryBus();
+    await seeded(quiet);
+    const s = await buildServer({ bus: quiet, logLevel: 'silent', storeCapacity: 2_000, ...FAST, priceWaitMs: 1_500 });
+    await s.app.listen({ port: 0, host: '127.0.0.1' });
+    const addr = s.app.server.address();
+    const url = `ws://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : 0}/ws`;
+    const loading = s.load();
+    await new Promise((r) => setTimeout(r, 700));
+    expect(s.health()).toMatchObject({ stage: 'prices', status: 'loading' });
+    const c = await connect(url);
+    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'early' });
+    await c.next();
+    c.send({ t: 'getRows', reqId: 1, req: req() });
+    expect(await c.next()).toMatchObject({ t: 'error', code: 'NOT_READY' });
+    await loading;
+    c.send({ t: 'getRows', reqId: 2, req: req() });
+    let reply = await c.next();
+    while (reply.t === 'summary') reply = await c.next();
+    expect(reply).toMatchObject({ t: 'rows', reqId: 2 });
+    await c.close();
+    await s.app.close();
+  });
+
   it('reports an error status when loading fails', async () => {
-    const failing = new InMemoryOrderRepository();
-    failing.loadAll = (): never => {
-      throw new Error('db down');
-    };
-    const s = await buildServer({ repo: failing, logLevel: 'silent', storeCapacity: 10 });
-    await expect(s.load()).rejects.toThrow('db down');
+    const failing = new MemoryBus();
+    await seeded(failing, ORDERS.slice(0, 3));
+    const kv = failing.kv.bind(failing);
+    failing.kv = (name) => ({ ...kv(name), status: () => Promise.reject(new Error('nats down')) });
+    const s = await buildServer({ bus: failing, logLevel: 'silent', storeCapacity: 10, ...FAST });
+    await expect(s.load()).rejects.toThrow('nats down');
     const res = await s.app.inject({ method: 'GET', url: '/health' });
     expect(res.statusCode).toBe(503);
     expect(res.json()).toMatchObject({ status: 'error' });
@@ -175,7 +233,7 @@ describe.each<CodecName>(['json', 'msgpack'])('GET /ws (%s)', (codec) => {
     expect(bad).toMatchObject({ t: 'error', reqId: 4, code: 'BAD_MESSAGE' });
 
     c.send({ t: 'command', reqId: 5, orderId: 'x', action: 'CANCEL' });
-    expect(await c.next()).toMatchObject({ t: 'error', reqId: 5, code: 'NOT_IMPLEMENTED' });
+    expect(await c.next()).toMatchObject({ t: 'error', reqId: 5, code: 'UNKNOWN_ORDER' });
 
     c.send({ t: 'ping', ts: 99 });
     expect(await c.next()).toMatchObject({ t: 'pong', ts: 99 });
@@ -251,9 +309,7 @@ describe('GET /ws robustness', () => {
   });
 
   it('logs cold builds that cross the slow threshold', async () => {
-    const repo = new InMemoryOrderRepository();
-    await repo.upsertMany(ORDERS.map(toStoredOrder));
-    const slow = await buildServer({ repo, logLevel: 'silent', storeCapacity: 2_000, slowBuildMs: 0 });
+    const slow = await buildServer({ bus, logLevel: 'silent', storeCapacity: 2_000, slowBuildMs: 0, ...FAST });
     await slow.app.listen({ port: 0, host: '127.0.0.1' });
     await slow.load();
     const addr = slow.app.server.address();

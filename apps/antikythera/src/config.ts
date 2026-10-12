@@ -8,14 +8,14 @@ const posInt = (fallback: string): z.ZodType<number> =>
     .pipe(z.number().int().positive());
 
 const envSchema = z.object({
-  MONGO_URL: z.url({ protocol: /^mongodb(\+srv)?$/ }),
-  MONGO_DB: z.string().min(1).default('blotter'),
-  DB_ADAPTER: z.enum(['mongo']).default('mongo'),
   PORT: posInt('4000').pipe(z.number().max(65535)),
   HOST: z.string().min(1).default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
-  /** Used from phase 5; optional until then. */
-  NATS_URL: z.url({ protocol: /^nats$/ }).optional(),
+  NATS_URL: z.url({ protocol: /^nats$/ }),
+  /** At startup, how long to wait for a price for every pair before going on without the missing ones. */
+  PRICE_WAIT_MS: posInt('10000'),
+  /** Caught up with the order-state bucket once an entry has at most this many entries pending behind it. */
+  CATCHUP_MAX_PENDING: posInt('100'),
   FLUSH_MS: posInt('50'),
   MAX_TRACKED_BLOCKS: posInt('100'),
   LOAD_PRESET: z.enum(['medium', 'stress']).default('medium'),
@@ -23,8 +23,6 @@ const envSchema = z.object({
   STORE_CAPACITY: posInt('1500000'),
   VIEW_CACHE_MAX_VIEWS: posInt('64'),
   VIEW_CACHE_MAX_MB: posInt('384'),
-  /** Rows per batch when streaming the repository into the store. */
-  LOAD_BATCH_SIZE: posInt('200'),
   /** Largest `endRow - startRow` a client may request. */
   MAX_BLOCK_ROWS: posInt('5000'),
   /** Most ms one flush spends patching views; views not reached carry their changes into the next tick. */
@@ -34,13 +32,12 @@ const envSchema = z.object({
 });
 
 export type AntikytheraConfig = {
-  mongoUrl: string;
-  mongoDb: string;
-  dbAdapter: 'mongo';
   port: number;
   host: string;
   logLevel: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
-  natsUrl: string | undefined;
+  natsUrl: string;
+  priceWaitMs: number;
+  catchupMaxPending: number;
   flushMs: number;
   maxTrackedBlocks: number;
   loadPreset: 'medium' | 'stress';
@@ -48,7 +45,6 @@ export type AntikytheraConfig = {
   viewCacheMaxViews: number;
   viewCacheMaxBytes: number;
   maxBlockRows: number;
-  loadBatchSize: number;
   flushBudgetMs: number;
   heartbeatTimeoutMs: number;
 };
@@ -61,13 +57,12 @@ export function loadConfig(env: Record<string, string | undefined>): Antikythera
   }
   const e = parsed.data;
   return {
-    mongoUrl: e.MONGO_URL,
-    mongoDb: e.MONGO_DB,
-    dbAdapter: e.DB_ADAPTER,
     port: e.PORT,
     host: e.HOST,
     logLevel: e.LOG_LEVEL,
     natsUrl: e.NATS_URL,
+    priceWaitMs: e.PRICE_WAIT_MS,
+    catchupMaxPending: e.CATCHUP_MAX_PENDING,
     flushMs: e.FLUSH_MS,
     maxTrackedBlocks: e.MAX_TRACKED_BLOCKS,
     loadPreset: e.LOAD_PRESET,
@@ -75,7 +70,6 @@ export function loadConfig(env: Record<string, string | undefined>): Antikythera
     viewCacheMaxViews: e.VIEW_CACHE_MAX_VIEWS,
     viewCacheMaxBytes: e.VIEW_CACHE_MAX_MB * 1024 * 1024,
     maxBlockRows: e.MAX_BLOCK_ROWS,
-    loadBatchSize: e.LOAD_BATCH_SIZE,
     flushBudgetMs: e.FLUSH_BUDGET_MS,
     heartbeatTimeoutMs: e.HEARTBEAT_TIMEOUT_MS,
   };
