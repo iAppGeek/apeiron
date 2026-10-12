@@ -8,6 +8,7 @@ describe('loadConfig', () => {
     expect(loadConfig(base)).toEqual({
       mongoUrl: 'mongodb://mongo:27017',
       mongoDb: 'blotter',
+      execMode: 'events',
       natsUrl: 'nats://nats:4222',
       loadPreset: 'medium',
       logLevel: 'info',
@@ -29,5 +30,12 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, NATS_URL: 'http://x' })).toThrow(/NATS_URL/);
     expect(() => loadConfig({ ...base, HERMES_SEED: 'abc' })).toThrow(/HERMES_SEED/);
     expect(() => loadConfig({ ...base, HEALTH_PORT: '99999' })).toThrow(/HEALTH_PORT/);
+  });
+
+  it('needs the database only in events mode: in reports mode the order service owns it', () => {
+    expect(() => loadConfig({ NATS_URL: 'nats://nats:4222' })).toThrow(/MONGO_URL/);
+    expect(loadConfig({ NATS_URL: 'nats://nats:4222', EXEC_MODE: 'reports' })).toMatchObject({ execMode: 'reports', mongoUrl: undefined });
+    expect(loadConfig({ ...base, EXEC_MODE: 'reports' }).execMode).toBe('reports');
+    expect(() => loadConfig({ ...base, EXEC_MODE: 'both' })).toThrow(/EXEC_MODE/);
   });
 });

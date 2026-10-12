@@ -12,10 +12,14 @@ import {
   transition,
   uniform,
   type LoadPreset,
+  type ExecReport,
   type OrderCommand,
   type Order,
   type OrderEvent,
+  type OrderStateRecord,
   type Rng,
+  type Submission,
+  type SubmitReply,
 } from '@apeiron/logos';
 import type { Quotes } from './quotes.js';
 import { LOAD_PRESETS, type PresetRates } from './presets.js';
@@ -28,18 +32,40 @@ export const END_CANCEL_PROBABILITY = 0.08;
 /** Share of new orders that start LIVE rather than PENDING_START. */
 export const NEW_LIVE_SHARE = 0.8;
 
+/**
+ * Where the simulator sends what happens at the venue in `reports` mode: execution reports (it numbers them per order),
+ * new orders as submissions to the order service, and the answers to commands it was sent on `orders.commands`.
+ */
+export type ReportSink = {
+  report(report: ExecReport): void;
+  submit(submission: Submission): Promise<SubmitReply>;
+  answer(answer: OrderEvent): void;
+};
+
 export type SimulatorOptions = {
   rng: Rng;
   /** The market now, from the price feed's ticks. */
   feed: Quotes;
-  /** Receives every `orders.events` message the simulator produces. */
-  emit: (event: OrderEvent) => void;
+  /** Receives every `orders.events` message the simulator produces (`events` mode). */
+  emit?: (event: OrderEvent) => void;
+  /** Set for `reports` mode: the simulator then emits nothing on `orders.events`. */
+  reports?: ReportSink;
+  /** Makes the `clientOrderId` of each submission unique to this run (default: random). */
+  runTag?: string;
   preset: LoadPreset;
   /** The LIVE, PAUSED and PENDING_START orders at startup (`loadCurrent()`). */
   current: readonly Order[];
   /** Highest order sequence number issued so far (from `maxOrderId()`); new ids continue above it. */
   startSeq: number;
 };
+
+/** What a change to an order is, as a report to the order service. */
+export type ReportSpec =
+  | { type: 'ACTIVATED' }
+  | { type: 'FILL' }
+  | { type: 'CANCELLED'; reason: 'TRADER' | 'EXPIRED' }
+  | { type: 'PAUSED' }
+  | { type: 'RESUMED' };
 
 export type StepStats = { fills: number; statusChanges: number; created: number };
 
@@ -108,6 +134,10 @@ export class Simulator {
   private readonly factory: OrderFactory;
   private rates: PresetRates;
   private presetName: LoadPreset;
+  private readonly execSeqs = new Map<string, number>();
+  private readonly inflight = { LIVE: 0, PENDING_START: 0 };
+  private readonly runTag: string;
+  private submitted = 0;
   private fillCarry = 0;
   private newCarry = 0;
   private emitted = 0;
@@ -117,6 +147,8 @@ export class Simulator {
     this.rates = LOAD_PRESETS[options.preset];
     this.factory = new OrderFactory(options.rng);
     this.factory.seq = options.startSeq;
+    this.runTag = options.runTag ?? Math.random().toString(36).slice(2, 10);
+    if (options.emit === undefined && options.reports === undefined) throw new Error('Simulator needs emit (events mode) or reports (reports mode)');
     for (const order of options.current) this.track(order);
   }
 
@@ -130,6 +162,15 @@ export class Simulator {
 
   get pendingCount(): number {
     return this.pending.size;
+  }
+
+  /** LIVE orders, counting those whose submission the order service has not answered yet. */
+  private get liveTotal(): number {
+    return this.live.size + this.inflight.LIVE;
+  }
+
+  private get pendingTotal(): number {
+    return this.pending.size + this.inflight.PENDING_START;
   }
 
   get eventsEmitted(): number {
@@ -176,11 +217,11 @@ export class Simulator {
     const created = Math.floor(this.newCarry);
     this.newCarry -= created;
     for (let i = 0; i < created; i++) {
-      const startsLive = this.live.size < this.rates.liveMin || this.options.rng() < NEW_LIVE_SHARE;
-      if (startsLive && this.live.size < this.rates.liveCap) {
+      const startsLive = this.liveTotal < this.rates.liveMin || this.options.rng() < NEW_LIVE_SHARE;
+      if (startsLive && this.liveTotal < this.rates.liveCap) {
         this.create('LIVE', now);
         stats.created++;
-      } else if (this.pending.size < this.rates.pendingCap) {
+      } else if (this.pendingTotal < this.rates.pendingCap) {
         this.create('PENDING_START', now);
         stats.created++;
       }
@@ -191,7 +232,7 @@ export class Simulator {
   /** Creates LIVE orders until the preset's target is reached. Returns how many were created. */
   topUp(now: number): number {
     let created = 0;
-    while (this.live.size < this.rates.liveTarget) {
+    while (this.liveTotal < this.rates.liveTarget) {
       this.create('LIVE', now);
       created++;
     }
@@ -206,7 +247,7 @@ export class Simulator {
   command(command: OrderCommand, now: number): void {
     const order = this.orders.get(command.orderId);
     if (order === undefined) {
-      this.emit({
+      this.reply({
         type: 'REJECT',
         commandId: command.commandId,
         orderId: command.orderId,
@@ -218,7 +259,7 @@ export class Simulator {
     }
     const result = applyCommand(order, command.action, now);
     if (!result.ok) {
-      this.emit({
+      this.reply({
         type: 'REJECT',
         commandId: command.commandId,
         orderId: command.orderId,
@@ -234,12 +275,47 @@ export class Simulator {
       command.action === 'RESUME'
         ? { ...result.changes, endTime: order.endTime + Math.max(0, now - order.lastUpdateTime) }
         : result.changes;
-    this.commit(order, changes, now, command.commandId);
+    const report: ReportSpec =
+      command.action === 'CANCEL' ? { type: 'CANCELLED', reason: 'TRADER' } : command.action === 'PAUSE' ? { type: 'PAUSED' } : { type: 'RESUMED' };
+    this.commit(order, changes, now, report, command.commandId);
+  }
+
+  /**
+   * Brings an order the simulator holds in line with the order service's latest record of it (`reports` mode): after a
+   * restart, for an order submitted elsewhere, or when the order service changed its parameters. A record that is behind
+   * the reports this simulator has already sent for the order (a lower `execSeq`) is ignored, and a finished order is dropped.
+   */
+  syncRecord(record: OrderStateRecord): void {
+    const id = record.order.orderId;
+    const mine = this.execSeqs.get(id);
+    if (mine !== undefined && record.execSeq < mine) return;
+    if (isTerminal(record.order.status)) {
+      this.orders.delete(id);
+      this.live.delete(id);
+      this.pending.delete(id);
+      this.execSeqs.delete(id);
+      return;
+    }
+    this.execSeqs.set(id, Math.max(mine ?? 0, record.execSeq));
+    this.track({ ...record.order });
+  }
+
+  /** Answers a command: on `orders.events` in `events` mode, to the report sink's answer channel in `reports` mode. */
+  private reply(event: OrderEvent): void {
+    this.emitted++;
+    if (this.options.reports !== undefined) this.options.reports.answer(event);
+    else this.options.emit?.(event);
   }
 
   private emit(event: OrderEvent): void {
     this.emitted++;
-    this.options.emit(event);
+    this.options.emit?.(event);
+  }
+
+  private nextExecSeq(orderId: string): number {
+    const n = (this.execSeqs.get(orderId) ?? 0) + 1;
+    this.execSeqs.set(orderId, n);
+    return n;
   }
 
   private track(order: Order): void {
@@ -264,16 +340,50 @@ export class Simulator {
     return { ...changes, ...overlay, unrealisedPnlUsd: 0, realisedPnlUsd: pnlUsdOf(after, overlay.marketMid) };
   }
 
-  private commit(order: Order, rawChanges: Partial<Order>, now: number, commandId?: string): Order {
-    const changes = this.completed(order, rawChanges);
+  /**
+   * Applies a change to the simulator's own copy of the order and tells the world: an UPDATE with the absolute changed
+   * fields in `events` mode, an execution report (numbered per order, with the quote for a fill or a cancel) in `reports`
+   * mode, where a command's answer also goes out.
+   */
+  private commit(order: Order, rawChanges: Partial<Order>, now: number, report: ReportSpec, commandId?: string): Order {
+    const sink = this.options.reports;
+    const changes = sink === undefined ? this.completed(order, rawChanges) : rawChanges;
     const next = { ...order, ...changes };
     this.track(next);
-    this.emit({
-      type: 'UPDATE',
-      order: { orderId: order.orderId, ...changes },
-      ts: now,
-      ...(commandId === undefined ? {} : { commandId }),
-    });
+    if (sink === undefined) {
+      this.emit({
+        type: 'UPDATE',
+        order: { orderId: order.orderId, ...changes },
+        ts: now,
+        ...(commandId === undefined ? {} : { commandId }),
+      });
+      return next;
+    }
+    const base = { orderId: order.orderId, execSeq: this.nextExecSeq(order.orderId), ts: now };
+    const quote = (): { bid: number; ask: number } => {
+      const q = this.options.feed.quote(order.currencyPair);
+      const mid = this.options.feed.mid(order.currencyPair);
+      return { bid: q?.bid ?? mid, ask: q?.ask ?? mid };
+    };
+    let out: ExecReport;
+    switch (report.type) {
+      case 'ACTIVATED':
+        out = { type: 'ACTIVATED', ...base };
+        break;
+      case 'FILL':
+        out = { type: 'FILL', ...base, qty: next.lastFillQty, price: next.lastFillPrice as number, ...quote() };
+        break;
+      case 'CANCELLED':
+        out = { type: 'CANCELLED', ...base, ...(commandId === undefined ? {} : { instrId: commandId }), reason: report.reason, ...quote() };
+        break;
+      default:
+        out = { type: report.type, ...base, instrId: commandId ?? 'venue' };
+    }
+    this.emitted++;
+    sink.report(out);
+    if (commandId !== undefined) {
+      sink.answer({ type: 'UPDATE', order: { orderId: order.orderId, status: next.status }, ts: now, commandId });
+    }
     return next;
   }
 
@@ -283,7 +393,7 @@ export class Simulator {
       if (order === undefined || order.startTime > now) continue;
       const result = transition(order, 'LIVE', now);
       if (result.ok) {
-        this.commit(order, result.changes, now);
+        this.commit(order, result.changes, now, { type: 'ACTIVATED' });
         stats.statusChanges++;
       }
     }
@@ -309,12 +419,12 @@ export class Simulator {
       this.cancel(order, now);
       return;
     }
-    this.commit(order, changes, now);
+    this.commit(order, changes, now, { type: 'FILL' });
   }
 
   private cancel(order: Order, now: number): void {
     const result = transition(order, 'CANCELLED', now);
-    if (result.ok) this.commit(order, result.changes, now);
+    if (result.ok) this.commit(order, result.changes, now, { type: 'CANCELLED', reason: 'EXPIRED' });
   }
 
   private fillOne(now: number, stats: StepStats): void {
@@ -331,7 +441,7 @@ export class Simulator {
     const qty = Math.max(1_000, Math.round((base * uniform(this.options.rng, 0.7, 1.3)) / 1_000) * 1_000);
     const changes = applyFill(this.priced(order), qty, this.fillPrice(order), now);
     if (Object.keys(changes).length === 0) return;
-    this.commit(order, changes, now);
+    this.commit(order, changes, now, { type: 'FILL' });
     stats.fills++;
   }
 
@@ -364,8 +474,36 @@ export class Simulator {
       now,
       current: true,
     });
+    if (this.options.reports !== undefined) {
+      this.submitNew(order, status);
+      return;
+    }
     this.track(order);
     this.emit({ type: 'NEW', order, ts: now });
+  }
+
+  /**
+   * `reports` mode: the order service owns ids and creation, so the order is sent as a submission and only tracked once
+   * the reply gives its id. Until then it counts towards the LIVE and PENDING_START totals, so a burst of creations does
+   * not overshoot the preset.
+   */
+  private submitNew(order: Order, status: 'LIVE' | 'PENDING_START'): void {
+    const sink = this.options.reports as ReportSink;
+    const key = `${this.runTag}-${++this.submitted}`;
+    const { orderId: _provisional, ...rest } = order;
+    this.inflight[status]++;
+    this.emitted++;
+    sink.submit({ clientOrderId: key, order: { ...rest, clientOrderId: key } }).then(
+      (reply) => {
+        this.inflight[status]--;
+        if (!reply.ok) return;
+        this.execSeqs.set(reply.orderId, 0);
+        this.track({ ...order, orderId: reply.orderId, clientOrderId: key });
+      },
+      () => {
+        this.inflight[status]--;
+      },
+    );
   }
 
   private currentMids(): Record<string, number> {

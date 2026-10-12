@@ -26,6 +26,8 @@ export const SUBJECTS = {
   ordersSubmit: 'orders.submit',
   /** PLAN1: request/reply from a blotter to themis. */
   ordersCmd: 'orders.cmd',
+  /** PLAN1 1.5a to 1.5c: where hermes, in `reports` mode, answers a command it was sent on `orders.commands`. */
+  ordersAnswers: 'orders.answers',
   /** PLAN1: request/reply from hermes to themis; the reply is chunked. */
   ordersQueryOpen: 'orders.query.open',
   /** PLAN1: request/reply from helios to themis (startup fallback only). */

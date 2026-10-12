@@ -7,6 +7,9 @@ import { createLogger } from './log.js';
 import { ThemisMetrics } from './metrics.js';
 import { startThemis, type Themis } from './themis.js';
 
+// The order service owns the streams it reads and writes; the price feed owns PRICES.
+const OWNED_STREAMS: readonly string[] = [STREAMS.orders, STREAMS.exec, STREAMS.venue];
+
 const config = loadConfig(process.env);
 const log = createLogger(config.logLevel);
 
@@ -24,7 +27,7 @@ const repo = await MongoOrderRepository.connect({ url: config.mongoUrl, db: conf
 const bus = await NatsBus.connect({ url: config.natsUrl, name: 'themis', log });
 
 // themis starts before the simulator, so it makes sure the streams it reads exist (idempotent).
-log.info({ streams: await ensureStreams(await bus.manager(), streamSpecs().filter((s) => s.name === STREAMS.orders)) }, 'streams ready');
+log.info({ streams: await ensureStreams(await bus.manager(), streamSpecs().filter((s) => OWNED_STREAMS.includes(s.name))) }, 'streams ready');
 
 themis = await startThemis({
   bus,

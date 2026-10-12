@@ -1,11 +1,14 @@
 import { DiscardPolicy, RetentionPolicy, StorageType, type StreamConfig } from '@nats-io/jetstream';
 import { nanos } from '@nats-io/transport-node';
-import { STREAMS } from '@apeiron/logos';
+import { STREAMS, SUBJECTS } from '@apeiron/logos';
 
 const HOUR_MS = 3_600_000;
 
 /** Largest the ORDERS stream may grow; a safety cap on top of the 24h age limit (stress produces about 1MB/s). */
 export const ORDERS_MAX_BYTES = 1024 * 1024 * 1024;
+
+/** Largest the EXEC and VENUE streams may grow, on top of their 24h age limit. */
+export const EXEC_MAX_BYTES = 1024 * 1024 * 1024;
 
 export type StreamSpec = Pick<
   StreamConfig,
@@ -13,7 +16,7 @@ export type StreamSpec = Pick<
 >;
 
 /**
- * The two JetStream streams of Appendix C: ORDERS captures `orders.*` (limits retention, 24h) and
+ * The JetStream streams of Appendix C: ORDERS captures `orders.*` (limits retention, 24h) and
  * PRICES captures `prices.*` and keeps one message per subject, so a late joiner can read the last quote. PRICES is on
  * file storage, so the last quote (and so the price feed's starting level) survives a restart of the broker.
  */
@@ -38,6 +41,28 @@ export function streamSpecs(): StreamSpec[] {
       max_age: 0,
       max_msgs_per_subject: 1,
       max_bytes: -1,
+    },
+    {
+      // Execution reports from the venue to the order service (durable consumer `themis-exec`).
+      name: STREAMS.exec,
+      subjects: [SUBJECTS.execReports],
+      retention: RetentionPolicy.Limits,
+      storage: StorageType.File,
+      discard: DiscardPolicy.Old,
+      max_age: nanos(24 * HOUR_MS),
+      max_msgs_per_subject: -1,
+      max_bytes: EXEC_MAX_BYTES,
+    },
+    {
+      // Instructions from the order service to the venue (durable consumer `hermes-venue`).
+      name: STREAMS.venue,
+      subjects: [SUBJECTS.execCommands],
+      retention: RetentionPolicy.Limits,
+      storage: StorageType.File,
+      discard: DiscardPolicy.Old,
+      max_age: nanos(24 * HOUR_MS),
+      max_msgs_per_subject: -1,
+      max_bytes: EXEC_MAX_BYTES,
     },
   ];
 }

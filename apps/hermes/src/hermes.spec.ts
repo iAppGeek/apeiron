@@ -1,4 +1,20 @@
-import { MemoryBus, makeCommandId, parseLoadState, parseOrderEvent, priceSubject, PAIRS, type CurrencyPair, type OrderCommand, type OrderEvent } from '@apeiron/logos';
+import {
+  BUCKETS,
+  MemoryBus,
+  makeCommandId,
+  parseExecReport,
+  parseLoadState,
+  parseOrderEvent,
+  priceSubject,
+  PAIRS,
+  type CurrencyPair,
+  type ExecReport,
+  type Order,
+  type OrderCommand,
+  type OrderEvent,
+  type OrderStateRecord,
+  type Submission,
+} from '@apeiron/logos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startHermes, type Hermes } from './hermes.js';
 import { createLogger } from './log.js';
@@ -281,5 +297,125 @@ describe('order commands', () => {
     await bus.publish('orders.commands', cmd(liveOrderId(), 'PAUSE', 6, SEED_NOW - 31_000));
     expect(eventsFor(bus, 'client-1:6')).toEqual([]);
     expect(hermes.status().commandsHandled).toBe(before);
+  });
+});
+
+describe('startHermes in reports mode', () => {
+  /** A stand-in for the order service: the open orders it holds, and a submission endpoint that hands out ids. */
+  async function orderService(bus: MemoryBus, holding: Order[] = currentOrders()): Promise<{ submissions: Submission[]; queries: number; kv: ReturnType<MemoryBus['kv']> }> {
+    const state = { submissions: [] as Submission[], queries: 0, kv: bus.kv(BUCKETS.orderState) };
+    await state.kv.ensure({ history: 1, storage: 'file' });
+    let n = 0;
+    await bus.serve('orders.submit', (payload) => {
+      state.submissions.push(payload as Submission);
+      return { ok: true, orderId: `ALG8${String(++n).padStart(7, '0')}`, v: 1 };
+    });
+    await bus.serve('orders.query.open', async (payload) => {
+      state.queries++;
+      const { inbox } = payload as { inbox: string };
+      const records: OrderStateRecord[] = holding.map((order) => ({ v: 1, execSeq: 0, srcTs: 1, order }));
+      await bus.publish(inbox, { chunk: 0, of: 2, records: records.slice(0, 10) });
+      await bus.publish(inbox, { chunk: 1, of: 2, records: records.slice(10) });
+      return { chunks: 2, count: records.length };
+    });
+    return state;
+  }
+  const startReports = async (bus: MemoryBus, extra: { seed?: number } = {}): Promise<Hermes> => {
+    await publishQuotes(bus);
+    const hermes = await startHermes({ bus, log, preset: 'medium', current: [], maxOrderId: null, seed: extra.seed ?? 1, stepMs: 100, priceWaitMs: 0, execMode: 'reports' });
+    running = hermes;
+    return hermes;
+  };
+  const execReports = (bus: MemoryBus): ExecReport[] =>
+    bus.streamLog('EXEC').flatMap((m) => {
+      const parsed = parseExecReport(m.payload);
+      return parsed.ok ? [parsed.value] : [];
+    });
+
+  it('loads the open orders from the order service, reconciles them as execution reports and publishes no order events', async () => {
+    vi.useFakeTimers({ now: SEED_NOW + 2 * 86_400_000 });
+    const bus = new MemoryBus();
+    const service = await orderService(bus);
+    const hermes = await startReports(bus);
+    expect(service.queries).toBe(1);
+    const stale = currentOrders();
+    const reports = execReports(bus);
+    expect(reports.length).toBeGreaterThanOrEqual(stale.length);
+    expect(new Set(reports.map((r) => r.orderId))).toEqual(new Set(stale.map((o) => o.orderId)));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(bus.streamLog('ORDERS').filter((m) => m.subject === 'orders.events')).toEqual([]);
+    expect(hermes.status().eventsPublished).toBeGreaterThan(0);
+  });
+
+  it('tops LIVE up with submissions, each with its own clientOrderId, and tracks the orders under the ids it is given', async () => {
+    vi.useFakeTimers({ now: SEED_NOW + 2 * 86_400_000 });
+    const bus = new MemoryBus();
+    const service = await orderService(bus);
+    const hermes = await startReports(bus);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(service.submissions.length).toBeGreaterThan(400);
+    expect(new Set(service.submissions.map((s) => s.clientOrderId)).size).toBe(service.submissions.length);
+    expect(hermes.simulator.liveCount).toBeGreaterThanOrEqual(450);
+    expect(hermes.simulator.order('ALG80000001')).toBeDefined();
+  });
+
+  it('starts from the open orders it was given even when the query races a record the watch already delivered', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const orders = currentOrders().filter((o) => o.status === 'LIVE').map((o) => ({ ...o, endTime: SEED_NOW * 2 }));
+    await orderService(bus, orders);
+    const target = orders[0] as Order;
+    // The order service changed the order after answering the query: a newer record arrives on the watch.
+    const hermes = await startReports(bus);
+    await bus.kv(BUCKETS.orderState).put(target.orderId, { v: 5, execSeq: 0, srcTs: 2, order: { ...target, orderQty: 42 } } satisfies OrderStateRecord);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hermes.simulator.order(target.orderId)?.orderQty).toBe(42);
+    // ...and an older record does not take it back.
+    await bus.kv(BUCKETS.orderState).put(target.orderId, { v: 3, execSeq: 0, srcTs: 2, order: { ...target, orderQty: 7 } } satisfies OrderStateRecord);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hermes.simulator.order(target.orderId)?.orderQty).toBe(42);
+  });
+
+  it('answers a command on orders.answers and reports the change, numbering after the record it loaded', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const orders = currentOrders().filter((o) => o.status === 'LIVE').map((o) => ({ ...o, endTime: SEED_NOW * 2 }));
+    await orderService(bus, orders);
+    await startReports(bus);
+    const answers: OrderEvent[] = [];
+    await bus.subscribe('orders.answers', (p) => answers.push(parseOrderEvent(p).ok ? (p as OrderEvent) : (p as OrderEvent)));
+    const id = (orders[0] as Order).orderId;
+    const command: OrderCommand = { orderId: id, action: 'PAUSE', requestedBy: 'c', ts: SEED_NOW, commandId: makeCommandId('c', 1) };
+    await bus.publish('orders.commands', command);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(answers).toMatchObject([{ type: 'UPDATE', order: { orderId: id, status: 'PAUSED' }, commandId: 'c:1' }]);
+    const pause = execReports(bus).find((r) => r.type === 'PAUSED');
+    expect(pause).toMatchObject({ orderId: id, instrId: 'c:1' });
+  });
+
+  it('keeps asking until the order service answers the query', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    await publishQuotes(bus);
+    const starting = startHermes({ bus, log, preset: 'medium', current: [], maxOrderId: null, seed: 1, stepMs: 100, priceWaitMs: 0, execMode: 'reports' });
+    await vi.advanceTimersByTimeAsync(2_500);
+    const service = await orderService(bus);
+    await vi.advanceTimersByTimeAsync(2_500);
+    running = await starting;
+    expect(service.queries).toBe(1);
+  });
+
+  it('stops following the order service when it stops', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const orders = currentOrders().filter((o) => o.status === 'LIVE').map((o) => ({ ...o, endTime: SEED_NOW * 2 }));
+    await orderService(bus, orders);
+    const hermes = await startReports(bus);
+    await hermes.stop();
+    const target = orders[0] as Order;
+    await bus.kv(BUCKETS.orderState).put(target.orderId, { v: 9, execSeq: 0, srcTs: 2, order: { ...target, orderQty: 1 } } satisfies OrderStateRecord);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hermes.simulator.order(target.orderId)?.orderQty).not.toBe(1);
+    running = null;
   });
 });

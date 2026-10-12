@@ -14,6 +14,9 @@ export class ThemisMetrics {
   private readonly kvPutSeconds: Histogram;
   private readonly events: Counter;
   private readonly rebuildSeconds: Gauge;
+  private readonly reports: Counter;
+  private readonly clampedFills: Counter;
+  private readonly submissions: Counter;
   private snapshot: (() => ThemisSnapshot) | null = null;
 
   constructor() {
@@ -26,6 +29,19 @@ export class ThemisMetrics {
       name: 'themis_events_total',
       help: 'orders.events messages handled, by event type and result.',
       labelNames: ['type', 'result'],
+      registers,
+    });
+    this.reports = new Counter({
+      name: 'themis_exec_reports_total',
+      help: 'Execution reports handled, by type and result (applied, duplicate, rejected, unknown, invalid).',
+      labelNames: ['type', 'result'],
+      registers,
+    });
+    this.clampedFills = new Counter({ name: 'themis_fills_clamped_total', help: 'Fills larger than the remaining quantity, cut back to it.', registers });
+    this.submissions = new Counter({
+      name: 'themis_submissions_total',
+      help: 'orders.submit requests, by result (accepted, duplicate, invalid).',
+      labelNames: ['result'],
       registers,
     });
     this.rebuildSeconds = new Gauge({ name: 'themis_projection_rebuild_seconds', help: 'Duration of the last projection rebuild (0 if none ran).', registers });
@@ -63,6 +79,18 @@ export class ThemisMetrics {
 
   event(type: string, result: 'applied' | 'unchanged' | 'unknown' | 'ignored' | 'invalid'): void {
     this.events.inc({ type, result });
+  }
+
+  report(type: string, result: 'applied' | 'duplicate' | 'rejected' | 'unknown' | 'invalid'): void {
+    this.reports.inc({ type, result });
+  }
+
+  clamped(): void {
+    this.clampedFills.inc();
+  }
+
+  submission(result: 'accepted' | 'duplicate' | 'invalid'): void {
+    this.submissions.inc({ result });
   }
 
   projectionRebuilt(seconds: number): void {

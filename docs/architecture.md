@@ -228,6 +228,21 @@ per row and field, `newAbove` summed). The main thread applies each delta with t
 `applyServerSideTransaction`, merging every partial row into the row's current data right before the call: the async API
 would merge two partials against stale data and lose fields. Price cells flash and are coloured up or down for 600 ms.
 
+### Execution path (themis, `EXEC_MODE=reports`)
+
+`hermes` has two modes. `events` (the default for now) publishes `orders.events` as before. In `reports` mode it is only
+the venue: new orders go to `themis` as `orders.submit` requests (idempotent on `clientOrderId`; the reply carries the id
+`themis` assigned, ascending), and everything that happens to an order is an execution report on `exec.reports` (stream
+`EXEC`, durable consumer `themis-exec`): `ACTIVATED`, `FILL` (quantity, price and the quote), `CANCELLED`, `PAUSED`,
+`RESUMED`, each with an `execSeq` that hermes numbers per order. `themis` applies a report only if its `execSeq` is above the
+last accepted (a duplicate is acknowledged and counted; gaps are fine), clamps a fill larger than what remains, rejects what
+the lifecycle forbids (storing only the counter, so it is not replayed), and takes the market snapshot and the realised P&L
+of a completion from the quote in the report. At startup hermes asks `themis` for the open orders (`orders.query.open`:
+chunks of at most 500 records published to an inbox, then a summary reply), follows `ORDER_STATE` for changes, and applies a
+record only if it is not behind the reports it has already sent. hermes then has no database access in this mode.
+Until commands go through `themis` (phase 1.5c), a command still reaches hermes on `orders.commands`, and its answer comes
+back on `orders.answers`.
+
 ### Persistence (themis)
 
 `antikythera` no longer writes to the database. `themis` stores every lifecycle and fill change (price-only changes are

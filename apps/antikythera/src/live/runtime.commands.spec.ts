@@ -159,6 +159,29 @@ describe('LiveRuntime command correlation', () => {
     await r.runtime.stop();
   });
 
+  it('takes the answer from orders.answers too, which is where hermes answers in reports mode', async () => {
+    vi.useFakeTimers({ now: 50_000 });
+    const r = await rig();
+    const c = client(r, 'rep');
+    c.send(command(3, 'T0000001', 'PAUSE'));
+    await r.bus.publish('orders.answers', hermesUpdate('rep:3', 'T0000001', { status: 'PAUSED' }));
+    const row = r.store.rowIndexOf('T0000001') as number;
+    await publishRecord(r.bus, { ...r.store.orderAt(row), status: 'PAUSED' }, r.store.versionAt(row) + 1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(types(c)).toEqual(['delta', 'ack']);
+    c.send(command(4, 'T0000002', 'RESUME'));
+    await r.bus.publish('orders.answers', {
+      type: 'REJECT',
+      commandId: 'rep:4',
+      orderId: 'T0000002',
+      code: 'INVALID_TRANSITION',
+      message: 'no',
+      ts: 1,
+    } satisfies OrderEvent);
+    expect(c.sent.at(-1)).toMatchObject({ t: 'error', reqId: 4, code: 'INVALID_TRANSITION' });
+    await r.runtime.stop();
+  });
+
   it('applies the record for every client but acks only the one that asked', async () => {
     vi.useFakeTimers();
     const r = await rig();

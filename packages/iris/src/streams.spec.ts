@@ -38,8 +38,10 @@ describe('ensureStreams', () => {
     expect(results).toEqual([
       { name: 'ORDERS', action: 'created' },
       { name: 'PRICES', action: 'created' },
+      { name: 'EXEC', action: 'created' },
+      { name: 'VENUE', action: 'created' },
     ]);
-    expect(m.streams.add).toHaveBeenCalledTimes(2);
+    expect(m.streams.add).toHaveBeenCalledTimes(4);
     expect(m.streams.update).not.toHaveBeenCalled();
   });
 
@@ -48,10 +50,14 @@ describe('ensureStreams', () => {
     const m = manager({
       ORDERS: { ...specs[0], extra: 1 },
       PRICES: { ...specs[1] },
+      EXEC: { ...specs[2] },
+      VENUE: { ...specs[3] },
     });
     expect(await ensureStreams(m)).toEqual([
       { name: 'ORDERS', action: 'unchanged' },
       { name: 'PRICES', action: 'unchanged' },
+      { name: 'EXEC', action: 'unchanged' },
+      { name: 'VENUE', action: 'unchanged' },
     ]);
     expect(m.streams.add).not.toHaveBeenCalled();
     expect(m.streams.update).not.toHaveBeenCalled();
@@ -62,11 +68,20 @@ describe('ensureStreams', () => {
     const m = manager({
       ORDERS: { ...specs[0], max_age: 1, num_replicas: 1 },
       PRICES: { ...specs[1] },
+      EXEC: { ...specs[2] },
+      VENUE: { ...specs[3] },
     });
     const results = await ensureStreams(m);
     expect(results[0]).toEqual({ name: 'ORDERS', action: 'updated' });
     expect(m.streams.update).toHaveBeenCalledTimes(1);
     expect(m.streams.update).toHaveBeenCalledWith('ORDERS', expect.objectContaining({ max_age: DAY_NS, num_replicas: 1 }));
+  });
+
+  it('defines EXEC and VENUE on file storage with 24h limits', () => {
+    const specs = streamSpecs();
+    expect(specs.map((s) => s.name)).toEqual(['ORDERS', 'PRICES', 'EXEC', 'VENUE']);
+    expect(specs[2]).toMatchObject({ name: 'EXEC', subjects: ['exec.reports'], storage: StorageType.File, max_age: DAY_NS });
+    expect(specs[3]).toMatchObject({ name: 'VENUE', subjects: ['exec.commands'], storage: StorageType.File, max_age: DAY_NS });
   });
 
   it('keeps PRICES on file storage', () => {
@@ -75,10 +90,12 @@ describe('ensureStreams', () => {
 
   it('recreates a stream whose storage type differs, since that cannot be changed in place', async () => {
     const specs = streamSpecs();
-    const m = manager({ ORDERS: { ...specs[0] }, PRICES: { ...specs[1], storage: StorageType.Memory } });
+    const m = manager({ ORDERS: { ...specs[0] }, PRICES: { ...specs[1], storage: StorageType.Memory }, EXEC: { ...specs[2] }, VENUE: { ...specs[3] } });
     expect(await ensureStreams(m)).toEqual([
       { name: 'ORDERS', action: 'unchanged' },
       { name: 'PRICES', action: 'recreated' },
+      { name: 'EXEC', action: 'unchanged' },
+      { name: 'VENUE', action: 'unchanged' },
     ]);
     expect(m.streams.delete).toHaveBeenCalledWith('PRICES');
     expect(m.streams.add).toHaveBeenCalledWith(expect.objectContaining({ name: 'PRICES', storage: StorageType.File }));

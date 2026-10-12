@@ -19,16 +19,18 @@ const health = await startHealthServer(
   metrics,
 );
 
-const repo = await MongoOrderRepository.connect({ url: config.mongoUrl, db: config.mongoDb });
+// In reports mode the order service owns the database; hermes has no access to it.
+const repo =
+  config.execMode === 'events' && config.mongoUrl !== undefined ? await MongoOrderRepository.connect({ url: config.mongoUrl, db: config.mongoDb }) : null;
 const bus = await NatsBus.connect({ url: config.natsUrl, name: 'hermes', log });
 
 // hermes makes sure the order stream exists; the price feed owns PRICES.
 const streams = await ensureStreams(await bus.manager(), streamSpecs().filter((s) => s.name === STREAMS.orders));
 log.info({ streams }, 'streams ready');
 
-const current = (await repo.loadOpen()).map((record) => record.order);
-const maxOrderId = await repo.maxOrderId();
-log.info({ current: current.length, maxOrderId }, 'loaded current orders');
+const current = repo === null ? [] : (await repo.loadOpen()).map((record) => record.order);
+const maxOrderId = repo === null ? null : await repo.maxOrderId();
+log.info({ mode: config.execMode, current: current.length, maxOrderId }, 'loaded current orders');
 
 hermes = await startHermes({
   bus,
@@ -39,6 +41,7 @@ hermes = await startHermes({
   seed: config.seed ?? Date.now() % 2 ** 31,
   stepMs: config.stepMs,
   priceWaitMs: config.priceWaitMs,
+  execMode: config.execMode,
   metrics,
 });
 log.info({ preset: config.loadPreset }, 'hermes started');
@@ -48,7 +51,7 @@ const shutdown = async (signal: string): Promise<void> => {
   await hermes?.stop();
   await closeServer(health);
   await bus.close();
-  await repo.close();
+  await repo?.close();
   process.exit(0);
 };
 process.on('SIGTERM', () => void shutdown('SIGTERM'));

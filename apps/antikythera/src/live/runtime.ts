@@ -512,11 +512,14 @@ export class LiveRuntime implements LiveHooks {
       this.subscriptions.push(state);
       // Until commands go through the order service (phase 1.5c), the answer to a command is still an event on
       // `orders.events`. Listened to plain: this is not a consumer and holds no position in the stream.
-      const answers = await bus.subscribe(SUBJECTS.ordersEvents, (payload) => {
-        const parsed = parseOrderEvent(payload);
-        if (parsed.ok) this.correlate(parsed.value);
-      });
-      this.subscriptions.push(answers);
+      // hermes answers on `orders.events` in its `events` mode and on `orders.answers` in its `reports` mode.
+      for (const subject of [SUBJECTS.ordersEvents, SUBJECTS.ordersAnswers]) {
+        const answers = await bus.subscribe(subject, (payload) => {
+          const parsed = parseOrderEvent(payload);
+          if (parsed.ok) this.correlate(parsed.value);
+        });
+        this.subscriptions.push(answers);
+      }
       this.attached = true;
       log.info({}, 'attached to the message bus');
     } catch (error) {

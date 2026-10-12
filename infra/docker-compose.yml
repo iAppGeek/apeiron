@@ -161,6 +161,9 @@ services:
       LOAD_PRESET: ${LOAD_PRESET:-medium}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       HEALTH_PORT: "4100"
+      # events: publish orders.events (hermes writes the database through themis). reports: send submissions and
+      # execution reports to the order service, which owns the database.
+      EXEC_MODE: ${EXEC_MODE:-events}
     depends_on:
       mongo:
         condition: service_healthy
