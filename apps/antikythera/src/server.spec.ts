@@ -36,6 +36,8 @@ function connect(url: string): Promise<Client> {
       // msgpack connections get binary frames and JSON connections get text frames.
       if (isBinary !== (current === 'msgpack')) throw new Error(`unexpected ${isBinary ? 'binary' : 'text'} frame`);
       const msg = (isBinary ? getCodec('msgpack') : jsonCodec).decode(frame) as ServerMsg;
+      // The live runtime sends a summary every second, unprompted; these tests follow request and reply.
+      if (msg.t === 'summary') return;
       const waiter = waiters.shift();
       if (waiter) waiter(msg);
       else queue.push(msg);
@@ -160,9 +162,7 @@ describe('GET /health', () => {
     expect(await c.next()).toMatchObject({ t: 'error', code: 'NOT_READY' });
     await loading;
     c.send({ t: 'getRows', reqId: 2, req: req() });
-    let reply = await c.next();
-    while (reply.t === 'summary') reply = await c.next();
-    expect(reply).toMatchObject({ t: 'rows', reqId: 2 });
+    expect(await c.next()).toMatchObject({ t: 'rows', reqId: 2 });
     await c.close();
     await s.app.close();
   });
