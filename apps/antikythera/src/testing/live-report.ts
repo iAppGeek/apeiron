@@ -40,7 +40,6 @@ async function stress(): Promise<void> {
     cpuPercent: { median: percentile(cpu, 50), max: Math.max(...cpu) },
     rssMb: { median: percentile(rss, 50), max: Math.max(...rss) },
     flush: (lag as { flush: unknown }).flush,
-    writeBehind: (lag as { writeBehind: unknown }).writeBehind,
     liveStats: (lag as { live: unknown }).live,
     defaultView: report,
     groupedView: grouped,
@@ -106,7 +105,7 @@ async function restartCheck(): Promise<void> {
 
 /** Compares what the server serves with what Mongo holds, for the newest orders and the LIVE ones. Run when the feed is quiet. */
 async function consistency(): Promise<void> {
-  await sleep(1_500); // let write-behind settle
+  await sleep(1_500); // let the order service persist
   const client = await LiveClient.connect(url);
   const repo = await MongoOrderRepository.connect({ url: mongo, db: 'blotter' });
   const col = repo.database.collection('orders');

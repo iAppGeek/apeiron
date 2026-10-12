@@ -1,4 +1,4 @@
-# Scrapes both services every 2s over the compose network. Used by the `monitoring` profile.
+# Scrapes the services every 2s over the compose network. Used by the `monitoring` profile.
 global:
   scrape_interval: 2s
   scrape_timeout: 1500ms
@@ -9,6 +9,11 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["antikythera:4000"]
+
+  - job_name: themis
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["themis:4200"]
 
   - job_name: hermes
     metrics_path: /metrics

@@ -88,5 +88,5 @@ variable "mongo_cache_gb" {
 variable "services" {
   description = "Service images, one ECR repository each (apeiron/<name>)."
   type        = list(string)
-  default     = ["antikythera", "hermes", "gaia", "talos", "pharos"]
+  default     = ["antikythera", "themis", "hermes", "gaia", "talos", "pharos"]
 }

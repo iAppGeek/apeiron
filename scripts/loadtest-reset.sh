@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Puts the local stack in a known state before a load test: empty JetStream, the 1M rows re-seeded (so the LIVE
+# Puts the local stack in a known state before a load test: empty JetStream and KV buckets, the 1M rows re-seeded (so the LIVE
 # population is back to about 500 and no earlier stress run has left extra LIVE orders or an event backlog),
 # everything up on the Medium preset. Takes about 45 seconds.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-docker compose --profile core stop antikythera hermes nats >/dev/null
+# Reset rule: stop everything, purge NATS (streams and the ORDER_STATE buckets), seed, then start themis, which
+# rebuilds the projection, before everything else. `up -d` follows the depends_on order.
+docker compose --profile core stop antikythera hermes themis nats >/dev/null
 docker compose --profile core rm -f nats >/dev/null
 docker volume rm apeiron_nats-data >/dev/null 2>&1 || true
 docker compose --profile core --profile seed run --rm -e SEED_RESET=true gaia 2>&1 | tail -3

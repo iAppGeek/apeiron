@@ -10,7 +10,6 @@ describe('loadConfig', () => {
       port: 4000,
       logLevel: 'info',
       flushMs: 50,
-      writeBehindMs: 500,
       maxTrackedBlocks: 100,
       loadPreset: 'medium',
       storeCapacity: 1_500_000,

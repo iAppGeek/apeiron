@@ -13,7 +13,7 @@ export type ServerSnapshot = {
   pendingEvents: number;
   eventsApplied: number;
   ticksApplied: number;
-  /** Messages in the blotter-server consumer not yet delivered, and delivered but not acknowledged (acked after persisting). */
+  /** Messages in the `blotter-server` and `themis` consumers not yet delivered, and delivered but not acknowledged (themis acks after it has stored and published them). */
   consumerPending: number;
   consumerAckPending: number;
   flushLagMs: number;
@@ -34,7 +34,7 @@ export function parseSnapshot(health: unknown, lag: unknown, jsz: unknown): Serv
     for (const stream of (obj(account)['stream_detail'] as unknown[] | undefined) ?? []) {
       for (const consumer of (obj(stream)['consumer_detail'] as unknown[] | undefined) ?? []) {
         const c = obj(consumer);
-        if (c['name'] !== 'blotter-server') continue;
+        if (c['name'] !== 'blotter-server' && c['name'] !== 'themis') continue;
         pending += num(c['num_pending']);
         ackPending += num(c['num_ack_pending']);
       }

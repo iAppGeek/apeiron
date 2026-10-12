@@ -45,11 +45,9 @@ async function rig(options: { bus?: MemoryBus; repo?: InMemoryOrderRepository; r
   const runtime = new LiveRuntime({
     store,
     engine,
-    repo,
     bus,
     log,
     flushMs: 100,
-    writeBehindMs: 500,
     maxTrackedBlocks: 20,
     retryMs: 1_000,
     flushBudgetMs: options.flushBudgetMs,
@@ -165,25 +163,22 @@ describe('LiveRuntime', () => {
     await r.runtime.stop();
   });
 
-  it('persists lifecycle changes through write-behind but not price-only changes', async () => {
+  it('applies lifecycle and price changes to the store without writing to the repository', async () => {
     vi.useFakeTimers({ now: 10_000 });
     const r = await rig();
     r.runtime.start();
     await vi.advanceTimersByTimeAsync(0);
+    const upsert = vi.spyOn(r.repo, 'upsertMany');
     await r.bus.publish('prices.EURUSD', tick(1.0899, 1.0901));
-    await vi.advanceTimersByTimeAsync(600);
-    expect(r.runtime.writeBehind.stats.ordersWritten).toBe(0);
-    expect((await persisted(r.repo))[0]?.marketMid).toBe(1.08);
     await r.bus.publish('orders.events', update(r.orders[0]?.orderId ?? '', { filledQty: 900_000, remainingQty: 100_000 }));
     await vi.advanceTimersByTimeAsync(600);
-    expect(r.runtime.writeBehind.stats.ordersWritten).toBe(1);
-    const stored = (await persisted(r.repo))[0];
-    expect(stored).toMatchObject({ filledQty: 900_000 });
-    expect(stored?.marketMid).toBe(1.09);
+    expect(r.store.orderAt(0)).toMatchObject({ filledQty: 900_000, marketMid: 1.09 });
+    expect(upsert).not.toHaveBeenCalled();
+    expect((await persisted(r.repo))[0]).toMatchObject({ filledQty: 400_000, marketMid: 1.08 });
     await r.runtime.stop();
   });
 
-  it('acknowledges the bus only after persisting, so a restart replays exactly what was lost (idempotent)', async () => {
+  it('acknowledges the bus once a flush has applied the events, so a restart replays only what it had not applied', async () => {
     vi.useFakeTimers({ now: 10_000 });
     const first = await rig();
     first.runtime.start();
@@ -191,26 +186,24 @@ describe('LiveRuntime', () => {
     const id = first.orders[0]?.orderId ?? '';
     await first.bus.publish('orders.events', update(id, { filledQty: 500_000, remainingQty: 500_000, numFills: 4 }));
     await first.bus.publish('orders.events', update(id, { filledQty: 700_000, remainingQty: 300_000, numFills: 5 }));
-    await vi.advanceTimersByTimeAsync(100);
-    // Applied in memory but not yet written: "crash" here by abandoning the runtime.
+    await vi.advanceTimersByTimeAsync(150);
     expect(first.store.orderAt(0).filledQty).toBe(700_000);
-    expect((await persisted(first.repo))[0]?.filledQty).toBe(400_000);
+    await first.runtime.stop();
 
+    // Applied and acknowledged: nothing is replayed to the next instance.
     const second = await rig({ bus: first.bus, repo: first.repo });
     second.runtime.start();
-    await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(100);
-    expect(second.store.orderAt(0)).toMatchObject({ filledQty: 700_000, numFills: 5 });
-    expect(second.store.size).toBe(3);
-    await vi.advanceTimersByTimeAsync(600);
-    expect((await persisted(second.repo))[0]).toMatchObject({ filledQty: 700_000, numFills: 5 });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(second.runtime.live.stats.eventsApplied).toBe(0);
+    await second.runtime.stop();
 
-    // After a persisted pass the events are acknowledged: a third start sees nothing to replay.
-    const third = await rig({ bus: first.bus, repo: second.repo });
+    // Published while nobody was consuming: replayed and applied by the next one.
+    await first.bus.publish('orders.events', update(id, { filledQty: 800_000, remainingQty: 200_000, numFills: 6 }));
+    const third = await rig({ bus: first.bus, repo: first.repo });
     third.runtime.start();
     await vi.advanceTimersByTimeAsync(200);
-    expect(third.runtime.live.stats.eventsApplied).toBe(0);
-    for (const x of [first, second, third]) await x.runtime.stop();
+    expect(third.runtime.live.stats.eventsApplied).toBe(1);
+    await third.runtime.stop();
   });
 
   it('replaying a stream that includes NEW orders already persisted does not duplicate them', async () => {
@@ -221,11 +214,9 @@ describe('LiveRuntime', () => {
     const fresh = makeOrders([{}, {}, {}, { ...LIVE }]).slice(3)[0] as Order;
     await first.bus.publish('orders.events', { type: 'NEW', order: fresh, ts: 1 });
     await vi.advanceTimersByTimeAsync(100);
-    await first.runtime.writeBehind.flush();
-    // Persisted and acked; now replay everything anyway from a fresh durable (as after stream loss of the consumer).
-    const rows = (await persisted(first.repo)).length;
-    expect(rows).toBe(4);
+    // Applied and acked; now replay everything anyway into a store that already holds the order.
     const second = await rig({ bus: first.bus, repo: first.repo });
+    second.store.upsert(fresh);
     for (const m of first.bus.streamLog('ORDERS')) second.runtime.live.enqueueEvent(m.payload as OrderEvent, () => undefined);
     second.runtime.flush();
     expect(second.store.size).toBe(4);

@@ -13,7 +13,6 @@ import {
   type OrderEvent,
   type LoadPreset,
 } from '@apeiron/logos';
-import type { OrderRepository } from '@apeiron/mnemosyne';
 import type { RuntimeMetrics } from '../metrics.js';
 import type { QueryEngine } from '../query/engine.js';
 import type { View, ViewChanges } from '../query/view.js';
@@ -24,7 +23,6 @@ import { DEFAULT_BACKPRESSURE, type BackpressureOptions } from './backpressure.j
 import type { StatusSummary } from './counters.js';
 import { LiveStore } from './live-store.js';
 import { SystemStats } from './system-stats.js';
-import { WriteBehind } from './write-behind.js';
 
 export type RuntimeLogger = {
   info(obj: Record<string, unknown>, msg: string): void;
@@ -35,11 +33,9 @@ export type RuntimeLogger = {
 export type LiveRuntimeOptions = {
   store: ColumnarStore;
   engine: QueryEngine;
-  repo: OrderRepository;
   bus: Bus;
   log: RuntimeLogger;
   flushMs: number;
-  writeBehindMs: number;
   maxTrackedBlocks: number;
   backpressure?: BackpressureOptions;
   summaryIntervalMs?: number;
@@ -72,12 +68,11 @@ const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(r
  * The live half of the server. After the store has loaded it attaches to the bus (the durable `blotter-server`
  * consumer on `orders.events`, `prices.*`), then every `flushMs` it applies the queued events and ticks to the
  * store, patches every cached view from the tick's ChangeSet, and lets each client session send its delta. It
- * also runs write-behind, keeps string ranks fresh in the background and drops idle views.
+ * keeps string ranks fresh in the background and drops idle views.
  */
 export class LiveRuntime implements LiveHooks {
   readonly live: LiveStore;
   readonly system = new SystemStats();
-  readonly writeBehind: WriteBehind;
   readonly flushStats: FlushStats = { flushes: 0, lastMs: 0, maxMs: 0, totalMs: 0, lastChanges: 0, totalChanges: 0, lastViews: 0 };
   readonly maxTrackedBlocks: number;
   readonly backpressure: BackpressureOptions;
@@ -98,7 +93,6 @@ export class LiveRuntime implements LiveHooks {
 
   constructor(private readonly options: LiveRuntimeOptions) {
     this.live = new LiveStore(options.store, options.log);
-    this.writeBehind = new WriteBehind(this.live, options.repo, options.log, options.writeBehindMs, options.metrics);
     this.commands = new CommandCorrelator(options.commandTimeoutMs);
     this.maxTrackedBlocks = options.maxTrackedBlocks;
     this.backpressure = options.backpressure ?? DEFAULT_BACKPRESSURE;
@@ -130,7 +124,6 @@ export class LiveRuntime implements LiveHooks {
     this.timers.push(setInterval(() => this.system.sample(), 1_000));
     this.timers.push(setInterval(() => void this.refreshRanks(), this.options.rankRefreshMs ?? 30_000));
     this.timers.push(setInterval(() => this.options.engine.sweep(this.options.viewIdleMs ?? 60_000), 10_000));
-    this.writeBehind.start();
     void this.attach();
   }
 
@@ -143,7 +136,6 @@ export class LiveRuntime implements LiveHooks {
     this.subscriptions.length = 0;
     this.flush();
     this.commands.clear();
-    await this.writeBehind.stop();
     this.system.stop();
   }
 

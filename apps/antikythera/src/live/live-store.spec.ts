@@ -50,7 +50,7 @@ describe('LiveStore.init', () => {
 });
 
 describe('LiveStore events', () => {
-  it('appends a NEW order, records it in the ChangeSet and counters, and marks it for write-behind', () => {
+  it('appends a NEW order, records it in the ChangeSet and counters', () => {
     const { store, live } = setup([{ ...LIVE_EURUSD }]);
     const [fresh] = makeOrders([{}, { ...LIVE_EURUSD, traderId: 'T3' }]).slice(1) as [Order];
     live.enqueueEvent({ type: 'NEW', order: fresh, ts: 1 }, ack);
@@ -61,7 +61,6 @@ describe('LiveStore events', () => {
     expect(cs.entries.get(1)?.isNew).toBe(true);
     expect(live.counters.scoped('T3').byStatus.LIVE).toBe(1);
     expect(live.liveRows).toBe(2);
-    expect(live.takeWriteBatch().orders.map((o) => o.orderId)).toEqual([fresh.orderId]);
   });
 
   it('treats a NEW for an order already stored as an idempotent upsert', () => {
@@ -83,11 +82,9 @@ describe('LiveStore events', () => {
     const first = live.flush(1_000);
     for (const f of ['filledQty', 'remainingQty', 'numFills'] as const) expect(first.entries.get(0)?.fields.has(f)).toBe(true);
     expect(store.orderAt(0)).toMatchObject({ filledQty: 700_000, remainingQty: 300_000, numFills: 9 });
-    live.takeWriteBatch();
     live.enqueueEvent(event, ack);
     const replay = live.flush(2_000);
     expect(replay.size).toBe(0);
-    expect(live.takeWriteBatch().orders).toEqual([]);
     expect(store.orderAt(0).filledQty).toBe(700_000);
   });
 
@@ -138,7 +135,6 @@ describe('LiveStore price join', () => {
       expect(store.orderAt(row).distanceToLimitBps).toBeCloseTo(0, 1);
     }
     expect([2, 3].map((r) => store.orderAt(r).marketMid)).toEqual([before[2], before[3]]);
-    expect(live.takeWriteBatch().orders).toEqual([]);
     expect(live.stats.priceRecomputes).toBe(2);
   });
 
@@ -200,35 +196,28 @@ describe('LiveStore price join', () => {
   });
 });
 
-describe('LiveStore write batches', () => {
-  it('rebuilds full orders from the store and hands over the last ack once', () => {
+describe('LiveStore acknowledgements', () => {
+  it('acknowledges the last event of a flush once, and only after the flush applied it', () => {
     const { store, live } = setup([{ ...LIVE_EURUSD }]);
     const first = vi.fn();
     const second = vi.fn();
     const id = store.orderAt(0).orderId;
     live.enqueueEvent(update(id, { numFills: 3 }), first);
     live.enqueueEvent(update(id, { numFills: 4 }), second);
+    expect(second).not.toHaveBeenCalled();
     live.flush(1_000);
-    const batch = live.takeWriteBatch();
-    expect(batch.orders).toHaveLength(1);
-    expect(Object.keys(batch.orders[0] as Order)).toHaveLength(50);
-    expect(batch.orders[0]?.numFills).toBe(4);
-    batch.ack?.();
+    expect(store.orderAt(0).numFills).toBe(4);
     expect(second).toHaveBeenCalledTimes(1);
     expect(first).not.toHaveBeenCalled();
-    expect(live.takeWriteBatch()).toEqual({ orders: [], ack: null });
+    live.flush(2_000);
+    expect(second).toHaveBeenCalledTimes(1);
   });
 
-  it('puts a failed batch back for the next pass', () => {
+  it('acknowledges events that changed nothing, so a replay is not redelivered forever', () => {
     const { store, live } = setup([{ ...LIVE_EURUSD }]);
     const done = vi.fn();
-    live.enqueueEvent(update(store.orderAt(0).orderId, { numFills: 3 }), done);
+    live.enqueueEvent(update(store.orderAt(0).orderId, { numFills: store.orderAt(0).numFills }), done);
     live.flush(1_000);
-    const batch = live.takeWriteBatch();
-    live.restoreWriteBatch(batch);
-    const again = live.takeWriteBatch();
-    expect(again.orders.map((o) => o.orderId)).toEqual(batch.orders.map((o) => o.orderId));
-    again.ack?.();
     expect(done).toHaveBeenCalledTimes(1);
   });
 });

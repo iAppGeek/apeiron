@@ -30,7 +30,7 @@ async function start(): Promise<{ bus: MemoryBus; url: string }> {
   const bus = new MemoryBus();
   const repo = new InMemoryOrderRepository();
   await repo.upsertMany(ROWS.map(toStoredOrder));
-  server = await buildServer({ repo, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, writeBehindMs: 50, summaryIntervalMs: 100 });
+  server = await buildServer({ repo, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, summaryIntervalMs: 100 });
   await server.app.listen({ port: 0, host: '127.0.0.1' });
   await server.load();
   const addr = server.app.server.address();

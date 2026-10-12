@@ -17,7 +17,6 @@ const envSchema = z.object({
   /** Used from phase 5; optional until then. */
   NATS_URL: z.url({ protocol: /^nats$/ }).optional(),
   FLUSH_MS: posInt('50'),
-  WRITE_BEHIND_MS: posInt('500'),
   MAX_TRACKED_BLOCKS: posInt('100'),
   LOAD_PRESET: z.enum(['medium', 'stress']).default('medium'),
   /** Row capacity the store reserves up front (virtual memory only; untouched pages are not resident). */
@@ -43,7 +42,6 @@ export type AntikytheraConfig = {
   logLevel: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
   natsUrl: string | undefined;
   flushMs: number;
-  writeBehindMs: number;
   maxTrackedBlocks: number;
   loadPreset: 'medium' | 'stress';
   storeCapacity: number;
@@ -71,7 +69,6 @@ export function loadConfig(env: Record<string, string | undefined>): Antikythera
     logLevel: e.LOG_LEVEL,
     natsUrl: e.NATS_URL,
     flushMs: e.FLUSH_MS,
-    writeBehindMs: e.WRITE_BEHIND_MS,
     maxTrackedBlocks: e.MAX_TRACKED_BLOCKS,
     loadPreset: e.LOAD_PRESET,
     storeCapacity: e.STORE_CAPACITY,

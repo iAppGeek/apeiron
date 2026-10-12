@@ -17,12 +17,11 @@ export type SessionMetrics = {
   backpressure(event: BackpressureEvent): void;
 };
 
-/** What the live runtime and write-behind report. */
+/** What the live runtime reports. */
 export type RuntimeMetrics = {
   flush(seconds: number): void;
   eventAge(seconds: number): void;
   ingest(type: IngestType, count?: number): void;
-  writeBehind(info: { batchSize: number; seconds: number; ok: boolean }): void;
   command(outcome: string, seconds: number): void;
   /** What a flush did with the cached views. */
   views(stats: { patched: number; deferred: number; unsubscribed: number; pendingRebuild: number; stale: number }): void;
@@ -40,7 +39,6 @@ export type MetricSources = {
     clientsByCodec: Record<CodecName, number>;
     liveRows: number;
     pendingEvents: number;
-    dirtyOrders: number;
     commandsPending: number;
     cpuPercent: number;
     lagMs: { p50: number; p99: number; max: number };
@@ -50,13 +48,12 @@ export type MetricSources = {
 const SECONDS_FAST = [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1];
 const SECONDS_SLOW = [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 const BYTES = [128, 512, 2_048, 8_192, 32_768, 131_072, 524_288, 2_097_152];
-const COUNTS = [1, 10, 50, 100, 500, 1_000, 5_000, 10_000];
 
 type Child = { messages: { inc(n?: number): void }; bytes: { inc(n?: number): void } };
 
 /**
  * The antikythera metrics registry (`GET /metrics`). Hot-path counters and histograms are updated inline by the
- * session, runtime and write-behind; state that already lives elsewhere (store size, view cache, client count,
+ * session and runtime; state that already lives elsewhere (store size, view cache, client count,
  * process CPU, event-loop lag) is read when Prometheus scrapes.
  */
 export class Metrics implements SessionMetrics, RuntimeMetrics {
@@ -72,9 +69,6 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
   private readonly flushSeconds: Histogram;
   private readonly eventAgeSeconds: Histogram;
   private readonly ingestEvents: Counter;
-  private readonly writeBehindBatch: Histogram;
-  private readonly writeBehindSeconds: Histogram;
-  private readonly writeBehindFailures: Counter;
   private readonly commandSeconds: Histogram;
   private readonly viewOutcomes: Counter;
   private readonly rebuildSeconds: Histogram;
@@ -133,9 +127,6 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
       labelNames: ['type'],
       registers,
     });
-    this.writeBehindBatch = new Histogram({ name: 'apeiron_write_behind_batch_size', help: 'Orders per write-behind batch.', buckets: COUNTS, registers });
-    this.writeBehindSeconds = new Histogram({ name: 'apeiron_write_behind_duration_seconds', help: 'Mongo upsert time per write-behind batch.', buckets: SECONDS_SLOW, registers });
-    this.writeBehindFailures = new Counter({ name: 'apeiron_write_behind_failures_total', help: 'Write-behind batches that failed and will be retried.', registers });
     this.commandSeconds = new Histogram({
       name: 'apeiron_command_duration_seconds',
       help: 'Command round trip, from the client request to ack or error. outcome is ok or the error code.',
@@ -214,15 +205,6 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
     this.ingestEvents.labels(type).inc(count);
   }
 
-  writeBehind(info: { batchSize: number; seconds: number; ok: boolean }): void {
-    if (!info.ok) {
-      this.writeBehindFailures.inc();
-      return;
-    }
-    this.writeBehindBatch.observe(info.batchSize);
-    this.writeBehindSeconds.observe(info.seconds);
-  }
-
   command(outcome: string, seconds: number): void {
     this.commandSeconds.labels(outcome).observe(seconds);
   }
@@ -270,7 +252,6 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
     );
     this.scraped('apeiron_live_rows', 'Open (LIVE or PAUSED) orders being repriced.', (g) => g.set(live()?.liveRows ?? 0));
     this.scraped('apeiron_ingest_queue_depth', 'Order events queued for the next flush.', (g) => g.set(live()?.pendingEvents ?? 0));
-    this.scraped('apeiron_write_behind_queue_depth', 'Orders changed and waiting to be persisted.', (g) => g.set(live()?.dirtyOrders ?? 0));
     this.scraped('apeiron_commands_pending', 'Commands waiting for hermes.', (g) => g.set(live()?.commandsPending ?? 0));
     this.scraped('apeiron_process_cpu_percent', 'Process CPU over the last second, in percent of one core.', (g) => g.set(live()?.cpuPercent ?? 0));
     this.scraped(
