@@ -16,6 +16,8 @@ export class ThemisMetrics {
   private readonly reports: Counter;
   private readonly clampedFills: Counter;
   private readonly submissions: Counter;
+  private readonly commands: Counter;
+  private readonly commandSeconds: Histogram;
   private snapshot: (() => ThemisSnapshot) | null = null;
 
   constructor() {
@@ -37,6 +39,13 @@ export class ThemisMetrics {
       labelNames: ['result'],
       registers,
     });
+    this.commands = new Counter({
+      name: 'themis_commands_total',
+      help: 'Commands handled, by kind (action, amend) and result (ok or the reject code).',
+      labelNames: ['kind', 'result'],
+      registers,
+    });
+    this.commandSeconds = new Histogram({ name: 'themis_command_duration_seconds', help: 'Time from a command to its reply.', buckets: SECONDS, registers });
     this.rebuildSeconds = new Gauge({ name: 'themis_projection_rebuild_seconds', help: 'Duration of the last projection rebuild (0 if none ran).', registers });
     const snapshotOf = (): ThemisSnapshot => this.snapshot?.() ?? { openOrders: 0 };
     new Gauge({
@@ -72,6 +81,11 @@ export class ThemisMetrics {
 
   report(type: string, result: 'applied' | 'duplicate' | 'rejected' | 'unknown' | 'invalid'): void {
     this.reports.inc({ type, result });
+  }
+
+  command(kind: string, result: string, seconds: number): void {
+    this.commands.inc({ kind, result });
+    if (result === 'ok') this.commandSeconds.observe(seconds);
   }
 
   clamped(): void {

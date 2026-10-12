@@ -3,8 +3,7 @@ import {
   mulberry32,
   type ExecReport,
   type Order,
-  type OrderCommand,
-  type OrderEvent,
+  type VenueInstruction,
   type OrderStateRecord,
   type Submission,
   type SubmitReply,
@@ -17,7 +16,6 @@ type Rig = {
   sim: Simulator;
   reports: ExecReport[];
   submissions: Submission[];
-  answers: OrderEvent[];
   /** Replies to every submission still waiting. */
   flush(): Promise<void>;
 };
@@ -27,12 +25,10 @@ const LATER = SEED_NOW + 3 * 86_400_000;
 function rig(options: { current?: Order[]; hold?: boolean; reject?: boolean; seed?: number } = {}): Rig {
   const reports: ExecReport[] = [];
   const submissions: Submission[] = [];
-  const answers: OrderEvent[] = [];
   const waiting: (() => void)[] = [];
   let n = 0;
   const sink: ReportSink = {
     report: (r) => reports.push(r),
-    answer: (a) => answers.push(a),
     submit: (s) => {
       submissions.push(s);
       const orderId = `ALG9${String(++n).padStart(7, '0')}`;
@@ -49,7 +45,6 @@ function rig(options: { current?: Order[]; hold?: boolean; reject?: boolean; see
     sim,
     reports,
     submissions,
-    answers,
     flush: async (): Promise<void> => {
       for (const release of waiting.splice(0)) release();
       await Promise.resolve();
@@ -57,7 +52,7 @@ function rig(options: { current?: Order[]; hold?: boolean; reject?: boolean; see
   };
 }
 
-const command = (orderId: string, action: OrderCommand['action'], n = 1): OrderCommand => ({ orderId, action, requestedBy: 'u', ts: SEED_NOW, commandId: `c:${n}` });
+const command = (orderId: string, action: VenueInstruction['action'], n = 1): VenueInstruction => ({ orderId, action, ts: SEED_NOW, instrId: `c:${n}` });
 const recordOf = (order: Order, execSeq = 0, v = 2): OrderStateRecord => ({ v, execSeq, srcTs: 1, order });
 
 describe('Simulator reports', () => {
@@ -183,36 +178,34 @@ describe('Simulator reports', () => {
     expect(compared).toBeGreaterThan(5);
   });
 
-  it('answers a PAUSE: a PAUSED report that carries the command id, and an answer with the status', () => {
+  it('carries out a PAUSE and a RESUME as reports that name the instruction', () => {
     const r = rig();
     const id = currentOrders().find((o) => o.status === 'LIVE')?.orderId as string;
-    r.sim.command(command(id, 'PAUSE', 7), SEED_NOW);
+    r.sim.instruct(command(id, 'PAUSE', 7), SEED_NOW);
     expect(r.reports).toEqual([{ type: 'PAUSED', orderId: id, execSeq: 1, instrId: 'c:7', ts: SEED_NOW }]);
-    expect(r.answers).toEqual([{ type: 'UPDATE', order: { orderId: id, status: 'PAUSED' }, ts: SEED_NOW, commandId: 'c:7' }]);
-    r.sim.command(command(id, 'RESUME', 8), SEED_NOW + 5_000);
+    r.sim.instruct(command(id, 'RESUME', 8), SEED_NOW + 5_000);
     expect(r.reports[1]).toMatchObject({ type: 'RESUMED', execSeq: 2, instrId: 'c:8' });
-    expect(r.answers[1]).toMatchObject({ order: { status: 'LIVE' }, commandId: 'c:8' });
   });
 
-  it('answers a CANCEL with a CANCELLED report by the trader, with the quote', () => {
+  it('carries out a CANCEL as a CANCELLED report by the trader, with the quote', () => {
     const r = rig();
     const id = currentOrders().find((o) => o.status === 'LIVE')?.orderId as string;
-    r.sim.command(command(id, 'CANCEL', 9), SEED_NOW);
+    r.sim.instruct(command(id, 'CANCEL', 9), SEED_NOW);
     expect(r.reports[0]).toMatchObject({ type: 'CANCELLED', orderId: id, reason: 'TRADER', instrId: 'c:9' });
     expect((r.reports[0] as { bid: number }).bid).toBeGreaterThan(0);
     expect(r.sim.order(id)).toBeUndefined();
   });
 
-  it('rejects a command it cannot carry out on the answer channel, and reports nothing', () => {
+  it('refuses an instruction it cannot carry out with a VENUE_REJECT and leaves the order alone', () => {
     const r = rig();
     const id = currentOrders().find((o) => o.status === 'LIVE')?.orderId as string;
-    r.sim.command(command('NOPE', 'CANCEL', 1), SEED_NOW);
-    r.sim.command(command(id, 'RESUME', 2), SEED_NOW);
-    expect(r.answers).toMatchObject([
-      { type: 'REJECT', code: 'UNKNOWN_ORDER', commandId: 'c:1' },
-      { type: 'REJECT', code: 'INVALID_TRANSITION', commandId: 'c:2' },
+    r.sim.instruct(command('NOPE', 'CANCEL', 1), SEED_NOW);
+    r.sim.instruct(command(id, 'RESUME', 2), SEED_NOW);
+    expect(r.reports).toMatchObject([
+      { type: 'VENUE_REJECT', orderId: 'NOPE', instrId: 'c:1', message: 'Order NOPE is not active at the venue' },
+      { type: 'VENUE_REJECT', orderId: id, instrId: 'c:2', message: 'Cannot resume an order that is LIVE' },
     ]);
-    expect(r.reports).toEqual([]);
+    expect(r.sim.order(id)?.status).toBe('LIVE');
   });
 });
 
@@ -223,7 +216,7 @@ describe('Simulator.syncRecord', () => {
     r.sim.syncRecord(recordOf(order, 7));
     expect(r.sim.order(order.orderId)).toMatchObject({ orderId: order.orderId, status: 'LIVE' });
     expect(r.sim.liveCount).toBe(1);
-    r.sim.command(command(order.orderId, 'PAUSE'), SEED_NOW);
+    r.sim.instruct(command(order.orderId, 'PAUSE'), SEED_NOW);
     expect(r.reports[0]).toMatchObject({ execSeq: 8 });
   });
 
@@ -233,7 +226,7 @@ describe('Simulator.syncRecord', () => {
     r.sim.syncRecord(recordOf(order, 3));
     r.sim.syncRecord(recordOf({ ...order, orderQty: order.orderQty * 2 }, 3, 3));
     expect(r.sim.order(order.orderId)?.orderQty).toBe(order.orderQty * 2);
-    r.sim.command(command(order.orderId, 'PAUSE'), SEED_NOW);
+    r.sim.instruct(command(order.orderId, 'PAUSE'), SEED_NOW);
     expect(r.reports[0]).toMatchObject({ execSeq: 4 });
     r.sim.syncRecord(recordOf({ ...order, orderQty: 1 }, 3, 4));
     expect(r.sim.order(order.orderId)?.orderQty).toBe(order.orderQty * 2);

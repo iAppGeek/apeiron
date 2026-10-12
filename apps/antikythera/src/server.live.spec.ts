@@ -4,8 +4,8 @@ import {
   MemoryBus,
   PROJECTION_KEY,
   applyCommand,
+  parseOrderCommandRequest,
   getCodec,
-  parseOrderCommand,
   jsonCodec,
   type ClientMsg,
   type CodecName,
@@ -212,34 +212,27 @@ describe('live server over a real socket', () => {
 });
 
 /**
- * Stands in for hermes and the order service: consumes `orders.commands`, applies them with the shared lifecycle,
- * answers on `orders.events` and publishes the order's next record to the bucket.
+ * Stands in for the order service: serves `orders.cmd`, applies each action with the shared lifecycle, publishes the
+ * order's next record to the bucket and replies with its version.
  */
-async function fakeHermes(bus: MemoryBus, held: Order[], options: { silent?: boolean } = {}): Promise<{ seen: string[] }> {
+async function fakeThemis(bus: MemoryBus, held: Order[], options: { silent?: boolean } = {}): Promise<{ seen: string[] }> {
   const seen: string[] = [];
   const versions = new Map<string, number>();
-  await bus.consume({ stream: 'ORDERS', durable: 'hermes-commands', subject: 'orders.commands' }, (payload, _subject, ack) => {
-    const parsed = parseOrderCommand(payload);
-    if (!parsed.ok) return ack();
+  await bus.serve('orders.cmd', async (payload) => {
+    const parsed = parseOrderCommandRequest(payload);
+    if (!parsed.ok || parsed.value.kind !== 'action') return { ok: false, code: 'INVALID_AMEND', message: 'unsupported' };
     const cmd = parsed.value;
     seen.push(cmd.commandId);
-    ack();
-    if (options.silent === true) return;
+    if (options.silent === true) return new Promise(() => undefined);
     const order = held.find((o) => o.orderId === cmd.orderId);
-    if (order === undefined) {
-      void bus.publish('orders.answers', { type: 'REJECT', commandId: cmd.commandId, orderId: cmd.orderId, code: 'UNKNOWN_ORDER', message: 'not held', ts: Date.now() });
-      return;
-    }
+    if (order === undefined) return { ok: false, code: 'UNKNOWN_ORDER', message: `Order ${cmd.orderId} does not exist` };
     const result = applyCommand(order, cmd.action, Date.now());
-    if (!result.ok) {
-      void bus.publish('orders.answers', { type: 'REJECT', commandId: cmd.commandId, orderId: cmd.orderId, code: result.code, message: result.message, ts: Date.now() });
-      return;
-    }
+    if (!result.ok) return { ok: false, code: result.code, message: result.message };
     Object.assign(order, result.changes);
     const v = (versions.get(order.orderId) ?? 1) + 1;
     versions.set(order.orderId, v);
-    void bus.publish('orders.answers', { type: 'UPDATE', order: { orderId: cmd.orderId, ...result.changes }, ts: Date.now(), commandId: cmd.commandId });
-    void publishRecord(bus, { ...order }, v);
+    await publishRecord(bus, { ...order }, v);
+    return { ok: true, v };
   });
   return { seen };
 }
@@ -249,7 +242,7 @@ describe('command path over a real socket', () => {
 
   it.each<CodecName>(['json', 'msgpack'])('pauses and resumes an order: the delta reaches every client, the ack only the sender (%s)', async (codec) => {
     const bus = new MemoryBus();
-    await fakeHermes(bus, held());
+    await fakeThemis(bus, held());
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const sender = await connect(wsUrl, codec);
@@ -275,37 +268,24 @@ describe('command path over a real socket', () => {
     await watcher.until((m) => m.t === 'delta' && m.updates.some((u) => u.rows.some((r) => r.orderId === 'T0000001' && r.status === 'LIVE')));
   });
 
-  it('answers the fast pre-check without a round trip', async () => {
+  it('passes the order service refusals through as errors with their code', async () => {
     const bus = new MemoryBus();
-    const hermes = await fakeHermes(bus, held());
-    const { server: s, wsUrl } = await start(bus);
-    await s.load();
-    const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'pre' });
-    await c.until((m) => m.t === 'welcome');
-    c.send({ t: 'command', reqId: 1, orderId: 'T0000010', action: 'CANCEL' });
-    await expect(c.until((m) => m.t === 'error' && m.reqId === 1)).resolves.toMatchObject({ code: 'INVALID_TRANSITION' });
-    c.send({ t: 'command', reqId: 2, orderId: 'NOPE', action: 'CANCEL' });
-    await expect(c.until((m) => m.t === 'error' && m.reqId === 2)).resolves.toMatchObject({ code: 'UNKNOWN_ORDER' });
-    expect(hermes.seen).toEqual([]);
-  });
-
-  it('passes hermes REJECT through as an error with its code', async () => {
-    const bus = new MemoryBus();
-    // Hermes does not hold T0000002, though the server's store does, so the server's pre-check passes and hermes rejects.
-    await fakeHermes(bus, held().filter((o) => o.orderId !== 'T0000002'));
+    const themis = await fakeThemis(bus, held().filter((o) => o.orderId !== 'T0000002'));
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const c = await connect(wsUrl);
     c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'rej' });
     await c.until((m) => m.t === 'welcome');
-    c.send({ t: 'command', reqId: 3, orderId: 'T0000002', action: 'CANCEL' });
-    await expect(c.until((m) => m.t === 'error' && m.reqId === 3)).resolves.toMatchObject({ code: 'UNKNOWN_ORDER', message: 'not held' });
+    c.send({ t: 'command', reqId: 1, orderId: 'T0000010', action: 'CANCEL' });
+    await expect(c.until((m) => m.t === 'error' && m.reqId === 1)).resolves.toMatchObject({ code: 'UNKNOWN_ORDER' });
+    c.send({ t: 'command', reqId: 2, orderId: 'T0000002', action: 'CANCEL' });
+    await expect(c.until((m) => m.t === 'error' && m.reqId === 2)).resolves.toMatchObject({ code: 'UNKNOWN_ORDER', message: 'Order T0000002 does not exist' });
+    expect(themis.seen).toEqual(['rej:1', 'rej:2']);
   });
 
-  it('cancels an order and then refuses a second cancel from the pre-check', async () => {
+  it('cancels an order and then has a second cancel refused by the order service', async () => {
     const bus = new MemoryBus();
-    await fakeHermes(bus, held());
+    await fakeThemis(bus, held());
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const c = await connect(wsUrl);
@@ -317,9 +297,9 @@ describe('command path over a real socket', () => {
     await expect(c.until((m) => m.t === 'error' && m.reqId === 2)).resolves.toMatchObject({ code: 'INVALID_TRANSITION' });
   });
 
-  it('errors with INTERNAL when hermes never answers', async () => {
+  it('errors with INTERNAL when the order service never answers', async () => {
     const bus = new MemoryBus();
-    await fakeHermes(bus, held(), { silent: true });
+    await fakeThemis(bus, held(), { silent: true });
     const { server: s, wsUrl } = await start(bus, { commandTimeoutMs: 150 });
     await s.load();
     const c = await connect(wsUrl);
@@ -331,7 +311,7 @@ describe('command path over a real socket', () => {
 
   it('forgets a pending command when the client disconnects', async () => {
     const bus = new MemoryBus();
-    await fakeHermes(bus, held(), { silent: true });
+    await fakeThemis(bus, held(), { silent: true });
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const c = await connect(wsUrl);
@@ -352,7 +332,7 @@ describe('GET /metrics', () => {
 
   it('serves Prometheus text with the live measurements of a client session and a command', async () => {
     const bus = new MemoryBus();
-    await fakeHermes(bus, ROWS.filter((o) => o.status === 'LIVE').map((o) => ({ ...o })));
+    await fakeThemis(bus, ROWS.filter((o) => o.status === 'LIVE').map((o) => ({ ...o })));
     const { server: s, wsUrl, base } = await start(bus);
     await s.load();
     const c = await connect(wsUrl, 'msgpack');

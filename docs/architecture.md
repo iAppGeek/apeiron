@@ -38,7 +38,7 @@ flowchart LR
   HE -->|"exec.reports, orders.submit"| NA
   NA -->|"prices.*"| HE
   NA -->|"durable consumer"| AN
-  AN -->|"orders.commands, control.load"| NA
+  AN -->|"orders.cmd (request), control.load"| NA
   NA --> HE
   NA -->|"exec.reports (durable consumer themis-exec)"| TH
   TH -->|"group commit"| MO
@@ -120,17 +120,17 @@ sequenceDiagram
 3. **Live updates.** `helios` publishes price ticks (`prices.<PAIR>`, 3 per second per pair). `hermes` sends new orders as
    submissions and everything else as execution reports; `themis` stores them and publishes each order's new version to the
    `ORDER_STATE` bucket. `antikythera` watches that bucket (a record is applied only if its `v` is above the row's) and the
-   prices. A restart replays nothing: it loads the latest state of every order again. Until phase 1.5c it also listens, plain
-   and without a position, to `orders.answers` for the answer to a command.
+   prices. A restart replays nothing: it loads the latest state of every order again.
 4. **Deltas.** Every flush tick the server patches its cached views and each client session turns the changes into a
    `delta` for the rows that client holds.
 5. **Grid.** The worker decodes the delta and posts it to the main thread, which applies it synchronously with
    `applyServerSideTransaction` (flash, up/down colour), keeps the viewport anchored, and counts new orders for the badge.
 
-**Commands** go the other way: a context-menu action becomes a `command` message, the server validates it (zod, and a
-state check against the lifecycle machine), publishes `orders.commands`, `hermes` applies it and publishes the resulting
-order event, and the status change reaches every client as an ordinary update. The server acknowledges the command once
-hermes has confirmed it, or answers `error` (shown as a toast) if the transition is not allowed.
+**Commands** go the other way: a context-menu action becomes a `command` message, the server validates the message (zod)
+and sends it to `themis` as a request on `orders.cmd`. `themis` checks it against the lifecycle machine, instructs the venue
+(`exec.commands`) and replies once `hermes`'s execution report is stored and published, with the order's new version. The
+status change reaches every client as an ordinary update; the server acknowledges the command once its own store holds
+that version (or after 2 s), or answers `error` (shown as a toast) with the code `themis` gave.
 
 ## Key algorithms
 
@@ -237,8 +237,8 @@ the lifecycle forbids (storing only the counter, so it is not replayed), and tak
 of a completion from the quote in the report. At startup hermes asks `themis` for the open orders (`orders.query.open`:
 chunks of at most 500 records published to an inbox, then a summary reply), follows `ORDER_STATE` for changes, and applies a
 record only if it is not behind the reports it has already sent.
-Until commands go through `themis` (phase 1.5c), a command still reaches hermes on `orders.commands`, and its answer comes
-back on `orders.answers`.
+Commands reach hermes as venue instructions (`exec.commands`, durable `hermes-venue`) sent by `themis`; hermes answers
+with the execution report, or a `VENUE_REJECT` report when it cannot carry the instruction out.
 
 ### Persistence (themis)
 

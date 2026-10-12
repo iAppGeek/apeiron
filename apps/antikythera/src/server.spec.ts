@@ -258,7 +258,7 @@ describe.each<CodecName>(['json', 'msgpack'])('GET /ws (%s)', (codec) => {
     expect(bad).toMatchObject({ t: 'error', reqId: 4, code: 'BAD_MESSAGE' });
 
     c.send({ t: 'command', reqId: 5, orderId: 'x', action: 'CANCEL' });
-    expect(await c.next()).toMatchObject({ t: 'error', reqId: 5, code: 'UNKNOWN_ORDER' });
+    expect(await c.next()).toMatchObject({ t: 'error', reqId: 5, code: 'INTERNAL' });
 
     c.send({ t: 'ping', ts: 99 });
     expect(await c.next()).toMatchObject({ t: 'pong', ts: 99 });

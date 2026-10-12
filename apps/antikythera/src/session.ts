@@ -35,7 +35,7 @@ export type LiveHooks = {
   register(session: ClientSession): void;
   unregister(session: ClientSession): void;
   setPreset(preset: LoadPreset): Promise<void>;
-  /** Pre-checks and publishes a command; `settle` is called once with how it ended. */
+  /** Sends a command to the order service; `settle` is called once with how it ended. */
   command(request: CommandRequest, settle: (outcome: CommandOutcome) => void): void;
   /** The preset hermes last reported on `control.state`, or null before it has. */
   preset(): LoadPreset | null;
@@ -46,8 +46,8 @@ export type LiveHooks = {
   summaryIntervalMs: number;
 };
 
-/** A trader command on its way to hermes. `owner` ties it to the session so it is forgotten when that closes. */
-export type CommandRequest = { owner: object; clientId: string; reqId: number; orderId: string; action: CommandAction };
+/** A trader command on its way to the order service. `owner` ties it to the session so it is forgotten when that closes. */
+export type CommandRequest = { owner: object; clientId: string; userId?: string; reqId: number; orderId: string; action: CommandAction };
 
 /** One flush tick as seen by a session. */
 export type FlushContext = { cs: ChangeSet; byView: ReadonlyMap<View, ViewChanges>; now: number; store: ColumnarStore };

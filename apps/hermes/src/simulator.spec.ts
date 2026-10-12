@@ -5,12 +5,10 @@ import {
   mulberry32,
   parseOrderSeq,
   parseExecReport,
-  parseOrderEvent,
   pnlUsdOf,
   type ExecReport,
   type Order,
-  type OrderCommand,
-  type OrderEvent,
+  type VenueInstruction,
   type OrderStateRecord,
 } from '@apeiron/logos';
 import { describe, expect, it } from 'vitest';
@@ -19,7 +17,10 @@ import { Simulator, type ReportSink } from './simulator.js';
 import { SEED_NOW, currentOrders, quoteBookFor } from './testing.js';
 
 /** What the lifecycle did, as the tests read it: an order arriving, or an order's changed fields. */
-type TestEvent = OrderEvent | { type: 'NEW'; order: Order; ts: number };
+type TestEvent =
+  | { type: 'UPDATE'; order: Partial<Order> & { orderId: string }; ts: number; commandId?: string }
+  | { type: 'NEW'; order: Order; ts: number }
+  | Extract<ExecReport, { type: 'VENUE_REJECT' }>;
 
 type Harness = { sim: Simulator; events: TestEvent[]; feed: QuoteBook; reports: ExecReport[]; records: Map<string, OrderStateRecord> };
 
@@ -50,6 +51,7 @@ function harness(options: { seed?: number; preset?: 'medium' | 'stress'; current
   const sink: ReportSink = {
     report: (report) => {
       reports.push(report);
+      if (report.type === 'VENUE_REJECT') events.push(report);
       const record = records.get(report.orderId);
       if (record === undefined) return;
       const result = applyExecReport(record, report);
@@ -63,9 +65,6 @@ function harness(options: { seed?: number; preset?: 'medium' | 'stress'; current
         ts: report.ts,
         ...(instrId === undefined ? {} : { commandId: instrId }),
       });
-    },
-    answer: (answer) => {
-      if (answer.type === 'REJECT') events.push(answer);
     },
     submit: (submission) => {
       const orderId = formatOrderId(++seq);
@@ -369,13 +368,7 @@ describe('Simulator lifecycle', () => {
 });
 
 describe('Simulator commands', () => {
-  const command = (orderId: string, action: 'CANCEL' | 'PAUSE' | 'RESUME', n = 1): OrderCommand => ({
-    orderId,
-    action,
-    requestedBy: 'c',
-    ts: SEED_NOW,
-    commandId: `c:${n}`,
-  });
+  const command = (orderId: string, action: 'CANCEL' | 'PAUSE' | 'RESUME', n = 1): VenueInstruction => ({ orderId, action, ts: SEED_NOW, instrId: `c:${n}` });
   const liveId = (h: Harness): string => {
     const id = currentOrders().find((o) => h.sim.order(o.orderId)?.status === 'LIVE')?.orderId;
     if (id === undefined) throw new Error('no live order');
@@ -383,11 +376,11 @@ describe('Simulator commands', () => {
   };
   const last = (h: Harness): TestEvent => h.events[h.events.length - 1] as TestEvent;
 
-  it('pauses a LIVE order and answers with an UPDATE carrying the command id', () => {
+  it('pauses a LIVE order and reports it, naming the instruction', () => {
     const h = harness();
     const id = liveId(h);
     const liveBefore = h.sim.liveCount;
-    h.sim.command(command(id, 'PAUSE'), SEED_NOW + 5);
+    h.sim.instruct(command(id, 'PAUSE'), SEED_NOW + 5);
     expect(last(h)).toMatchObject({ type: 'UPDATE', commandId: 'c:1', ts: SEED_NOW + 5, order: { orderId: id, status: 'PAUSED' } });
     expect(h.sim.order(id)?.status).toBe('PAUSED');
     expect(h.sim.liveCount).toBe(liveBefore - 1);
@@ -396,13 +389,13 @@ describe('Simulator commands', () => {
   it('gives a PAUSED order no fills, and resuming restarts them', () => {
     const h = harness();
     const id = liveId(h);
-    h.sim.command(command(id, 'PAUSE'), SEED_NOW);
+    h.sim.instruct(command(id, 'PAUSE'), SEED_NOW);
     h.events.length = 0;
     const t = run(h, SEED_NOW, 20);
     const touching = (): TestEvent[] => h.events.filter((e) => e.type === 'UPDATE' && e.order.orderId === id);
     expect(touching()).toEqual([]);
 
-    h.sim.command(command(id, 'RESUME', 2), t);
+    h.sim.instruct(command(id, 'RESUME', 2), t);
     expect(last(h)).toMatchObject({ type: 'UPDATE', commandId: 'c:2', order: { orderId: id, status: 'LIVE' } });
     h.events.length = 0;
     run(h, t, 60);
@@ -413,10 +406,10 @@ describe('Simulator commands', () => {
     const h = harness();
     const id = liveId(h);
     const endTime = h.sim.order(id)?.endTime as number;
-    h.sim.command(command(id, 'PAUSE'), SEED_NOW);
+    h.sim.instruct(command(id, 'PAUSE'), SEED_NOW);
     // Paused for far longer than the order had left.
     const resumeAt = endTime + 10 * 60_000;
-    h.sim.command(command(id, 'RESUME', 2), resumeAt);
+    h.sim.instruct(command(id, 'RESUME', 2), resumeAt);
     expect(last(h)).toMatchObject({ commandId: 'c:2', order: { status: 'LIVE', endTime: endTime + (resumeAt - SEED_NOW) } });
     h.events.length = 0;
     h.sim.step(resumeAt + 1_000, 1_000);
@@ -427,16 +420,16 @@ describe('Simulator commands', () => {
     const h = harness();
     const live = liveId(h);
     const pending = currentOrders().find((o) => o.status === 'PENDING_START')?.orderId as string;
-    h.sim.command(command(live, 'PAUSE'), SEED_NOW);
-    h.sim.command(command(live, 'CANCEL', 2), SEED_NOW);
+    h.sim.instruct(command(live, 'PAUSE'), SEED_NOW);
+    h.sim.instruct(command(live, 'CANCEL', 2), SEED_NOW);
     expect(last(h)).toMatchObject({ commandId: 'c:2', order: { status: 'CANCELLED', completedAt: SEED_NOW } });
-    h.sim.command(command(pending, 'CANCEL', 3), SEED_NOW);
+    h.sim.instruct(command(pending, 'CANCEL', 3), SEED_NOW);
     expect(last(h)).toMatchObject({ commandId: 'c:3', order: { orderId: pending, status: 'CANCELLED' } });
     expect(h.sim.order(live)).toBeUndefined();
     expect(h.sim.order(pending)).toBeUndefined();
   });
 
-  it('rejects invalid transitions with INVALID_TRANSITION and changes nothing', () => {
+  it('refuses invalid transitions with a VENUE_REJECT and changes nothing', () => {
     const h = harness();
     const id = liveId(h);
     const pending = currentOrders().find((o) => o.status === 'PENDING_START')?.orderId as string;
@@ -445,33 +438,40 @@ describe('Simulator commands', () => {
       [pending, 'PAUSE'],
       [pending, 'RESUME'],
     ] as const) {
-      h.sim.command(command(orderId, action, 9), SEED_NOW);
-      expect(last(h)).toMatchObject({ type: 'REJECT', commandId: 'c:9', orderId, code: 'INVALID_TRANSITION' });
+      h.sim.instruct(command(orderId, action, 9), SEED_NOW);
+      expect(last(h)).toMatchObject({ type: 'VENUE_REJECT', instrId: 'c:9', orderId, message: expect.stringMatching(/^Cannot /) });
     }
     expect(h.sim.order(id)?.status).toBe('LIVE');
-    // Cancelled orders are no longer held, so a second CANCEL is an unknown order rather than a bad transition.
-    h.sim.command(command(id, 'CANCEL', 10), SEED_NOW);
-    h.sim.command(command(id, 'CANCEL', 11), SEED_NOW);
-    expect(last(h)).toMatchObject({ type: 'REJECT', code: 'UNKNOWN_ORDER' });
+    // A cancelled order is no longer held, so a second CANCEL is refused as an order the venue does not have.
+    h.sim.instruct(command(id, 'CANCEL', 10), SEED_NOW);
+    h.sim.instruct(command(id, 'CANCEL', 11), SEED_NOW);
+    expect(last(h)).toMatchObject({ type: 'VENUE_REJECT', instrId: 'c:11', message: `Order ${id} is not active at the venue` });
   });
 
-  it('rejects orders it does not hold with UNKNOWN_ORDER', () => {
+  it('refuses an order it does not hold with a VENUE_REJECT that the order service can match to the instruction', () => {
     const h = harness();
-    h.sim.command(command('ALG00000001', 'CANCEL', 4), SEED_NOW);
-    expect(parseOrderEvent(last(h)).ok).toBe(true);
+    h.sim.instruct(command('ALG00000001', 'CANCEL', 4), SEED_NOW);
+    expect(parseExecReport(last(h)).ok).toBe(true);
     expect(last(h)).toEqual({
-      type: 'REJECT',
-      commandId: 'c:4',
+      type: 'VENUE_REJECT',
       orderId: 'ALG00000001',
-      code: 'UNKNOWN_ORDER',
-      message: 'Order ALG00000001 is not active',
+      execSeq: 1,
+      instrId: 'c:4',
+      message: 'Order ALG00000001 is not active at the venue',
       ts: SEED_NOW,
     });
+  });
+
+  it('does not remember an order it never held after refusing it', () => {
+    const h = harness();
+    h.sim.instruct(command('ALG00000001', 'CANCEL', 4), SEED_NOW);
+    h.sim.instruct(command('ALG00000001', 'CANCEL', 5), SEED_NOW);
+    expect(h.reports.map((r) => r.execSeq)).toEqual([1, 1]);
   });
 });
 
 describe('Simulator completions send the quote the order service stores', () => {
-  const cmd = (orderId: string, action: OrderCommand['action']): OrderCommand => ({ orderId, action, requestedBy: 'u', ts: SEED_NOW, commandId: `c:${orderId}:${action}` });
+  const cmd = (orderId: string, action: VenueInstruction['action']): VenueInstruction => ({ orderId, action, ts: SEED_NOW, instrId: `c:${orderId}:${action}` });
   const recordOf = (h: Harness, orderId: string): Order => (h.records.get(orderId) as OrderStateRecord).order;
 
   it('cancels with the feed quote: the stored snapshot is that quote and the realised P&L is measured at its mid, not at the stale unrealised value', () => {
@@ -487,7 +487,7 @@ describe('Simulator completions send the quote the order service stores', () => 
       unrealisedPnlUsd: 123_456,
     };
     const h = harness({ current: [live] });
-    h.sim.command(cmd(live.orderId, 'CANCEL'), SEED_NOW);
+    h.sim.instruct(cmd(live.orderId, 'CANCEL'), SEED_NOW);
     const quote = h.feed.quote(live.currencyPair);
     const stored = recordOf(h, live.orderId);
     expect(h.reports[0]).toMatchObject({ type: 'CANCELLED', bid: quote?.bid, ask: quote?.ask });
@@ -517,7 +517,7 @@ describe('Simulator completions send the quote the order service stores', () => 
   it('sends no snapshot with a pause: the stored market fields stay as they were', () => {
     const live = { ...(currentOrders().find((o) => o.status === 'LIVE') as Order), marketBid: 0.5, marketAsk: 0.6, marketMid: 0.55 };
     const h = harness({ current: [live] });
-    h.sim.command(cmd(live.orderId, 'PAUSE'), SEED_NOW);
+    h.sim.instruct(cmd(live.orderId, 'PAUSE'), SEED_NOW);
     expect(h.reports[0]).toMatchObject({ type: 'PAUSED' });
     expect(recordOf(h, live.orderId)).toMatchObject({ status: 'PAUSED', marketBid: 0.5, marketAsk: 0.6 });
   });

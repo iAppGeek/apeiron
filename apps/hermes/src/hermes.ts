@@ -4,7 +4,7 @@ import {
   CONSUMERS,
   STREAMS,
   SUBJECTS,
-  parseOrderCommand,
+  parseVenueInstruction,
   mulberry32,
   parseLoadControl,
   parseOrderStateRecord,
@@ -15,7 +15,6 @@ import {
   type BusSubscription,
   type KvWatch,
   type LoadPreset,
-  type OrderEvent,
   type OrderStateRecord,
 } from '@apeiron/logos';
 import type { Logger } from './log.js';
@@ -49,8 +48,8 @@ export type HermesStatus = {
 /** How often hermes repeats `control.state`, so a server that starts later learns the preset within this long. */
 export const STATE_INTERVAL_MS = 5_000;
 
-/** A command older than this when hermes sees it is dropped: the server has already timed it out. */
-export const COMMAND_MAX_AGE_MS = 30_000;
+/** An instruction older than this when hermes sees it is dropped: the order service has already timed the command out. */
+export const INSTRUCTION_MAX_AGE_MS = 30_000;
 
 /** Publishes beyond this many unacknowledged messages are held back until the backlog drains. */
 export const MAX_INFLIGHT = 20_000;
@@ -90,7 +89,7 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
       .publish(subject, payload)
       .then(() => {
         eventsPublished++;
-        options.metrics?.event((payload as OrderEvent).type);
+        options.metrics?.event(String((payload as { type?: unknown }).type));
         return true;
       })
       .catch((error: unknown) => {
@@ -109,9 +108,6 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
   const reportSink: ReportSink = {
     report: (report): void => {
       lastEventPublish = publish(SUBJECTS.execReports, report);
-    },
-    answer: (answer): void => {
-      lastEventPublish = publish(SUBJECTS.ordersAnswers, answer);
     },
     submit: async (submission) => {
       inflight++;
@@ -251,27 +247,27 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
   });
 
   let commandsHandled = 0;
-  const commands = await bus.consume(
-    { stream: STREAMS.orders, durable: CONSUMERS.hermesCommands, subject: SUBJECTS.ordersCommands },
+  const instructions = await bus.consume(
+    { stream: STREAMS.venue, durable: CONSUMERS.hermesVenue, subject: SUBJECTS.execCommands },
     (payload, _subject, ack) => {
-      const parsed = parseOrderCommand(payload);
+      const parsed = parseVenueInstruction(payload);
       if (!parsed.ok) {
-        log.warn({ error: parsed.error }, 'dropped invalid order command');
+        log.warn({ error: parsed.error }, 'dropped invalid venue instruction');
         ack();
         return;
       }
-      const command = parsed.value;
+      const instruction = parsed.value;
       const t = now();
-      if (t - command.ts > COMMAND_MAX_AGE_MS) {
-        log.warn({ commandId: command.commandId, ageMs: t - command.ts }, 'dropped stale order command');
+      if (t - instruction.ts > INSTRUCTION_MAX_AGE_MS) {
+        log.warn({ instrId: instruction.instrId, ageMs: t - instruction.ts }, 'dropped stale venue instruction');
         ack();
         return;
       }
       lastEventPublish = null;
-      simulator.command(command, t);
+      simulator.instruct(instruction, t);
       commandsHandled++;
       options.metrics?.commandHandled();
-      // Acknowledge only once the answering event is on the stream; otherwise the command is redelivered.
+      // Acknowledge only once the report is on the stream; otherwise the instruction is redelivered.
       void (lastEventPublish ?? Promise.resolve(true)).then((published) => {
         if (published) ack();
       });
@@ -316,7 +312,7 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
       clearInterval(stateTimer);
       await control?.close();
       await prices.close();
-      await commands.close();
+      await instructions.close();
       await watch?.close();
       await inboxSub?.close();
     },

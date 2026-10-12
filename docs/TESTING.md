@@ -52,7 +52,7 @@ After any connection disruption the grid shows **complete, current data**: it do
         | /ws                                   |
    toxiproxy :4100  <-- fault controller :8474  |
         |                                       v
-   antikythera :4000  <------------- NATS (ORDER_STATE, prices.*, orders.commands)
+   antikythera :4000  <------------- NATS (ORDER_STATE, prices.*, orders.cmd)
 ```
 
 - **Toxiproxy** (`ghcr.io/shopify/toxiproxy:2.12.0`, the latest release) sits between the browser's web container and antikythera. The `resilience` compose profile adds it and `pharos-e2e`, the same web image built with `VITE_TEST_HOOKS=1` whose nginx sends `/ws` to `WS_UPSTREAM=toxiproxy:4100`. The normal `pharos` image is unchanged (the upstream defaults to `antikythera:4000`).

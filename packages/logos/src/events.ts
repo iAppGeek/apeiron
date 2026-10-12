@@ -12,11 +12,10 @@ import {
   type CurrencyPair,
   type Order,
 } from './order.js';
-import { COMMAND_ACTIONS, type CommandAction, type LoadPreset, type ParseResult } from './protocol.js';
+import type { LoadPreset, ParseResult } from './protocol.js';
 
 /** NATS subjects and JetStream names (Appendix C). */
 export const SUBJECTS = {
-  ordersCommands: 'orders.commands',
   controlLoad: 'control.load',
   /** Hermes reports the preset it is running, at startup, on every change and every few seconds. */
   controlState: 'control.state',
@@ -25,8 +24,6 @@ export const SUBJECTS = {
   ordersSubmit: 'orders.submit',
   /** PLAN1: request/reply from a blotter to themis. */
   ordersCmd: 'orders.cmd',
-  /** PLAN1 1.5a to 1.5c: where hermes, in `reports` mode, answers a command it was sent on `orders.commands`. */
-  ordersAnswers: 'orders.answers',
   /** PLAN1: request/reply from hermes to themis; the reply is chunked. */
   ordersQueryOpen: 'orders.query.open',
   /** PLAN1: request/reply from helios to themis (startup fallback only). */
@@ -35,9 +32,8 @@ export const SUBJECTS = {
   execCommands: 'exec.commands',
 } as const;
 
-export const STREAMS = { orders: 'ORDERS', prices: 'PRICES', exec: 'EXEC', venue: 'VENUE' } as const;
+export const STREAMS = { prices: 'PRICES', exec: 'EXEC', venue: 'VENUE' } as const;
 export const CONSUMERS = {
-  hermesCommands: 'hermes-commands',
   themisExec: 'themis-exec',
   hermesVenue: 'hermes-venue',
 } as const;
@@ -51,34 +47,13 @@ export const priceSubject = (pair: CurrencyPair): string => `prices.${pair}`;
 
 export type PriceTick = { pair: CurrencyPair; bid: number; ask: number; ts: number };
 
-export type RejectCode = 'INVALID_TRANSITION' | 'UNKNOWN_ORDER';
-export const REJECT_CODES = ['INVALID_TRANSITION', 'UNKNOWN_ORDER'] as const satisfies readonly RejectCode[];
-
 /** The id that ties a client request to the events it causes: `"<clientId>:<reqId>"`. */
 export const makeCommandId = (clientId: string, reqId: number): string => `${clientId}:${reqId}`;
-
-/**
- * hermes's answer to a command (`orders.answers`; until phase 1.5c): an UPDATE carrying the command's id and the
- * status the command set, or a REJECT. The order data itself no longer travels this way: orders are submitted and
- * changed through the order service.
- */
-export type OrderEvent =
-  | { type: 'UPDATE'; order: Partial<Order> & { orderId: string }; ts: number; commandId?: string }
-  | { type: 'REJECT'; commandId: string; orderId: string; code: RejectCode; message: string; ts: number };
 
 export type LoadControl = { preset: LoadPreset };
 
 /** `control.state` payload: the preset hermes is running. */
 export type LoadState = { preset: LoadPreset };
-
-export type OrderCommand = {
-  orderId: string;
-  action: CommandAction;
-  requestedBy: string;
-  ts: number;
-  /** `"<clientId>:<reqId>"` */
-  commandId: string;
-};
 
 const num = z.number();
 const nullableNum = z.number().nullable();
@@ -138,11 +113,6 @@ export const orderShape = {
 
 export const orderSchema: z.ZodType<Order> = z.object(orderShape);
 
-const partialOrderSchema: z.ZodType<Partial<Order> & { orderId: string }> = z
-  .object(orderShape)
-  .partial()
-  .extend({ orderId: z.string().min(1) });
-
 export const priceTickSchema: z.ZodType<PriceTick> = z.object({
   pair: z.enum(CURRENCY_PAIRS),
   bid: z.number().positive(),
@@ -150,29 +120,9 @@ export const priceTickSchema: z.ZodType<PriceTick> = z.object({
   ts: num,
 });
 
-export const orderEventSchema: z.ZodType<OrderEvent> = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('UPDATE'), order: partialOrderSchema, ts: num, commandId: z.string().optional() }),
-  z.object({
-    type: z.literal('REJECT'),
-    commandId: z.string(),
-    orderId: z.string(),
-    code: z.enum(REJECT_CODES),
-    message: z.string(),
-    ts: num,
-  }),
-]);
-
 export const loadControlSchema: z.ZodType<LoadControl> = z.object({ preset: z.enum(['medium', 'stress']) });
 
 export const loadStateSchema: z.ZodType<LoadState> = z.object({ preset: z.enum(['medium', 'stress']) });
-
-export const orderCommandSchema: z.ZodType<OrderCommand> = z.object({
-  orderId: z.string().min(1),
-  action: z.enum(COMMAND_ACTIONS),
-  requestedBy: z.string(),
-  ts: num,
-  commandId: z.string().min(1),
-});
 
 function parseWith<T>(schema: z.ZodType<T>, input: unknown): ParseResult<T> {
   const result = schema.safeParse(input);
@@ -181,7 +131,5 @@ function parseWith<T>(schema: z.ZodType<T>, input: unknown): ParseResult<T> {
 }
 
 export const parsePriceTick = (input: unknown): ParseResult<PriceTick> => parseWith(priceTickSchema, input);
-export const parseOrderEvent = (input: unknown): ParseResult<OrderEvent> => parseWith(orderEventSchema, input);
 export const parseLoadControl = (input: unknown): ParseResult<LoadControl> => parseWith(loadControlSchema, input);
 export const parseLoadState = (input: unknown): ParseResult<LoadState> => parseWith(loadStateSchema, input);
-export const parseOrderCommand = (input: unknown): ParseResult<OrderCommand> => parseWith(orderCommandSchema, input);

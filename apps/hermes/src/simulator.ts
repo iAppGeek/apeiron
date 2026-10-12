@@ -10,13 +10,12 @@ import {
   uniform,
   type LoadPreset,
   type ExecReport,
-  type OrderCommand,
   type Order,
-  type OrderEvent,
   type OrderStateRecord,
   type Rng,
   type Submission,
   type SubmitReply,
+  type VenueInstruction,
 } from '@apeiron/logos';
 import type { Quotes } from './quotes.js';
 import { LOAD_PRESETS, type PresetRates } from './presets.js';
@@ -30,20 +29,19 @@ export const END_CANCEL_PROBABILITY = 0.08;
 export const NEW_LIVE_SHARE = 0.8;
 
 /**
- * Where the simulator sends what happens at the venue in `reports` mode: execution reports (it numbers them per order),
- * new orders as submissions to the order service, and the answers to commands it was sent on `orders.commands`.
+ * Where the simulator sends what happens at the venue: execution reports (it numbers them per order) and new orders as
+ * submissions to the order service.
  */
 export type ReportSink = {
   report(report: ExecReport): void;
   submit(submission: Submission): Promise<SubmitReply>;
-  answer(answer: OrderEvent): void;
 };
 
 export type SimulatorOptions = {
   rng: Rng;
   /** The market now, from the price feed's ticks. */
   feed: Quotes;
-  /** Where what happens at the venue goes: reports, submissions and command answers. */
+  /** Where what happens at the venue goes: reports and submissions. */
   reports: ReportSink;
   /** Makes the `clientOrderId` of each submission unique to this run (default: random). */
   runTag?: string;
@@ -220,44 +218,37 @@ export class Simulator {
   }
 
   /**
-   * Applies a trader command to an order the simulator holds: the change goes out as an execution report and the answer
-   * as an UPDATE carrying the command's id and the new status, or a REJECT (INVALID_TRANSITION from the lifecycle
-   * rules, UNKNOWN_ORDER for an order that is not held, such as a historical one).
+   * Carries out an instruction from the order service on an order the simulator holds: the change goes out as an
+   * execution report that names the instruction, or, when the order is not held (such as a historical one, or one that
+   * has already completed) or the lifecycle forbids it, as a `VENUE_REJECT` with the reason.
    */
-  command(command: OrderCommand, now: number): void {
-    const order = this.orders.get(command.orderId);
+  instruct(instruction: VenueInstruction, now: number): void {
+    const order = this.orders.get(instruction.orderId);
     if (order === undefined) {
-      this.reply({
-        type: 'REJECT',
-        commandId: command.commandId,
-        orderId: command.orderId,
-        code: 'UNKNOWN_ORDER',
-        message: `Order ${command.orderId} is not active`,
-        ts: now,
-      });
+      this.reject(instruction, `Order ${instruction.orderId} is not active at the venue`, now);
       return;
     }
-    const result = applyCommand(order, command.action, now);
+    const result = applyCommand(order, instruction.action, now);
     if (!result.ok) {
-      this.reply({
-        type: 'REJECT',
-        commandId: command.commandId,
-        orderId: command.orderId,
-        code: result.code,
-        message: result.message,
-        ts: now,
-      });
+      this.reject(instruction, result.message, now);
       return;
     }
     // Time spent paused does not count against the order: resuming pushes its end time out by that long, so a
     // resumed order carries on filling instead of being completed on the spot. `lastUpdateTime` is when it paused.
     const changes: Partial<Order> =
-      command.action === 'RESUME'
+      instruction.action === 'RESUME'
         ? { ...result.changes, endTime: order.endTime + Math.max(0, now - order.lastUpdateTime) }
         : result.changes;
     const report: ReportSpec =
-      command.action === 'CANCEL' ? { type: 'CANCELLED', reason: 'TRADER' } : command.action === 'PAUSE' ? { type: 'PAUSED' } : { type: 'RESUMED' };
-    this.commit(order, changes, now, report, command.commandId);
+      instruction.action === 'CANCEL' ? { type: 'CANCELLED', reason: 'TRADER' } : instruction.action === 'PAUSE' ? { type: 'PAUSED' } : { type: 'RESUMED' };
+    this.commit(order, changes, now, report, instruction.instrId);
+  }
+
+  private reject(instruction: VenueInstruction, message: string, now: number): void {
+    const known = this.execSeqs.has(instruction.orderId);
+    this.emitted++;
+    this.options.reports.report({ type: 'VENUE_REJECT', orderId: instruction.orderId, execSeq: this.nextExecSeq(instruction.orderId), instrId: instruction.instrId, message, ts: now });
+    if (!known) this.execSeqs.delete(instruction.orderId);
   }
 
   /**
@@ -280,12 +271,6 @@ export class Simulator {
     this.track({ ...record.order });
   }
 
-  /** Answers a command on the report sink's answer channel. */
-  private reply(event: OrderEvent): void {
-    this.emitted++;
-    this.options.reports.answer(event);
-  }
-
   private nextExecSeq(orderId: string): number {
     const n = (this.execSeqs.get(orderId) ?? 0) + 1;
     this.execSeqs.set(orderId, n);
@@ -304,7 +289,7 @@ export class Simulator {
   /**
    * Applies a change to the simulator's own copy of the order and reports it to the order service: an execution report
    * numbered per order, with the quote for a fill or a cancel. The order service applies it with the same rules and
-   * computes the market snapshot and the realised P&L from that quote. A command's answer goes out as well.
+   * computes the market snapshot and the realised P&L from that quote.
    */
   private commit(order: Order, changes: Partial<Order>, now: number, report: ReportSpec, commandId?: string): Order {
     const sink = this.options.reports;
@@ -332,9 +317,6 @@ export class Simulator {
     }
     this.emitted++;
     sink.report(out);
-    if (commandId !== undefined) {
-      sink.answer({ type: 'UPDATE', order: { orderId: order.orderId, status: next.status }, ts: now, commandId });
-    }
     return next;
   }
 

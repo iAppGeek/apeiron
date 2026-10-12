@@ -4,9 +4,6 @@ import { STREAMS, SUBJECTS } from '@apeiron/logos';
 
 const HOUR_MS = 3_600_000;
 
-/** Largest the ORDERS stream may grow; a safety cap on top of the 24h age limit (stress produces about 1MB/s). */
-export const ORDERS_MAX_BYTES = 1024 * 1024 * 1024;
-
 /** Largest the EXEC and VENUE streams may grow, on top of their 24h age limit. */
 export const EXEC_MAX_BYTES = 1024 * 1024 * 1024;
 
@@ -16,22 +13,12 @@ export type StreamSpec = Pick<
 >;
 
 /**
- * The JetStream streams of Appendix C: ORDERS captures `orders.*` (limits retention, 24h) and
- * PRICES captures `prices.*` and keeps one message per subject, so a late joiner can read the last quote. PRICES is on
- * file storage, so the last quote (and so the price feed's starting level) survives a restart of the broker.
+ * The JetStream streams: PRICES captures `prices.*` and keeps one message per subject, so a late joiner can read the
+ * last quote (it is on file storage, so the price feed's starting level survives a restart of the broker); EXEC carries
+ * the venue's execution reports to the order service and VENUE its instructions back, both for 24 hours.
  */
 export function streamSpecs(): StreamSpec[] {
   return [
-    {
-      name: STREAMS.orders,
-      subjects: ['orders.*'],
-      retention: RetentionPolicy.Limits,
-      storage: StorageType.File,
-      discard: DiscardPolicy.Old,
-      max_age: nanos(24 * HOUR_MS),
-      max_msgs_per_subject: -1,
-      max_bytes: ORDERS_MAX_BYTES,
-    },
     {
       name: STREAMS.prices,
       subjects: ['prices.*'],

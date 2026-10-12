@@ -3,13 +3,11 @@ import {
   orderSchema,
   parseLoadControl,
   parseLoadState,
+  STREAMS,
   SUBJECTS,
-  parseOrderCommand,
-  parseOrderEvent,
   parsePriceTick,
   priceSubject,
   makeCommandId,
-  REJECT_CODES,
 } from './events.js';
 import { sampleOrders } from './fixtures.js';
 import type { Order } from './order.js';
@@ -36,45 +34,9 @@ describe('events', () => {
     expect(orderSchema.safeParse(partial).success).toBe(false);
   });
 
-  it('no longer accepts a NEW event: orders are created through the order service', () => {
-    expect(parseOrderEvent({ type: 'NEW', order, ts: 5 }).ok).toBe(false);
-  });
-
-  it('accepts partial UPDATE events that carry an orderId and strips unknown keys', () => {
-    const result = parseOrderEvent({
-      type: 'UPDATE',
-      order: { orderId: 'ALG00000001', filledQty: 10, avgFillPrice: null, bogus: 1 },
-      ts: 5,
-      commandId: 'c:1',
-    });
-    expect(result).toEqual({
-      ok: true,
-      value: { type: 'UPDATE', order: { orderId: 'ALG00000001', filledQty: 10, avgFillPrice: null }, ts: 5, commandId: 'c:1' },
-    });
-  });
-
-  it('rejects UPDATE events without an orderId or with wrong types', () => {
-    expect(parseOrderEvent({ type: 'UPDATE', order: { filledQty: 1 }, ts: 1 }).ok).toBe(false);
-    expect(parseOrderEvent({ type: 'UPDATE', order: { orderId: 'a', status: 'NOPE' }, ts: 1 }).ok).toBe(false);
-    expect(parseOrderEvent({ type: 'UPDATE', order: { orderId: 'a', filledQty: '1' }, ts: 1 }).ok).toBe(false);
-  });
-
-  it('parses REJECT events', () => {
-    const msg = { type: 'REJECT', commandId: 'c:1', orderId: 'ALG1', code: 'INVALID_TRANSITION', message: 'no', ts: 1 };
-    expect(parseOrderEvent(msg)).toEqual({ ok: true, value: msg });
-    expect(parseOrderEvent({ ...msg, code: 'OTHER' }).ok).toBe(false);
-  });
-
-  it('rejects unknown event types', () => {
-    expect(parseOrderEvent({ type: 'DELETE', orderId: 'a', ts: 1 }).ok).toBe(false);
-  });
-
-  it('parses control and command messages', () => {
+  it('parses control messages', () => {
     expect(parseLoadControl({ preset: 'stress' })).toEqual({ ok: true, value: { preset: 'stress' } });
     expect(parseLoadControl({ preset: 'huge' }).ok).toBe(false);
-    const cmd = { orderId: 'ALG1', action: 'CANCEL', requestedBy: 'c', ts: 1, commandId: 'c:1' };
-    expect(parseOrderCommand(cmd)).toEqual({ ok: true, value: cmd });
-    expect(parseOrderCommand({ ...cmd, action: 'KILL' }).ok).toBe(false);
   });
 });
 
@@ -94,22 +56,11 @@ describe('command correlation', () => {
     expect(makeCommandId('client-1', 7)).toBe('client-1:7');
   });
 
-  it('lists the reject codes the schema accepts', () => {
-    expect(REJECT_CODES).toEqual(['INVALID_TRANSITION', 'UNKNOWN_ORDER']);
-  });
-
-  it('rejects malformed commands and REJECT events', () => {
-    const cmd = { orderId: 'ALG1', action: 'PAUSE', requestedBy: 'c', ts: 1, commandId: 'c:1' };
-    expect(parseOrderCommand({ ...cmd, orderId: '' }).ok).toBe(false);
-    expect(parseOrderCommand({ ...cmd, commandId: '' }).ok).toBe(false);
-    expect(parseOrderCommand({ orderId: 'ALG1', action: 'PAUSE' }).ok).toBe(false);
-    expect(parseOrderEvent({ type: 'REJECT', orderId: 'a', code: 'UNKNOWN_ORDER', message: 'm', ts: 1 }).ok).toBe(false);
-  });
-
-  it('accepts UPDATE with and without a commandId', () => {
-    const base = { type: 'UPDATE', order: { orderId: 'a', status: 'PAUSED' }, ts: 1 };
-    expect(parseOrderEvent(base).ok).toBe(true);
-    expect(parseOrderEvent({ ...base, commandId: 'c:1' }).ok).toBe(true);
-    expect(parseOrderEvent({ ...base, commandId: 5 }).ok).toBe(false);
+  it('has no subjects or streams for the retired command path: commands go through the order service', () => {
+    expect(Object.values(SUBJECTS)).not.toContain('orders.commands');
+    expect(Object.values(SUBJECTS)).not.toContain('orders.answers');
+    expect(Object.values(SUBJECTS)).not.toContain('orders.events');
+    expect(SUBJECTS.ordersCmd).toBe('orders.cmd');
+    expect(Object.values(STREAMS)).not.toContain('ORDERS');
   });
 });

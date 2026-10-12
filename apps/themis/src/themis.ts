@@ -4,9 +4,11 @@ import {
   STREAMS,
   SUBJECTS,
   applyExecReport,
+  canApplyCommand,
   formatOrderId,
   isTerminal,
   parseExecReport,
+  parseOrderCommandRequest,
   parseOrderSeq,
   parseOrderStateRecord,
   recordFromSubmission,
@@ -14,8 +16,10 @@ import {
   type Bus,
   type BusSubscription,
   type KvBucket,
+  type OrderCommandReply,
   type OrderStateRecord,
   type SubmitReply,
+  type VenueInstruction,
 } from '@apeiron/logos';
 import type { OrderRepository, StoredOrder } from '@apeiron/mnemosyne';
 import { GroupCommitter, toStateRecord } from './committer.js';
@@ -31,11 +35,16 @@ export type ThemisOptions = {
   groupCommitMax: number;
   reconcileWindowMin: number;
   rebuildProjection: boolean;
+  /** How long a command waits for the venue's report before it is answered `TIMEOUT` (default 5 s). */
+  venueTimeoutMs?: number;
   metrics?: ThemisMetrics;
   now?: () => number;
 };
 
 export type ThemisStatus = { status: 'ok' | 'stopped'; openOrders: number; applied: number; commits: number };
+
+/** How long a command waits for the venue by default. */
+export const DEFAULT_VENUE_TIMEOUT_MS = 5_000;
 
 /** Open orders go to a caller in messages of at most this many records. */
 export const QUERY_CHUNK = 500;
@@ -133,12 +142,13 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
 
   // ---- execution: submissions, execution reports from the venue, and the open orders for whoever needs them
 
+  const clock = options.now ?? ((): number => Date.now());
+  const venueTimeoutMs = options.venueTimeoutMs ?? DEFAULT_VENUE_TIMEOUT_MS;
   let seq = parseOrderSeq((await repo.maxOrderId()) ?? 'ALG00000000') ?? 0;
   const submitted = new Map<string, { orderId: string; v: number; at: number }>();
   for (const stored of book.values()) {
     if (stored.order.clientOrderId !== '') submitted.set(stored.order.clientOrderId, { orderId: stored.order.orderId, v: stored.v, at: stored.order.createdAt });
   }
-  const clock = options.now ?? ((): number => Date.now());
 
   const submit = (payload: unknown): Promise<SubmitReply> =>
     new Promise<SubmitReply>((resolve) => {
@@ -169,6 +179,65 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
       });
     });
 
+  // ---- commands: validate, instruct the venue, wait for its report, and answer once that report is stored and published
+
+  type PendingCommand = { orderId: string; kind: 'action'; startedAt: number; resolve: (reply: OrderCommandReply) => void; timer: ReturnType<typeof setTimeout> };
+  const pending = new Map<string, PendingCommand>();
+  const instructed = new Map<string, string>();
+
+  const settle = (instrId: string, reply: OrderCommandReply): void => {
+    const waiting = pending.get(instrId);
+    if (waiting === undefined) return;
+    clearTimeout(waiting.timer);
+    pending.delete(instrId);
+    instructed.delete(waiting.orderId);
+    metrics?.command(waiting.kind, reply.ok ? 'ok' : reply.code, (performance.now() - waiting.startedAt) / 1000);
+    waiting.resolve(reply);
+  };
+
+  const command = (payload: unknown): Promise<OrderCommandReply> => {
+    const parsed = parseOrderCommandRequest(payload);
+    if (!parsed.ok) throw new Error(`unreadable command: ${parsed.error}`);
+    const request = parsed.value;
+    return new Promise<OrderCommandReply>((resolve) => {
+      const refuse = (code: Extract<OrderCommandReply, { ok: false }>['code'], message: string): void => {
+        metrics?.command(request.kind, code, 0);
+        resolve({ ok: false, code, message });
+      };
+      void enqueue(async () => {
+        if (request.kind === 'amend') {
+          refuse('INVALID_AMEND', 'Amend is not available');
+          return;
+        }
+        const current = await lookup(request.orderId, state);
+        if (current === undefined) {
+          refuse('UNKNOWN_ORDER', `Order ${request.orderId} does not exist`);
+          return;
+        }
+        if (!canApplyCommand(current.order.status, request.action)) {
+          refuse('INVALID_TRANSITION', `Cannot ${request.action.toLowerCase()} an order that is ${current.order.status}`);
+          return;
+        }
+        if (instructed.has(request.orderId) || pending.has(request.commandId)) {
+          refuse('INVALID_TRANSITION', `Another instruction for ${request.orderId} is waiting for the venue`);
+          return;
+        }
+        const instruction: VenueInstruction = { instrId: request.commandId, orderId: request.orderId, action: request.action, ts: clock() };
+        const timer = setTimeout(() => {
+          settle(request.commandId, { ok: false, code: 'TIMEOUT', message: `The venue did not answer within ${venueTimeoutMs} ms` });
+        }, venueTimeoutMs);
+        pending.set(request.commandId, { orderId: request.orderId, kind: 'action', startedAt: performance.now(), resolve, timer });
+        instructed.set(request.orderId, request.commandId);
+        try {
+          await bus.publish(SUBJECTS.execCommands, instruction);
+        } catch (error) {
+          log.warn({ err: error, commandId: request.commandId }, 'could not send the venue instruction');
+          settle(request.commandId, { ok: false, code: 'TIMEOUT', message: 'Could not reach the venue' });
+        }
+      });
+    });
+  };
+
   const handleReport = async (payload: unknown, ack: () => void): Promise<void> => {
     const parsed = parseExecReport(payload);
     if (!parsed.ok) {
@@ -178,10 +247,14 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
       return;
     }
     const report = parsed.value;
+    const instrId = 'instrId' in report ? report.instrId : undefined;
+    // A refusal answers the waiting command whatever its execSeq says (a venue that does not know the order cannot number it).
+    if (report.type === 'VENUE_REJECT') settle(report.instrId, { ok: false, code: 'VENUE_REJECT', message: report.message });
     const current = await lookup(report.orderId, state);
     if (current === undefined) {
       log.warn({ orderId: report.orderId, type: report.type }, 'execution report for an unknown order');
       metrics?.report(report.type, 'unknown');
+      if (instrId !== undefined) settle(instrId, { ok: false, code: 'UNKNOWN_ORDER', message: `Order ${report.orderId} does not exist` });
       committer.whenCommitted(ack);
       return;
     }
@@ -189,7 +262,10 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
     const result = applyExecReport(held, report);
     if (result.kind === 'duplicate') {
       metrics?.report(report.type, 'duplicate');
-      committer.whenCommitted(ack);
+      committer.whenCommitted(() => {
+        if (instrId !== undefined) settle(instrId, { ok: true, v: current.v });
+        ack();
+      });
       return;
     }
     // An applied report is a new version. A rejected one (or a venue refusal) changes nothing but the counter, which is
@@ -204,7 +280,13 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
       log.debug({ orderId: report.orderId, type: report.type, kind: result.kind }, 'execution report not applied');
     }
     metrics?.report(report.type, result.kind === 'applied' ? 'applied' : 'rejected');
-    committer.submit(stored, report.ts, finish(stored, ack));
+    const done = finish(stored, ack);
+    committer.submit(stored, report.ts, () => {
+      done();
+      if (instrId === undefined) return;
+      if (result.kind === 'applied') settle(instrId, { ok: true, v: stored.v });
+      else if (result.kind === 'rejected') settle(instrId, { ok: false, code: 'INVALID_TRANSITION', message: result.message });
+    });
   };
 
   consumers.push(
@@ -215,6 +297,7 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
   log.info({ stream: STREAMS.exec, durable: CONSUMERS.themisExec }, 'consuming execution reports');
 
   consumers.push(await bus.serve(SUBJECTS.ordersSubmit, submit));
+  consumers.push(await bus.serve(SUBJECTS.ordersCmd, command));
 
   // The open orders, in messages of at most QUERY_CHUNK records published to the caller's inbox, then a summary reply.
   consumers.push(
@@ -240,7 +323,7 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
     debug: (): Record<string, unknown> => ({
       openOrders: openOrders(),
       heldOrders: book.size,
-      pendingInstructions: 0,
+      pendingInstructions: pending.size,
       queued: committer.pending,
       lastCommit: { size: committer.stats.lastSize, ms: committer.stats.lastMs, kvMs: committer.stats.lastKvMs },
       commits: committer.stats.batches,
@@ -252,6 +335,7 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
     stop: async (stopOptions: { flush?: boolean } = {}): Promise<void> => {
       stopped = true;
       for (const sub of consumers) await sub.close();
+      for (const waiting of pending.values()) clearTimeout(waiting.timer);
       if (stopOptions.flush === false) return;
       await chain;
       await committer.stop();

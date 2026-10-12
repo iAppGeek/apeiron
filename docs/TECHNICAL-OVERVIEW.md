@@ -118,7 +118,7 @@ flowchart LR
   HE -->|"orders.submit, exec.reports, control.state"| NA
   HL -->|"prices.PAIR"| NA
   NA -->|"durable consumer blotter-server"| LIVE
-  WS -->|"orders.commands, control.load"| NA --> HE
+  WS -->|"orders.cmd (request), control.load"| NA --> HE
   WB -->|"upsertMany"| MO
   MO -->|"loadAll at startup"| ST
   GA --> MO
@@ -495,12 +495,13 @@ Client messages are validated with zod; server messages are not, for speed.
 
 `commandId = "<clientId>:<reqId>"` ([`live/commands.ts`](../apps/antikythera/src/live/commands.ts)).
 
-1. The server pre-checks the transition against the store (`canApplyCommand`); an impossible one is answered at once
-   with `INVALID_TRANSITION` / `UNKNOWN_ORDER`.
-2. Otherwise it publishes `orders.commands` with the `commandId`.
-3. Hermes, the authority, answers with an `orders.events` `UPDATE` carrying the `commandId`, or a `REJECT`.
-4. The server acks the client **after the flush that applied the UPDATE has sent its deltas**, so the client always sees
-   the status change before the ack. A command unanswered for 5 s is an error.
+1. The server sends a request on `orders.cmd` with the `commandId` (it does not pre-check: `themis` is the only authority).
+2. `themis` checks the lifecycle, sends the venue an instruction (`exec.commands`) and replies when hermes's execution
+   report is stored and published: `{ ok, v }` with the order's new version, or a refusal (`INVALID_TRANSITION`,
+   `UNKNOWN_ORDER`, a venue refusal as `INVALID_TRANSITION`, `TIMEOUT` as INTERNAL "command timed out").
+3. The server acks the client **once its store holds version `v`** (the flush that applied the record has sent its
+   deltas), so the client sees the status change before the ack; if the record has not arrived after 2 s it acks anyway.
+   A command with no reply in 5 s is an error.
 
 Measured (phase 6, [`PHASE-6.md`](checkpoints/PHASE-6.md)): click to status on screen **p50 58 ms / p95 89 ms**; under 50
 clients (CP-4 final) command ack **p50 38 ms / p95 66–67 ms**.

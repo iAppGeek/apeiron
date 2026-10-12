@@ -18,7 +18,7 @@ import {
   type KvWatch,
   type LoadPreset,
   type Order,
-  type OrderCommand,
+  type OrderCommandRequest,
   type ExecReport,
   type PriceTick,
   type RequestHandler,
@@ -217,9 +217,10 @@ export function createDriver(options: DriverOptions): Driver {
 
   const sendCommand = (orderId: string, action: CommandAction): void => {
     commandSeq += 1;
-    const command: OrderCommand = { orderId, action, requestedBy: 'driver', ts: now(), commandId: `driver:${commandSeq}` };
+    const command: OrderCommandRequest = { commandId: `driver:${commandSeq}`, userId: 'driver', orderId, kind: 'action', action };
     stats.commands[action === 'PAUSE' ? 'pause' : 'resume'] += 1;
-    track(publishWithRetry(SUBJECTS.ordersCommands, command));
+    // The order service decides; a refusal (the order finished meanwhile) or a late reply is an answer, not a failure of the run.
+    options.bus.request(SUBJECTS.ordersCmd, command, 5_000).catch(() => undefined);
   };
 
   const inject = (pick: () => number): void => {

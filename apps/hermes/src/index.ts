@@ -1,5 +1,4 @@
-import { NatsBus, ensureStreams, streamSpecs } from '@apeiron/iris';
-import { STREAMS } from '@apeiron/logos';
+import { NatsBus } from '@apeiron/iris';
 import { loadConfig } from './config.js';
 import { closeServer, startHealthServer } from './health.js';
 import { startHermes, type Hermes } from './hermes.js';
@@ -20,9 +19,8 @@ const health = await startHealthServer(
 
 const bus = await NatsBus.connect({ url: config.natsUrl, name: 'hermes', log });
 
-// hermes has no database: the open orders come from the order service, and everything it does is a message. It
-// makes sure the stream its commands arrive on exists (until commands go through the order service).
-log.info({ streams: await ensureStreams(await bus.manager(), streamSpecs().filter((s) => s.name === STREAMS.orders)) }, 'streams ready');
+// hermes has no database and creates nothing: the open orders come from the order service, which owns the streams, and
+// everything it does is a message.
 
 hermes = await startHermes({
   bus,

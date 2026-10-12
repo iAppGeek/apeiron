@@ -1,4 +1,4 @@
-import { MemoryBus, type ExecReport, type KvBucket, type Order, type OrderStateRecord, type Submission, type SubmitReply } from '@apeiron/logos';
+import { MemoryBus, type ExecReport, type OrderCommandReply, type VenueInstruction, type KvBucket, type Order, type OrderStateRecord, type Submission, type SubmitReply } from '@apeiron/logos';
 import { InMemoryOrderRepository, toStoredOrder, type OrderRepository } from '@apeiron/mnemosyne';
 import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from './log.js';
@@ -16,7 +16,7 @@ async function seeded(rows: Order[] = [...history, ...open(3)]): Promise<InMemor
   return repo;
 }
 
-const options = (bus: MemoryBus, repo: OrderRepository, extra: { metrics?: ThemisMetrics } = {}): Parameters<typeof startThemis>[0] => ({
+const options = (bus: MemoryBus, repo: OrderRepository, extra: { metrics?: ThemisMetrics; venueTimeoutMs?: number } = {}): Parameters<typeof startThemis>[0] => ({
   bus,
   repo,
   log,
@@ -333,6 +333,146 @@ describe('startThemis: orders.query.open', () => {
     const themis = await startThemis(options(bus, await seeded()));
     await expect(bus.request('orders.query.open', {}, 100)).rejects.toThrow(/inbox/);
     await expect(bus.request('orders.query.open', { inbox: 'bad subject!' }, 100)).rejects.toThrow(/inbox/);
+    await themis.stop();
+  });
+});
+
+describe('startThemis: commands', () => {
+  const request = (bus: MemoryBus, orderId: string, action: 'CANCEL' | 'PAUSE' | 'RESUME', n = 1): Promise<OrderCommandReply> =>
+    bus.request('orders.cmd', { commandId: `c:${n}`, userId: 'TRADER1', orderId, kind: 'action', action }, 5_000) as Promise<OrderCommandReply>;
+
+  /** A stand-in for the venue: it records the instructions it is sent. */
+  async function venue(bus: MemoryBus): Promise<VenueInstruction[]> {
+    const got: VenueInstruction[] = [];
+    await bus.consume({ stream: 'VENUE', durable: 'hermes-venue', subject: 'exec.commands' }, (p, _s, ack) => {
+      got.push(p as VenueInstruction);
+      ack();
+    });
+    return got;
+  }
+
+  async function running(extra: { venueTimeoutMs?: number } = {}): Promise<{ bus: MemoryBus; repo: InMemoryOrderRepository; themis: Themis; metrics: ThemisMetrics; instructions: VenueInstruction[]; id: string; other: string }> {
+    const bus = new MemoryBus();
+    const repo = await seeded();
+    const metrics = new ThemisMetrics();
+    const themis = await startThemis(options(bus, repo, { metrics, ...extra }));
+    const instructions = await venue(bus);
+    const open = await repo.loadOpen();
+    return { bus, repo, themis, metrics, instructions, id: open[0]?.order.orderId as string, other: open[1]?.order.orderId as string };
+  }
+
+  const paused = (orderId: string, execSeq: number, instrId: string): ExecReport => ({ type: 'PAUSED', orderId, execSeq, instrId, ts: 2_000 });
+
+  it('instructs the venue, waits for its report, and replies with the new version once that is stored and published', async () => {
+    const { bus, repo, themis, instructions, id } = await running();
+    const reply = request(bus, id, 'PAUSE');
+    await vi.waitFor(() => expect(instructions).toHaveLength(1));
+    expect(instructions[0]).toMatchObject({ instrId: 'c:1', orderId: id, action: 'PAUSE' });
+    expect(themis.debug()).toMatchObject({ pendingInstructions: 1 });
+    await bus.publish('exec.reports', paused(id, 1, 'c:1'));
+    expect(await reply).toEqual({ ok: true, v: 2 });
+    expect((await repo.loadOpen()).find((s) => s.order.orderId === id)).toMatchObject({ v: 2, order: { status: 'PAUSED' } });
+    expect(((await bus.kv('ORDER_STATE').get(id))?.value as OrderStateRecord).v).toBe(2);
+    expect(themis.debug()).toMatchObject({ pendingInstructions: 0 });
+    await themis.stop();
+  });
+
+  it('refuses what the lifecycle forbids, and an unknown order, without troubling the venue', async () => {
+    const { bus, themis, instructions, id, metrics } = await running();
+    expect(await request(bus, id, 'RESUME', 1)).toEqual({ ok: false, code: 'INVALID_TRANSITION', message: 'Cannot resume an order that is LIVE' });
+    expect(await request(bus, 'ALG00000000', 'CANCEL', 2)).toEqual({ ok: false, code: 'UNKNOWN_ORDER', message: 'Order ALG00000000 does not exist' });
+    expect(instructions).toEqual([]);
+    expect(await metrics.render()).toContain('themis_commands_total{kind="action",result="INVALID_TRANSITION"} 1');
+    await themis.stop();
+  });
+
+  it('refuses a finished order as an invalid transition', async () => {
+    const { bus, themis, id } = await running();
+    await bus.publish('exec.reports', { type: 'CANCELLED', orderId: id, execSeq: 1, reason: 'TRADER', ts: 5, ...QUOTE });
+    await themis.flush();
+    expect(await request(bus, id, 'PAUSE')).toMatchObject({ ok: false, code: 'INVALID_TRANSITION', message: 'Cannot pause an order that is CANCELLED' });
+    await themis.stop();
+  });
+
+  it('does not send a second instruction for an order that is waiting for the venue, but does for another order', async () => {
+    const { bus, themis, instructions, id, other } = await running();
+    const first = request(bus, id, 'PAUSE', 1);
+    await vi.waitFor(() => expect(instructions).toHaveLength(1));
+    expect(await request(bus, id, 'CANCEL', 2)).toMatchObject({ ok: false, code: 'INVALID_TRANSITION' });
+    const second = request(bus, other, 'CANCEL', 3);
+    await vi.waitFor(() => expect(instructions).toHaveLength(2));
+    await bus.publish('exec.reports', paused(id, 1, 'c:1'));
+    await bus.publish('exec.reports', { type: 'CANCELLED', orderId: other, execSeq: 1, instrId: 'c:3', reason: 'TRADER', ts: 3, ...QUOTE });
+    expect(await first).toMatchObject({ ok: true });
+    expect(await second).toMatchObject({ ok: true });
+    await themis.stop();
+  });
+
+  it('answers VENUE_REJECT with the venue’s message and leaves the order alone, even when the venue could not number its report', async () => {
+    const { bus, repo, themis, instructions, id } = await running();
+    const reply = request(bus, id, 'PAUSE');
+    await vi.waitFor(() => expect(instructions).toHaveLength(1));
+    await bus.publish('exec.reports', { type: 'VENUE_REJECT', orderId: id, execSeq: 1, instrId: 'c:1', message: 'order already completed', ts: 9 });
+    expect(await reply).toEqual({ ok: false, code: 'VENUE_REJECT', message: 'order already completed' });
+    await themis.flush();
+    expect((await repo.loadOpen()).find((s) => s.order.orderId === id)).toMatchObject({ order: { status: 'LIVE' } });
+    await themis.stop();
+  });
+
+  it('answers INVALID_TRANSITION when the venue’s report is one the rules refuse', async () => {
+    const { bus, themis, instructions, id } = await running();
+    await bus.publish('exec.reports', paused(id, 1, 'earlier'));
+    await themis.flush();
+    const reply = request(bus, id, 'CANCEL');
+    // The order is PAUSED now, so CANCEL is allowed; the venue then reports a PAUSE, which cannot apply to a paused order.
+    await vi.waitFor(() => expect(instructions).toHaveLength(1));
+    await bus.publish('exec.reports', paused(id, 2, 'c:1'));
+    expect(await reply).toMatchObject({ ok: false, code: 'INVALID_TRANSITION' });
+    await themis.stop();
+  });
+
+  it('answers TIMEOUT when the venue says nothing, frees the order, and still applies a late report without answering twice', async () => {
+    const { bus, themis, instructions, id, repo } = await running({ venueTimeoutMs: 60 });
+    const reply = await request(bus, id, 'PAUSE');
+    expect(reply).toMatchObject({ ok: false, code: 'TIMEOUT' });
+    expect(instructions).toHaveLength(1);
+    expect(themis.debug()).toMatchObject({ pendingInstructions: 0 });
+    await bus.publish('exec.reports', paused(id, 1, 'c:1'));
+    await themis.flush();
+    expect((await repo.loadOpen()).find((s) => s.order.orderId === id)).toMatchObject({ order: { status: 'PAUSED' } });
+    const next = request(bus, id, 'RESUME', 2);
+    await vi.waitFor(() => expect(instructions).toHaveLength(2));
+    await bus.publish('exec.reports', { type: 'RESUMED', orderId: id, execSeq: 2, instrId: 'c:2', ts: 3_000 });
+    expect(await next).toMatchObject({ ok: true });
+    await themis.stop();
+  });
+
+  it('answers TIMEOUT at once when the instruction cannot be sent', async () => {
+    const { bus, themis, id } = await running();
+    const original = bus.publish.bind(bus);
+    vi.spyOn(bus, 'publish').mockImplementation((subject, payload) => (subject === 'exec.commands' ? Promise.reject(new Error('nats down')) : original(subject, payload)));
+    expect(await request(bus, id, 'PAUSE')).toEqual({ ok: false, code: 'TIMEOUT', message: 'Could not reach the venue' });
+    expect(themis.debug()).toMatchObject({ pendingInstructions: 0 });
+    await themis.stop();
+  });
+
+  it('does not support amend yet, and rejects a request it cannot read', async () => {
+    const { bus, themis, id } = await running();
+    const amend = { commandId: 'c:9', userId: 'TRADER1', orderId: id, kind: 'amend', changes: { urgency: 'HIGH' } };
+    expect(await bus.request('orders.cmd', amend, 1_000)).toMatchObject({ ok: false, code: 'INVALID_AMEND' });
+    await expect(bus.request('orders.cmd', { nonsense: true }, 1_000)).rejects.toThrow(/unreadable command/);
+    await themis.stop();
+  });
+
+  it('times a successful command in its metrics', async () => {
+    const { bus, themis, instructions, id, metrics } = await running();
+    const reply = request(bus, id, 'PAUSE');
+    await vi.waitFor(() => expect(instructions).toHaveLength(1));
+    await bus.publish('exec.reports', paused(id, 1, 'c:1'));
+    await reply;
+    const text = await metrics.render();
+    expect(text).toContain('themis_commands_total{kind="action",result="ok"} 1');
+    expect(text).toContain('themis_command_duration_seconds_count 1');
     await themis.stop();
   });
 });

@@ -10,11 +10,11 @@ import {
   type CurrencyPair,
   type ExecReport,
   type Order,
-  type OrderCommand,
+  type OrderCommandRequest,
   type OrderStateRecord,
   type PriceTick,
 } from '@apeiron/logos';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDriver, type Driver } from './driver';
 
 const SEED_NOW = Date.UTC(2026, 9, 6, 12, 0, 0);
@@ -44,16 +44,20 @@ async function world(bus: MemoryBus = new MemoryBus()): Promise<World> {
   return { bus, repo, themis, maxId: await repo.maxOrderId() };
 }
 
-type Capture = { reports: ExecReport[]; ticks: PriceTick[]; commands: OrderCommand[] };
+type Capture = { reports: ExecReport[]; ticks: PriceTick[]; commands: OrderCommandRequest[] };
 
 async function capture(bus: MemoryBus): Promise<Capture> {
   const out: Capture = { reports: [], ticks: [], commands: [] };
-  await bus.subscribe('exec.reports', (p) => {
+  const request = bus.request.bind(bus);
+  vi.spyOn(bus, 'request').mockImplementation((subject, payload, timeoutMs) => {
+    if (subject === 'orders.cmd') out.commands.push(payload as OrderCommandRequest);
+    return request(subject, payload, timeoutMs);
+  });
+    await bus.subscribe('exec.reports', (p) => {
     const parsed = parseExecReport(p);
     if (parsed.ok) out.reports.push(parsed.value);
   });
   await bus.subscribe('prices.*', (p) => out.ticks.push(p as PriceTick));
-  await bus.subscribe('orders.commands', (p) => out.commands.push(p as OrderCommand));
   return out;
 }
 
@@ -159,10 +163,10 @@ describe('createDriver', () => {
     await d.start();
     await wait(500);
     await d.stop();
-    const actions = new Set(seen.commands.map((c) => c.action));
+    const actions = new Set(seen.commands.map((c) => (c.kind === 'action' ? c.action : c.kind)));
     expect(actions.has('PAUSE')).toBe(true);
-    expect(d.stats().commands.pause).toBe(seen.commands.filter((c) => c.action === 'PAUSE').length);
-    expect(seen.commands.every((c) => c.requestedBy === 'driver' && c.commandId.startsWith('driver:'))).toBe(true);
+    expect(d.stats().commands.pause).toBe(seen.commands.filter((c) => c.kind === 'action' && c.action === 'PAUSE').length);
+    expect(seen.commands.every((c) => c.userId === 'driver' && c.commandId.startsWith('driver:'))).toBe(true);
   });
 
   it('retries a report publish that fails once and counts it as a retry, not an error', async () => {

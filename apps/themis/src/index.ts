@@ -8,7 +8,7 @@ import { ThemisMetrics } from './metrics.js';
 import { startThemis, type Themis } from './themis.js';
 
 // The order service owns the streams it reads and writes; the price feed owns PRICES.
-const OWNED_STREAMS: readonly string[] = [STREAMS.orders, STREAMS.exec, STREAMS.venue];
+const OWNED_STREAMS: readonly string[] = [STREAMS.exec, STREAMS.venue];
 
 const config = loadConfig(process.env);
 const log = createLogger(config.logLevel);
@@ -37,6 +37,7 @@ themis = await startThemis({
   groupCommitMax: config.groupCommitMax,
   reconcileWindowMin: config.reconcileWindowMin,
   rebuildProjection: config.rebuildProjection,
+  venueTimeoutMs: config.venueTimeoutMs,
   metrics,
 });
 log.info({}, 'themis ready');
