@@ -16,6 +16,9 @@ describe('loadConfig', () => {
       natsUrl: 'nats://nats:4222',
       priceWaitMs: 10_000,
       catchupMaxPending: 100,
+      warmViews: 'default',
+      warmRounds: 3,
+      drainMs: 2000,
     });
     expect(c.viewCacheMaxBytes).toBe(384 * 1024 * 1024);
   });
@@ -29,8 +32,11 @@ describe('loadConfig', () => {
       LOAD_PRESET: 'stress',
       PRICE_WAIT_MS: '2_500',
       CATCHUP_MAX_PENDING: '7',
+      WARM_VIEWS: '/config/warm.json',
+      WARM_ROUNDS: '1',
+      DRAIN_MS: '500',
     });
-    expect(c).toMatchObject({ port: 5000, logLevel: 'debug', storeCapacity: 2_000_000, priceWaitMs: 2500, catchupMaxPending: 7 });
+    expect(c).toMatchObject({ port: 5000, logLevel: 'debug', storeCapacity: 2_000_000, priceWaitMs: 2500, catchupMaxPending: 7, warmViews: '/config/warm.json', warmRounds: 1, drainMs: 500 });
     expect(c.loadPreset).toBe('stress');
   });
 
@@ -45,5 +51,7 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, PORT: '70000' })).toThrow(/PORT/);
     expect(() => loadConfig({ ...base, PORT: 'abc' })).toThrow(/PORT/);
     expect(() => loadConfig({ ...base, PRICE_WAIT_MS: '0' })).toThrow(/PRICE_WAIT_MS/);
+    expect(() => loadConfig({ ...base, WARM_ROUNDS: '0' })).toThrow(/WARM_ROUNDS/);
+    expect(() => loadConfig({ ...base, WARM_VIEWS: '' })).toThrow(/WARM_VIEWS/);
   });
 });

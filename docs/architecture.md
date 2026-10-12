@@ -105,7 +105,14 @@ sequenceDiagram
 2. **Load.** At startup `antikythera` waits for `themis` to mark the `ORDER_STATE` projection ready, reads the bucket's
    initial values straight into the columnar store (about 12 s for 1.7 million rows in a container), sorts the rows by
    `orderId`, then catches up on the changes made meanwhile and takes the last price of every pair. `/health` is 503 with
-   its `stage` (`snapshot`, `catchup`, `prices`) until it is `ready`, and the blotter has no database driver at all.
+   its `stage` (`snapshot`, `catchup`, `prices`, `warmup`) until it is `ready`, and the blotter has no database driver at all.
+   Ready means fast, not just loaded: before it says so it builds the default views (`createdAt desc` for everyone and for each
+   trader, everyone grouped by status; `WARM_VIEWS` can point at a JSON file of `{traders, req}` entries) and runs
+   `WARM_ROUNDS` passes of blocks 0 to 4 over each. Three endpoints: `/health/live` (the process is up), `/health/ready`
+   (200 only at `ready`; the compose healthcheck) and `/health`, an alias of ready that adds `snapshotMs` and `warmupMs`.
+   On SIGTERM it drains: `/health/ready` turns 503 at once, new WebSocket upgrades are refused, and after `DRAIN_MS` (2 s)
+   every socket is closed with code **1012** ("server restarting"), which pharos answers by reconnecting immediately
+   (keeping its trader, codec and server choices) instead of backing off.
 3. **Live updates.** `hermes` publishes price ticks (`prices.<PAIR>`, 3 per second per pair) and order events
    (`orders.events`: new orders, fills, status changes). Both streams are JetStream, and the server reads them through a
    durable consumer that acknowledges only after an event has been applied, so a restart replays what was missed. `themis` reads the

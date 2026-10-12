@@ -553,6 +553,53 @@ describe('close codes', () => {
     expect(rig.sockets).toHaveLength(2);
   });
 
+  it('reconnects at once when the server says it is restarting (1012), and keeps the trader and codec', () => {
+    const rig = makeRig({ backoffBaseMs: 500 });
+    rig.core.connect('ws://x/ws');
+    rig.core.hello(1, 'T3', 'msgpack');
+    rig.last().open();
+    rig.last().receive(welcome, 'msgpack');
+    rig.last().drop(1012);
+    expect(rig.ofKind('closed').at(-1)).toEqual({ kind: 'closed', code: 1012, reason: 'code:1012' });
+    expect(rig.sockets).toHaveLength(1);
+    rig.clock.advance(0);
+    expect(rig.sockets).toHaveLength(2);
+    rig.last().open();
+    expect(rig.last().sentMsgs()[0]).toEqual({ t: 'hello', traderId: 'T3', codec: 'msgpack', clientId: 'client-1' });
+  });
+
+  it('does not count the immediate retry as a failure: if it fails, the usual backoff starts from its base', () => {
+    const rig = makeRig({ backoffBaseMs: 500 });
+    rig.core.connect('ws://x/ws');
+    rig.last().open();
+    rig.last().receive(welcome);
+    rig.last().drop(1012);
+    rig.clock.advance(0);
+    expect(rig.sockets).toHaveLength(2);
+    rig.last().drop();
+    rig.clock.advance(499);
+    expect(rig.sockets).toHaveLength(2);
+    rig.clock.advance(1);
+    expect(rig.sockets).toHaveLength(3);
+    rig.last().drop();
+    rig.clock.advance(999);
+    expect(rig.sockets).toHaveLength(3);
+    rig.clock.advance(1);
+    expect(rig.sockets).toHaveLength(4);
+  });
+
+  it('still backs off after any other close code', () => {
+    const rig = makeRig({ backoffBaseMs: 500 });
+    rig.core.connect('ws://x/ws');
+    rig.last().open();
+    rig.last().receive(welcome);
+    rig.last().drop(1001);
+    rig.clock.advance(0);
+    expect(rig.sockets).toHaveLength(1);
+    rig.clock.advance(500);
+    expect(rig.sockets).toHaveLength(2);
+  });
+
   it('reports a missing code as null, and says nothing when the page closed the connection', () => {
     const rig = makeRig();
     rig.core.connect('ws://x/ws');

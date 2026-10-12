@@ -134,7 +134,7 @@ export const amendChangesSchema: z.ZodType<AmendChanges> = z
   })
   .refine((c) => AMEND_FIELDS.some((f) => c[f] !== undefined), { message: 'no fields to amend' });
 
-const ssrmRequestSchema: z.ZodType<SsrmRequest> = z.object({
+export const ssrmRequestSchema: z.ZodType<SsrmRequest> = z.object({
   startRow: nonNegInt,
   endRow: nonNegInt,
   rowGroupCols: z.array(

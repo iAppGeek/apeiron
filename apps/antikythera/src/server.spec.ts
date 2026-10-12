@@ -14,6 +14,7 @@ import WebSocket, { type RawData } from 'ws';
 import { buildServer, type BlotterServer } from './server.js';
 import { seedBucket } from './testing/bucket.js';
 import { propertyOrders } from './testing/dataset.js';
+import { defaultWarmViews } from './warmup.js';
 
 const ORDERS = propertyOrders(7, 1_200);
 
@@ -121,6 +122,30 @@ describe('GET /health', () => {
     expect(body.loadMs).toBeTypeOf('number');
     expect(body.heapMb).toBeGreaterThan(0);
     expect(body.rssMb).toBeGreaterThan(0);
+  });
+
+  it('serves /health/live while loading, and /health/ready and /health (its alias) only when ready', async () => {
+    const fetchAll = async (): Promise<number[]> =>
+      Promise.all(['/health/live', '/health/ready', '/health'].map(async (path) => (await fetch(`${base}${path}`)).status));
+    expect(await fetchAll()).toEqual([200, 503, 503]);
+    await server.load();
+    expect(await fetchAll()).toEqual([200, 200, 200]);
+    const ready = (await (await fetch(`${base}/health/ready`)).json()) as Record<string, unknown>;
+    const alias = (await (await fetch(`${base}/health`)).json()) as Record<string, unknown>;
+    expect(ready).toMatchObject({ status: 'ok', stage: 'ready', rows: ORDERS.length });
+    expect(ready.snapshotMs).toBeGreaterThan(0);
+    expect(alias.status).toBe(ready.status);
+  });
+
+  it('warms the configured views before it is ready, and reports how long that took', async () => {
+    const warm = await buildServer({ bus, logLevel: 'silent', storeCapacity: 2_000, ...FAST, warmViews: defaultWarmViews(), warmRounds: 2 });
+    expect(warm.health().warmupMs).toBe(0);
+    await warm.load();
+    expect(warm.health()).toMatchObject({ status: 'ok', stage: 'ready' });
+    expect(warm.engine()?.stats().cache.views).toBeGreaterThanOrEqual(7);
+    expect(warm.runtime()?.warmup).toMatchObject({ views: 7, requests: 70, failures: 0 });
+    expect(warm.health().warmupMs).toBe(warm.runtime()?.warmup?.ms);
+    await warm.app.close();
   });
 
   it('serves the orders in ascending id order even though the bucket delivers them in the order they changed', async () => {
@@ -321,5 +346,52 @@ describe('GET /ws robustness', () => {
     expect(await c.next()).toMatchObject({ t: 'rows' });
     await c.close();
     await slow.app.close();
+  });
+});
+
+describe('draining', () => {
+  it('says not ready at once, refuses new upgrades, then closes every socket with 1012 after the drain time', async () => {
+    await server.load();
+    const socket = new WebSocket(wsUrl);
+    await new Promise((resolve, reject) => {
+      socket.once('open', resolve);
+      socket.once('error', reject);
+    });
+    const closed = new Promise<{ code: number; at: number }>((resolve) => socket.once('close', (code) => resolve({ code, at: Date.now() })));
+    const started = Date.now();
+    const draining = server.drain(150);
+    const ready = await fetch(`${base}/health/ready`);
+    expect(ready.status).toBe(503);
+    expect(await ready.json()).toMatchObject({ status: 'draining', stage: 'draining' });
+    expect((await fetch(`${base}/health/live`)).status).toBe(200);
+    const refused = await new Promise<number>((resolve) => {
+      const late = new WebSocket(wsUrl);
+      late.once('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      late.once('open', () => resolve(101));
+      late.once('error', () => undefined);
+    });
+    expect(refused).toBe(503);
+    const result = await closed;
+    await draining;
+    expect(result.code).toBe(1012);
+    expect(result.at - started).toBeGreaterThanOrEqual(140);
+  });
+
+  it('keeps serving the clients it already has until the sockets close', async () => {
+    await server.load();
+    const c = await connect(wsUrl);
+    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'staying' });
+    await c.next();
+    const draining = server.drain(120);
+    c.send({ t: 'getRows', reqId: 1, req: req() });
+    expect(await c.next()).toMatchObject({ t: 'rows', reqId: 1 });
+    await draining;
+  });
+
+  it('is idempotent, and works before the load has finished', async () => {
+    const early = server.drain(10);
+    await server.drain(10);
+    await early;
+    expect(server.health()).toMatchObject({ status: 'draining', stage: 'draining' });
   });
 });

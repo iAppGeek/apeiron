@@ -27,9 +27,10 @@ import { DEFAULT_BACKPRESSURE, type BackpressureOptions } from './backpressure.j
 import type { StatusSummary } from './counters.js';
 import { LiveStore } from './live-store.js';
 import { SystemStats } from './system-stats.js';
+import { warmUp, type WarmEntry, type WarmReport } from '../warmup.js';
 
 /** Where the blotter is in starting up. The snapshot is loaded before the runtime exists. */
-export type Stage = 'snapshot' | 'catchup' | 'prices' | 'ready';
+export type Stage = 'snapshot' | 'catchup' | 'prices' | 'warmup' | 'ready' | 'draining';
 
 /** What the snapshot hands over: the still-open watch, and the highest revision it saw. */
 export type WatchHandoff = { entries: AsyncIterator<KvEntry>; watch: KvWatch; revision: number };
@@ -63,6 +64,9 @@ export type LiveRuntimeOptions = {
   priceWaitMs?: number;
   /** Caught up once a watch entry has at most this many entries pending behind it (default 100). */
   catchupMaxPending?: number;
+  /** The views to build before the blotter is ready (default none), and how many passes of blocks 0 to 4 to run over each. */
+  warmViews?: readonly WarmEntry[];
+  warmRounds?: number;
   /** Called when the stage changes. */
   onStage?: (stage: Stage, seconds: number) => void;
   /** Called when the order-state watch ends unexpectedly: the process cannot keep its store current. */
@@ -104,6 +108,7 @@ export class LiveRuntime implements LiveHooks {
   private currentStage: Stage = 'catchup';
   private stageStarted = performance.now();
   private caughtUp = false;
+  private warm: WarmReport | null = null;
   private lastEntryAt = performance.now();
   private readonly ignored = { delete: 0, invalid: 0 };
   private reported = { applied: 0, stale: 0, delete: 0, invalid: 0 };
@@ -127,6 +132,16 @@ export class LiveRuntime implements LiveHooks {
 
   get stage(): Stage {
     return this.currentStage;
+  }
+
+  /** What the warm-up did, once it has run. */
+  get warmup(): WarmReport | null {
+    return this.warm;
+  }
+
+  /** Stops being ready: health says so at once, and the server closes its sockets a moment later. */
+  drain(): void {
+    this.currentStage = 'draining';
   }
 
   /** Records the order service published that this process read but did not apply. */
@@ -345,6 +360,8 @@ export class LiveRuntime implements LiveHooks {
   // ---- bus
 
   private setStage(stage: Stage): void {
+    // A blotter that is draining never goes back to starting up or to ready.
+    if (this.currentStage === 'draining') return;
     const now = performance.now();
     const seconds = (now - this.stageStarted) / 1000;
     this.options.metrics?.startup(this.currentStage, seconds);
@@ -400,6 +417,12 @@ export class LiveRuntime implements LiveHooks {
     await this.waitForPrices();
     if (this.stopped) return;
     this.flush();
+    this.setStage('warmup');
+    this.warm = await warmUp(this.options.engine, this.options.warmViews ?? [], this.options.warmRounds ?? 1, {
+      log: (fields, message) => this.options.log.warn(fields, message),
+    });
+    this.options.log.info({ ...this.warm }, 'warm-up finished');
+    if (this.stopped || this.currentStage === 'draining') return;
     this.setStage('ready');
   }
 

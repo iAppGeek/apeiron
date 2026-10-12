@@ -50,6 +50,9 @@ export type CoreOptions = {
   staleAfterMs: number;
 };
 
+/** WebSocket close code 1012: the server is restarting. */
+export const SERVER_RESTARTING = 1012;
+
 export const DEFAULT_CORE_OPTIONS: CoreOptions = {
   pingIntervalMs: 2000,
   statsIntervalMs: 1000,
@@ -213,12 +216,13 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
     }, options.statsIntervalMs);
   };
 
-  const scheduleReconnect = (): void => {
+  /** `immediate` is for a server that said it is restarting (close code 1012): try again now, without counting a failed attempt. */
+  const scheduleReconnect = (immediate = false): void => {
     if (closedByUser || reconnectTimer !== null) return;
     const base = Math.min(options.backoffMaxMs, options.backoffBaseMs * 2 ** attempt);
     const jitter = options.backoffJitter === 0 ? 0 : (clock.random() * 2 - 1) * options.backoffJitter;
-    const delay = Math.round(base * (1 + jitter));
-    attempt += 1;
+    const delay = immediate ? 0 : Math.round(base * (1 + jitter));
+    if (!immediate) attempt += 1;
     emitStatus('reconnecting');
     reconnectTimer = clock.setTimeout(() => {
       reconnectTimer = null;
@@ -338,7 +342,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
     ws.onmessage = (event): void => {
       if (socket === ws) onFrame(event.data);
     };
-    const onGone = (): void => {
+    const onGone = (restarting = false): void => {
       if (socket !== ws) return;
       socket = null;
       abandon = null;
@@ -351,7 +355,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
         emitStatus('closed');
         return;
       }
-      scheduleReconnect();
+      scheduleReconnect(restarting);
     };
     ws.onclose = (event): void => {
       if (socket !== ws) return;
@@ -359,7 +363,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
       batcher.flush();
       const code = event?.code ?? null;
       if (!closedByUser) emit({ kind: 'closed', code, reason: code === null ? 'closed' : `code:${code}` });
-      onGone();
+      onGone(code === SERVER_RESTARTING);
     };
     abandon = (reason): void => {
       if (socket !== ws) return;

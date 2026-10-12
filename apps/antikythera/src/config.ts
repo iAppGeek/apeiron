@@ -27,6 +27,12 @@ const envSchema = z.object({
   MAX_BLOCK_ROWS: posInt('5000'),
   /** Most ms one flush spends patching views; views not reached carry their changes into the next tick. */
   FLUSH_BUDGET_MS: posInt('40'),
+  /** `default`, or the path of a JSON file of `{traders, req}` entries: the views built before the blotter is ready. */
+  WARM_VIEWS: z.string().min(1).default('default'),
+  /** Synthetic passes of blocks 0 to 4 over each warm view. */
+  WARM_ROUNDS: posInt('3'),
+  /** After SIGTERM, how long to say "not ready" before the sockets are closed with code 1012. */
+  DRAIN_MS: posInt('2000'),
   /** A client silent this long (no frame, no pong) is terminated. */
   HEARTBEAT_TIMEOUT_MS: posInt('15000'),
 });
@@ -47,6 +53,9 @@ export type AntikytheraConfig = {
   maxBlockRows: number;
   flushBudgetMs: number;
   heartbeatTimeoutMs: number;
+  warmViews: string;
+  warmRounds: number;
+  drainMs: number;
 };
 
 export function loadConfig(env: Record<string, string | undefined>): AntikytheraConfig {
@@ -72,5 +81,8 @@ export function loadConfig(env: Record<string, string | undefined>): Antikythera
     maxBlockRows: e.MAX_BLOCK_ROWS,
     flushBudgetMs: e.FLUSH_BUDGET_MS,
     heartbeatTimeoutMs: e.HEARTBEAT_TIMEOUT_MS,
+    warmViews: e.WARM_VIEWS,
+    warmRounds: e.WARM_ROUNDS,
+    drainMs: e.DRAIN_MS,
   };
 }

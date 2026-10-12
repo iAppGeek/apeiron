@@ -2,6 +2,7 @@ import websocket from '@fastify/websocket';
 import type { Bus } from '@apeiron/logos';
 import Fastify, { LogController, type FastifyInstance } from 'fastify';
 import { LiveRuntime, type Stage } from './live/runtime.js';
+import type { WarmEntry } from './warmup.js';
 import type { BackpressureOptions } from './live/backpressure.js';
 import { QueryEngine } from './query/engine.js';
 import { LagMonitor, withLagReport } from './lag.js';
@@ -33,6 +34,9 @@ export type ServerOptions = {
   priceWaitMs?: number;
   /** Caught up once a watch entry has at most this many pending behind it (default 100). */
   catchupMaxPending?: number;
+  /** Views to build before the blotter is ready, and passes over each (see `warmup.ts`). Default: none. */
+  warmViews?: readonly WarmEntry[];
+  warmRounds?: number;
   /** Called when the order-state watch ends and the process can no longer be kept current. */
   onFatal?: (reason: string) => void;
   /** Wait between looks at the projection marker, and before retrying an incomplete snapshot (tests shorten them). */
@@ -51,10 +55,13 @@ export type ServerOptions = {
 };
 
 export type HealthBody = {
-  status: 'ok' | 'loading' | 'error';
+  status: 'ok' | 'loading' | 'draining' | 'error';
   stage: Stage;
   rows: number;
   loadMs: number;
+  /** How long the snapshot took, and the warm-up (0 until they have run). */
+  snapshotMs: number;
+  warmupMs: number;
   heapMb: number;
   rssMb: number;
   live?: { attached: boolean; clients: number; liveRows: number; pendingEvents: number };
@@ -70,6 +77,11 @@ export type BlotterServer = {
   /** The live runtime once loading has finished and a bus was given, else null. */
   runtime(): LiveRuntime | null;
   health(): HealthBody;
+  /**
+   * Stops being ready (`/health/ready` says 503 at once, new WebSocket upgrades are refused), waits `drainMs` so
+   * whatever routes traffic notices, then closes every socket with code 1012 so clients reconnect at once.
+   */
+  drain(drainMs?: number): Promise<void>;
   lag: LagMonitor;
   metrics: Metrics;
 };
@@ -109,15 +121,19 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
   let runtime: LiveRuntime | null = null;
   let report: LoadReport | null = null;
   let failed = false;
+  let draining = false;
+  const sockets = new Set<{ close(code?: number, reason?: string): void }>();
   let loadStarted = 0;
   const slowBuildMs = options.slowBuildMs ?? 50;
 
   const health = (): HealthBody => {
     const mem = memorySnapshot();
     return {
-      status: failed ? 'error' : runtime?.stage === 'ready' ? 'ok' : 'loading',
-      stage: runtime?.stage ?? 'snapshot',
+      status: failed ? 'error' : draining ? 'draining' : runtime?.stage === 'ready' ? 'ok' : 'loading',
+      stage: draining ? 'draining' : (runtime?.stage ?? 'snapshot'),
       rows: store.size,
+      snapshotMs: report?.loadMs ?? 0,
+      warmupMs: runtime?.warmup?.ms ?? 0,
       loadMs: report?.loadMs ?? (loadStarted === 0 ? 0 : Math.round(performance.now() - loadStarted)),
       heapMb: mem.heapMb,
       rssMb: mem.rssMb,
@@ -134,9 +150,17 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
     };
   };
 
-  app.get('/health', async (_req, reply) => {
+  // Liveness: the process is up. Readiness (and `/health`, its alias): loaded, caught up, priced and warm.
+  app.get('/health/live', async () => ({ status: 'live' }));
+  const ready = async (_req: unknown, reply: { code(n: number): { send(b: unknown): unknown } }): Promise<unknown> => {
     const body = health();
     return reply.code(body.status === 'ok' ? 200 : 503).send(body);
+  };
+  app.get('/health/ready', ready);
+  app.get('/health', ready);
+
+  app.addHook('onRequest', async (req, reply) => {
+    if (draining && req.url.split('?')[0] === '/ws') await reply.code(503).send({ error: 'draining' });
   });
 
   metrics.bind({
@@ -189,13 +213,17 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
 
   app.get('/ws', { websocket: true }, (socket) => {
     metrics.connectionOpened();
-    socket.once('close', () => metrics.connectionClosed());
+    sockets.add(socket);
+    socket.once('close', () => {
+      sockets.delete(socket);
+      metrics.connectionClosed();
+    });
     attachWebSocket(
       socket,
       (connection) =>
         new ClientSession(connection, {
           // No client is served rows before the blotter is ready: loaded, caught up and priced.
-          engine: () => (runtime?.stage === 'ready' ? engine : null),
+          engine: () => (runtime?.stage === 'ready' || runtime?.stage === 'draining' ? engine : null),
           live: () => runtime,
           log: app.log,
           metrics,
@@ -248,8 +276,10 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
         priceWaitMs: options.priceWaitMs,
         catchupMaxPending: options.catchupMaxPending,
         onFatal: options.onFatal,
+        warmViews: options.warmViews,
+        warmRounds: options.warmRounds,
         onStage: (finished) => {
-          if (finished === 'prices') becameReady();
+          if (finished === 'warmup') becameReady();
         },
       });
       runtime.live.noteRevision(snapshot.revision);
@@ -281,5 +311,17 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
     }
   };
 
-  return { app, store, load, engine: () => engine, runtime: () => runtime, health, lag, metrics };
+  const drain = async (drainMs = 2_000): Promise<void> => {
+    if (draining) return;
+    draining = true;
+    runtime?.drain();
+    app.log.info({ drainMs, clients: sockets.size }, 'draining');
+    await new Promise<void>((resolve) => setTimeout(resolve, drainMs));
+    for (const socket of [...sockets]) socket.close(1012, 'server restarting');
+    // Give the close handshakes a moment; a socket that does not answer is dropped with the server.
+    const deadline = Date.now() + 1_000;
+    while (sockets.size > 0 && Date.now() < deadline) await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  };
+
+  return { app, store, load, drain, engine: () => engine, runtime: () => runtime, health, lag, metrics };
 }

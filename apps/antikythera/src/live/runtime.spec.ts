@@ -6,6 +6,7 @@ import { ColumnarStore } from '../store/columnar-store.js';
 import { ensureBuckets, publishRecord } from '../testing/bucket.js';
 import { makeOrders } from '../testing/orders.js';
 import type { Connection, Frame } from '../transport.js';
+import { defaultWarmViews, type WarmEntry } from '../warmup.js';
 import { LiveRuntime, type Stage, type WatchHandoff } from './runtime.js';
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -330,7 +331,7 @@ describe('LiveRuntime startup stages', () => {
     expect(r.runtime.stage).toBe('catchup');
     await vi.advanceTimersByTimeAsync(300);
     expect(r.runtime.stage).toBe('ready');
-    expect(r.stages).toEqual(['catchup', 'prices']);
+    expect(r.stages).toEqual(['catchup', 'prices', 'warmup']);
     expect(r.store.orderAt(0).filledQty).toBe(5);
     await r.runtime.stop();
   });
@@ -379,6 +380,52 @@ describe('LiveRuntime startup stages', () => {
     r.runtime.start();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(r.runtime.stage).toBe('ready');
+    await r.runtime.stop();
+  });
+
+  it('warms the views it is given after the prices, before it is ready, and records how long it took', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig();
+    await allPairs(r.bus, 5);
+    const entry = defaultWarmViews()[1] as WarmEntry;
+    const warm = new LiveRuntime({ store: r.store, engine: r.engine, bus: r.bus, log, flushMs: 100, maxTrackedBlocks: 20, snapshot: r.handoff, priceWaitMs: 100, warmViews: [entry], warmRounds: 2 });
+    const seen: string[] = [];
+    const getRows = vi.spyOn(r.engine, 'getRows').mockImplementation(function (this: QueryEngine, ...args) {
+      seen.push(warm.stage);
+      return QueryEngine.prototype.getRows.apply(this, args);
+    });
+    expect(warm.warmup).toBeNull();
+    warm.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(warm.stage).toBe('ready');
+    expect(getRows).toHaveBeenCalledTimes(2 * 5);
+    expect(new Set(seen)).toEqual(new Set(['warmup']));
+    expect(warm.warmup).toMatchObject({ views: 1, requests: 10, failures: 0 });
+    await warm.stop();
+  });
+
+  it('stops being ready when told to drain, and stays draining', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig();
+    await allPairs(r.bus, 5);
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.runtime.stage).toBe('ready');
+    r.runtime.drain();
+    expect(r.runtime.stage).toBe('draining');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.runtime.stage).toBe('draining');
+    await r.runtime.stop();
+  });
+
+  it('does not become ready if it was told to drain while starting up', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig({ priceWaitMs: 800 });
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(400);
+    r.runtime.drain();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(r.runtime.stage).toBe('draining');
     await r.runtime.stop();
   });
 
