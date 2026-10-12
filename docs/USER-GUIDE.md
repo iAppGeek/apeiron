@@ -229,7 +229,7 @@ run; `--stress-at`, `--stress-for`). Results go to the
 console and to `loadtest/results/<timestamp>-<codec>.json` and `.md`, with a PASS/FAIL table against the targets.
 
 Watch it live in Grafana: <http://localhost:3001>, dashboard **"Apeiron: Blotter Server"** (CPU, RSS, event-loop lag,
-connections, traffic, flush and view outcomes, getRows, tick-to-client latency, backpressure, write-behind; red lines mark
+connections, traffic, flush and view outcomes, getRows, tick-to-client latency, backpressure; red lines mark
 the targets).
 
 ## Troubleshooting
@@ -248,7 +248,7 @@ the targets).
 | Playwright says the browser is missing | Chromium not installed | `pnpm --filter @apeiron/e2e exec playwright install chromium` |
 | Console shows a boxed AG Grid licence message | expected: Enterprise is used without a licence key (watermark accepted) | nothing to do |
 
-Diagnostics: `curl -s localhost:4000/health`, `curl -s localhost:4000/debug/lag` (flush, lag and write-behind figures),
+Diagnostics: `curl -s localhost:4000/health`, `curl -s localhost:4000/debug/lag` (flush and lag figures),
 `curl -s localhost:4000/metrics | grep apeiron_`, and
 `pnpm --filter @apeiron/antikythera exec tsx src/testing/live-report.ts --scenario default --seconds 15`.
 

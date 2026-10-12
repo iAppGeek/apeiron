@@ -67,7 +67,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [antikythera, hermes, gaia, talos, pharos]
+        service: [antikythera, themis, hermes, gaia, talos, pharos]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -142,7 +142,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [antikythera, hermes, gaia, talos, pharos]
+        service: [antikythera, themis, hermes, gaia, talos, pharos]
     steps:
       - uses: actions/download-artifact@v8
         with:

@@ -414,16 +414,20 @@ When a held client asks for a block while adds are pending, the delta carrying t
 (resilience bug 9). In every CP-4 run the slow consumer was cut off within 5–15 s and the other 49 clients were unaffected
 ([`CP-4.md`](checkpoints/CP-4.md) §6).
 
-### 4.8 Write-behind and ack-after-persist
+### 4.8 Persistence moved to themis (PLAN1 phase 1.2)
 
-[`live/write-behind.ts`](../apps/antikythera/src/live/write-behind.ts). The in-memory store is the source of truth while
-running; Mongo is the durable copy for restarts and for hermes's `loadCurrent()`.
+The blotter no longer writes to Mongo (the write-behind pass was removed). [`apps/themis`](../apps/themis/src/themis.ts)
+is the order service of record; Mongo is its durable copy.
 
-- Every `WRITE_BEHIND_MS` (500 ms) a pass takes the dirty orders (lifecycle and fill changes only — **price-only changes
-  are never persisted**), rebuilds full `Order`s from the store and `upsertMany`s them in chunks of 1,000, yielding
-  between chunks.
-- The `blotter-server` JetStream consumer uses `AckPolicy.All` and is acked **only after the pass succeeds**; a failed
-  pass restores the batch and retries. A crash therefore replays exactly the events not yet persisted.
+- `themis` consumes `orders.events` through its own durable consumer, applies each event to the full order (`v + 1`),
+  and a group committer ([`committer.ts`](../apps/themis/src/committer.ts)) stores each batch (at most 20 ms or 500
+  changes) with `upsertMany`, **then** puts the new records into the `ORDER_STATE` bucket in the same order, **then**
+  acknowledges the events. A failed write is retried with backoff, so nothing is published before it is stored and
+  nothing is dropped. **Price-only changes are never persisted** (they are not events).
+- The `blotter-server` consumer is acked as soon as a flush has applied the events to the store. Its restart still loads
+  from Mongo until phase 1.3a, so for the few tens of milliseconds themis needs to commit, a restarting blotter can miss an
+  event; the move to the bucket removes that window.
+- Both consumers use `AckPolicy.All`; a crash replays exactly the events not yet acknowledged.
 - Replays are safe because NATS events carry **absolute** post-change values (`filledQty: 4_200_000`, never `+100_000`),
   so applying one twice is an idempotent upsert.
 - CP-4 R5: `ack_wait` 60 s, `max_ack_pending` 20,000, pulls bounded to 500 messages.
@@ -672,11 +676,11 @@ client or order ids (full table: [`CP-4.md`](checkpoints/CP-4.md) §2).
 | Connections & traffic | `apeiron_ws_connections`, `apeiron_ws_clients{codec}`, `apeiron_ws_messages_total` / `_bytes_total{direction,type,codec}` |
 | Flush & views | `apeiron_flush_duration_seconds`, `apeiron_flush_views_total{outcome=patched|deferred|unsubscribed|pending_rebuild}`, `apeiron_views_stale`, `apeiron_views_rebuild_pending`, `apeiron_view_rebuild_duration_seconds`, `apeiron_view_cache_*` |
 | Latency | `apeiron_getrows_duration_seconds{temp,shape}`, `apeiron_event_age_at_flush_seconds`, `apeiron_event_age_at_send_seconds`, `apeiron_delta_bytes`, `apeiron_command_duration_seconds{outcome}` |
-| Ingest & persistence | `apeiron_ingest_events_total{type}`, `apeiron_ingest_queue_depth`, `apeiron_live_rows`, `apeiron_write_behind_*` |
+| Ingest & persistence | `apeiron_ingest_events_total{type}`, `apeiron_ingest_queue_depth`, `apeiron_live_rows`, `themis_*` (commit batch size and duration, KV put time, open orders) |
 | Health | `apeiron_backpressure_events_total{event=soft_conflate|slow_consumer}`, `apeiron_errors_total{code}`, `apeiron_commands_pending`, `apeiron_store_rows` |
 
 hermes `:4100/metrics`: `hermes_events_published_total{type}`, `hermes_price_ticks_total`, `hermes_live_orders`,
-`hermes_preset{preset}`, publish errors and in-flight. `GET :4000/debug/lag` gives flush, lag and write-behind figures.
+`hermes_preset{preset}`, publish errors and in-flight. `GET :4000/debug/lag` gives flush and lag figures; `GET :4200/debug` gives themis's open orders and last commit.
 
 ### 8.2 Grafana
 

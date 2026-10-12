@@ -1,5 +1,6 @@
 import {
   PAIR_BY_NAME,
+  pnlUsdOf,
   mulberry32,
   parseOrderSeq,
   parseOrderEvent,
@@ -424,5 +425,52 @@ describe('Simulator commands', () => {
       message: 'Order ALG00000001 is not active',
       ts: SEED_NOW,
     });
+  });
+});
+
+describe('Simulator completions carry the market snapshot', () => {
+  const cmd = (orderId: string, action: OrderCommand['action']): OrderCommand => ({ orderId, action, requestedBy: 'u', ts: SEED_NOW, commandId: `c:${orderId}:${action}` });
+  const updateFor = (h: Harness, orderId: string): Extract<OrderEvent, { type: 'UPDATE' }>['order'] => {
+    const e = h.events.find((x): x is Extract<OrderEvent, { type: 'UPDATE' }> => x.type === 'UPDATE' && x.order.orderId === orderId);
+    if (e === undefined) throw new Error('no update');
+    return e.order;
+  };
+
+  it('stamps a cancel with the feed quote and realises P&L at its mid, not at the stale unrealised value', () => {
+    const base = currentOrders().find((o) => o.status === 'LIVE') as Order;
+    const live: Order = { ...base, filledQty: 400_000, remainingQty: base.orderQty - 400_000, avgFillPrice: base.arrivalPrice * 0.99, unrealisedPnlUsd: 123_456 };
+    const h = harness({ current: [live] });
+    h.sim.command(cmd(live.orderId, 'CANCEL'), SEED_NOW);
+    const quote = h.feed.quote(live.currencyPair);
+    const update = updateFor(h, live.orderId);
+    expect(update).toMatchObject({ status: 'CANCELLED', marketBid: quote?.bid, marketAsk: quote?.ask, unrealisedPnlUsd: 0 });
+    const mid = update.marketMid as number;
+    expect(update.realisedPnlUsd).toBe(pnlUsdOf({ ...live, avgFillPrice: live.avgFillPrice }, mid));
+    expect(update.realisedPnlUsd).not.toBe(123_456);
+  });
+
+  it('stamps the completing fill of an expiring order with the same snapshot', () => {
+    const base = currentOrders().find((o) => o.status === 'LIVE') as Order;
+    const live: Order = { ...base, endTime: SEED_NOW - 1, filledQty: 100_000, remainingQty: base.orderQty - 100_000, avgFillPrice: base.arrivalPrice };
+    let completed: ReturnType<typeof updateFor> | null = null;
+    for (let seed = 1; seed < 40 && completed === null; seed++) {
+      const h = harness({ current: [live], seed });
+      h.sim.reconcile(SEED_NOW + 1);
+      const u = updateFor(h, live.orderId);
+      if (u.status === 'FILLED') completed = u;
+    }
+    const quote = harness().feed.quote(live.currencyPair);
+    expect(completed).not.toBeNull();
+    expect(completed?.marketMid).toBeDefined();
+    expect(completed?.unrealisedPnlUsd).toBe(0);
+    expect(completed?.realisedPnlUsd).toBe(pnlUsdOf({ ...live, filledQty: live.orderQty, avgFillPrice: completed?.avgFillPrice ?? null }, completed?.marketMid as number));
+    expect(quote).toBeDefined();
+  });
+
+  it('leaves ordinary fills and pauses without a market snapshot', () => {
+    const live = currentOrders().find((o) => o.status === 'LIVE') as Order;
+    const h = harness({ current: [live] });
+    h.sim.command(cmd(live.orderId, 'PAUSE'), SEED_NOW);
+    expect('marketBid' in updateFor(h, live.orderId)).toBe(false);
   });
 });

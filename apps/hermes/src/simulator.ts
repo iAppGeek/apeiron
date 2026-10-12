@@ -3,7 +3,10 @@ import {
   PAIR_BY_NAME,
   applyCommand,
   applyFill,
+  deriveOverlay,
+  isTerminal,
   normal,
+  pnlUsdOf,
   parseOrderSeq,
   sideSign,
   transition,
@@ -247,7 +250,21 @@ export class Simulator {
     else if (order.status !== 'PAUSED') this.orders.delete(order.orderId);
   }
 
-  private commit(order: Order, changes: Partial<Order>, now: number, commandId?: string): Order {
+  /**
+   * A change that completes the order (fill to completion, cancel) also carries the market snapshot from the
+   * feed's current quote and the realised P&L at that quote's mid, because the order service stores the record
+   * and nothing else will price a terminal order again.
+   */
+  private completed(order: Order, changes: Partial<Order>): Partial<Order> {
+    const after: Order = { ...order, ...changes };
+    if (!isTerminal(after.status) || isTerminal(order.status)) return changes;
+    const quote = this.options.feed.quote(order.currencyPair) ?? { bid: this.options.feed.mid(order.currencyPair), ask: this.options.feed.mid(order.currencyPair) };
+    const overlay = deriveOverlay(after, quote);
+    return { ...changes, ...overlay, unrealisedPnlUsd: 0, realisedPnlUsd: pnlUsdOf(after, overlay.marketMid) };
+  }
+
+  private commit(order: Order, rawChanges: Partial<Order>, now: number, commandId?: string): Order {
+    const changes = this.completed(order, rawChanges);
     const next = { ...order, ...changes };
     this.track(next);
     this.emit({

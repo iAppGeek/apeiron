@@ -39,7 +39,6 @@ async function start(bus: MemoryBus, repo = new InMemoryOrderRepository()): Prom
     logLevel: 'silent',
     storeCapacity: 64,
     flushMs: 20,
-    writeBehindMs: 30,
     maxTrackedBlocks: 20,
     summaryIntervalMs: 50,
   });
@@ -184,20 +183,7 @@ describe('live server over a real socket', () => {
     expect(seen).toEqual([{ preset: 'stress' }]);
   });
 
-  it('persists a lifecycle change to the repository within the write-behind interval', async () => {
-    const bus = new MemoryBus();
-    const repo = new InMemoryOrderRepository();
-    const { server: s } = await start(bus, repo);
-    await s.load();
-    await bus.publish('orders.events', { type: 'UPDATE', order: { orderId: 'T0000001', status: 'FILLED', filledQty: 1_000_000, remainingQty: 0 }, ts: 1 });
-    await vi.waitFor(async () => {
-      const out: Order[] = [];
-      for await (const b of repo.loadAll()) out.push(...b.map((r) => r.order));
-      expect(out.find((o) => o.orderId === 'T0000001')).toMatchObject({ status: 'FILLED', filledQty: 1_000_000 });
-    });
-  });
-
-  it('exposes flush, lag and write-behind figures on /debug/lag and resets them on request', async () => {
+  it('exposes flush and lag figures on /debug/lag and resets them on request', async () => {
     const bus = new MemoryBus();
     const { server: s, base } = await start(bus);
     expect(await (await fetch(`${base}/debug/lag`)).json()).toEqual({ live: false });
@@ -331,7 +317,7 @@ describe('command path over a real socket', () => {
     await fakeHermes(bus, held(), { silent: true });
     const repo = new InMemoryOrderRepository();
     await repo.upsertMany(ROWS.map(toStoredOrder));
-    const s = await buildServer({ repo, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, writeBehindMs: 30, commandTimeoutMs: 150 });
+    const s = await buildServer({ repo, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, commandTimeoutMs: 150 });
     server = s;
     await s.app.listen({ port: 0, host: '127.0.0.1' });
     await s.load();

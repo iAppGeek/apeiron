@@ -6,7 +6,7 @@ services:
   mongo:
     image: mongo:9.0
     profiles: [core, seed]
-    # WiredTiger defaults to half of the Docker VM's RAM, which under sustained write-behind load starves the
+    # WiredTiger defaults to half of the Docker VM's RAM, which under sustained write load starves the
     # blotter server (the VM swapped and every container stalled). MONGO_CACHE_GB (default 1) caps it; 1 GB holds
     # the working set of this dataset. Raise it on a bigger host (the 16 GB remote box).
     command: ["--wiredTigerCacheSizeGB", "${MONGO_CACHE_GB:-1}"]
@@ -58,7 +58,6 @@ services:
       NATS_URL: nats://nats:4222
       FLUSH_MS: ${FLUSH_MS:-50}
       FLUSH_BUDGET_MS: ${FLUSH_BUDGET_MS:-40}
-      WRITE_BEHIND_MS: ${WRITE_BEHIND_MS:-500}
       MAX_TRACKED_BLOCKS: ${MAX_TRACKED_BLOCKS:-100}
       LOAD_PRESET: ${LOAD_PRESET:-medium}
     # Caps the container so memory behaviour is defined (and matches the remote box budget).
@@ -70,12 +69,50 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+      themis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 5s
       timeout: 3s
       retries: 30
       start_period: 60s
+    restart: unless-stopped
+
+  # The order service of record: owns the database and publishes every order's latest state to the ORDER_STATE
+  # bucket. Healthy once the projection (the bucket's copy of every order) is complete, which takes about a
+  # minute at 1M rows on first start.
+  themis:
+    profiles: [core]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      args:
+        APP: themis
+    image: ${REGISTRY:-local}/apeiron/themis:${TAG:-dev}
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB: ${MONGO_DB:-blotter}
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HEALTH_PORT: "4200"
+      GROUP_COMMIT_MS: ${GROUP_COMMIT_MS:-20}
+      GROUP_COMMIT_MAX: ${GROUP_COMMIT_MAX:-500}
+      REBUILD_PROJECTION: ${REBUILD_PROJECTION:-0}
+    mem_limit: 1g
+    ports:
+      - "127.0.0.1:4200:4200"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4200/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 300s
     restart: unless-stopped
 
   hermes:
@@ -97,6 +134,8 @@ services:
       mongo:
         condition: service_healthy
       nats:
+        condition: service_healthy
+      themis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4100/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]

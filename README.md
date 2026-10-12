@@ -75,13 +75,14 @@ mutate a few orders; `scripts/loadtest-reset.sh` restores the dataset.
 ## Live updates
 
 `hermes` publishes `prices.<PAIR>` (3 ticks/s per pair) and `orders.events` (fills, status changes, new orders) to NATS;
-`antikythera` applies them to its store, patches every cached view incrementally, writes lifecycle changes back to Mongo
-(write-behind) and pushes `delta` and `summary` messages to clients. Switch the load with `LOAD_PRESET=medium|stress`
+`antikythera` applies them to its store, patches every cached view incrementally and pushes `delta` and `summary`
+messages to clients, while `themis` stores the lifecycle changes in Mongo and publishes each order's latest state to the
+`ORDER_STATE` bucket. Switch the load with `LOAD_PRESET=medium|stress`
 or live with a `control` message (it is published on `control.load`). Verify a running stack:
 
 ```bash
 pnpm --filter @apeiron/antikythera exec tsx src/testing/live-report.ts --scenario default --seconds 15   # also: grouped, stress, writebehind, consistency
-curl localhost:4000/debug/lag                                                                           # flush, lag and write-behind figures
+curl localhost:4000/debug/lag                                                                           # flush and lag figures
 ```
 
 ## Benchmarks

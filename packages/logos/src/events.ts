@@ -40,6 +40,8 @@ export const CONSUMERS = {
   hermesCommands: 'hermes-commands',
   themisExec: 'themis-exec',
   hermesVenue: 'hermes-venue',
+  /** PLAN1 phase 1.2: the order service's own consumer of `orders.events`, until execution reports replace them. */
+  themis: 'themis',
 } as const;
 /** PLAN1: JetStream KV buckets. `ORDER_STATE` is keyed by `orderId`; `ORDER_STATE_META` holds the `projection` marker. */
 export const BUCKETS = { orderState: 'ORDER_STATE', orderStateMeta: 'ORDER_STATE_META' } as const;

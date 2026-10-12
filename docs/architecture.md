@@ -23,8 +23,9 @@ flowchart LR
   subgraph Docker
     NG["nginx<br/>static files + /ws proxy"]
     AN["antikythera<br/>blotter server"]
+    TH["themis<br/>order service of record"]
     HE["hermes<br/>mock middleware"]
-    NA[("NATS JetStream<br/>ORDERS, PRICES")]
+    NA[("NATS JetStream<br/>ORDERS, PRICES, KV ORDER_STATE")]
     MO[("MongoDB")]
     GA["gaia<br/>seeder (one-shot)"]
     PR["Prometheus + Grafana"]
@@ -36,10 +37,13 @@ flowchart LR
   NA -->|"durable consumer"| AN
   AN -->|"orders.commands, control.load"| NA
   NA --> HE
-  AN -->|"write-behind"| MO
+  NA -->|"orders.events (durable consumer)"| TH
+  TH -->|"group commit"| MO
+  TH -->|"ORDER_STATE (after the commit)"| NA
   MO -->|"loadAll at startup"| AN
   GA -->|"upsertMany"| MO
-  HE -->|"loadCurrent at startup"| MO
+  MO -->|"loadOpen at startup"| TH
+  HE -->|"loadOpen at startup"| MO
   PR -->|"scrape /metrics"| AN
   TA -.->|"50 simulated clients"| AN
 ```
@@ -48,6 +52,7 @@ flowchart LR
 |---|---|---|
 | **pharos** | `apps/pharos` | The web app. React 19, AG Grid Enterprise 36 with the server-side row model, a Web Worker that owns the socket and the codec, Zustand for small app state. Served by unprivileged nginx |
 | **antikythera** | `apps/antikythera` | The blotter server (Node, Fastify, `ws`). Holds every order in memory, answers `getRows`, ingests the live feed, and pushes deltas |
+| **themis** | `apps/themis` | The order service of record. Owns the database: it consumes `orders.events` through its own durable consumer, applies them to the full order, stores each batch (group commit, 20 ms or 500 changes), then publishes the order's new version to the `ORDER_STATE` KV bucket and acknowledges the event. Keeps a per-order version `v`, rebuilds the bucket (the "projection") from the database when it is missing, and reconciles anything a crash left unpublished. Never reads prices |
 | **hermes** | `apps/hermes` | Mock middleware: a 20-pair random-walk price feed and the order lifecycle (pending to live, fills, new orders), and it executes commands. Stands in for the real order management system |
 | **gaia** | `apps/gaia` | The seeder: deterministic generation of 1M orders over six months, bulk-loaded into the database; a second run is a no-op |
 | **talos** | `apps/talos` | The load harness: N WebSocket clients, each with its own sort, filter, group and scroll pattern, reporting latency percentiles and server CPU, RSS and event-loop lag |
@@ -69,6 +74,7 @@ sequenceDiagram
   participant H as hermes
   participant N as NATS
   participant A as antikythera
+  participant T as themis
   participant W as Worker
   participant U as AG Grid
   G->>M: upsertMany (1M orders, batches of 10,000)
@@ -80,6 +86,9 @@ sequenceDiagram
   end
   H->>N: orders.events (new, fills, status changes)
   N->>A: durable consumer, acked after applying
+  N->>T: durable consumer `themis`, acked after the commit and the KV put
+  T->>M: upsertMany (group commit)
+  T->>N: ORDER_STATE put (v)
   U->>W: getRows (block, sort, filter, group)
   W->>A: getRows
   A-->>W: rows + rowCount
@@ -89,7 +98,7 @@ sequenceDiagram
     A-->>W: delta (updates, adds, dirtyRoutes, rowCounts, newAbove)
     W-->>U: applyServerSideTransaction, flash, anchor, badge
   end
-  A->>M: write-behind every 500 ms (lifecycle and fill changes)
+  Note over T: themis: group commit to Mongo, then ORDER_STATE
 ```
 
 1. **Seed.** `gaia` generates orders deterministically (same `SEED`, same orders) and writes them in batches.
@@ -97,7 +106,8 @@ sequenceDiagram
    million rows on a laptop) and then attaches to the bus. `/health` reports the row count and load time.
 3. **Live updates.** `hermes` publishes price ticks (`prices.<PAIR>`, 3 per second per pair) and order events
    (`orders.events`: new orders, fills, status changes). Both streams are JetStream, and the server reads them through a
-   durable consumer that acknowledges only after an event has been applied, so a restart replays what was missed.
+   durable consumer that acknowledges only after an event has been applied, so a restart replays what was missed. `themis` reads the same
+   events through its own consumer and persists them.
 4. **Deltas.** Every flush tick the server patches its cached views and each client session turns the changes into a
    `delta` for the rows that client holds.
 5. **Grid.** The worker decodes the delta and posts it to the main thread, which applies it synchronously with
@@ -202,11 +212,13 @@ per row and field, `newAbove` summed). The main thread applies each delta with t
 `applyServerSideTransaction`, merging every partial row into the row's current data right before the call: the async API
 would merge two partials against stale data and lose fields. Price cells flash and are coloured up or down for 600 ms.
 
-### Write-behind
+### Persistence (themis)
 
-The server persists lifecycle and fill changes (not price-only changes) in batches every 500 ms with `upsertMany`, so a
-restart (and `hermes`, which rebuilds from `loadCurrent()`) sees the current state. The in-memory store is the source of
-truth while running.
+`antikythera` no longer writes to the database. `themis` stores every lifecycle and fill change (price-only changes are
+not events, so they are never stored) in group commits and only then publishes the new version of the order to the
+`ORDER_STATE` bucket, so a published version is always durable. A restart of `antikythera` loads from the database as
+before (until phase 1.3a moves the blotter to NATS only); a restart of `themis` replays its durable consumer, and
+`execSeq`-free events are absolute, so replays are idempotent. See [`PLAN1-architecture-split.md`](PLAN1-architecture-split.md).
 
 ## Wire protocol
 

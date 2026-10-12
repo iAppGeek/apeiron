@@ -25,9 +25,6 @@ export type LiveStoreStats = {
 
 type Queued = { event: OrderEvent; ack: () => void };
 
-/** What a write-behind pass has to persist, and the acknowledgement to send once it has. */
-export type WriteBatch = { orders: Order[]; ack: (() => void) | null };
-
 const rowStatus = (store: ColumnarStore, row: number): OrderStatus => {
   const c = store.enumColumn('status');
   return c.dict.values[c.codes[row] as number] as OrderStatus;
@@ -41,7 +38,7 @@ const rowStatus = (store: ColumnarStore, row: number): OrderStatus => {
  * - the price join keeps `liveByPair` as statuses change and, for each pair that ticked, recomputes the
  *   price-derived fields of its LIVE and PAUSED rows with the shared logos function (price-only changes are
  *   never persisted);
- * - rows touched by lifecycle events are remembered for write-behind, with the acknowledgement owed to the bus.
+ * - the bus is acknowledged once a flush has applied the events (the order service owns persistence).
  */
 export class LiveStore {
   readonly counters = new StatusCounters();
@@ -50,8 +47,6 @@ export class LiveStore {
   private readonly latestTicks = new Map<CurrencyPair, PriceTick>();
   private pendingTicks = new Set<CurrencyPair>();
   private readonly liveByPair = new Map<CurrencyPair, Set<number>>();
-  private dirty = new Set<string>();
-  private lastAck: (() => void) | null = null;
   private flushAgeMs: number | null = null;
 
   constructor(
@@ -83,11 +78,6 @@ export class LiveStore {
     return this.queue.length;
   }
 
-  /** Orders changed by lifecycle events that write-behind has not taken yet. */
-  get dirtyCount(): number {
-    return this.dirty.size;
-  }
-
   /** Age in ms of the oldest event or tick the last `flush` applied, or null when it applied none. */
   get lastFlushAgeMs(): number | null {
     return this.flushAgeMs;
@@ -99,7 +89,7 @@ export class LiveStore {
     return n;
   }
 
-  /** `ack` is called (through write-behind) once the event's effect has been persisted. */
+  /** `ack` is called once a flush has applied the event to the store. */
   enqueueEvent(event: OrderEvent, ack: () => void): void {
     this.queue.push({ event, ack });
   }
@@ -116,34 +106,16 @@ export class LiveStore {
     this.queue = [];
     const eventRows = new Set<number>();
     let oldest = Infinity;
-    for (const { event, ack } of queue) {
+    for (const { event } of queue) {
       oldest = Math.min(oldest, event.ts);
       this.applyEvent(event, cs, eventRows);
-      this.lastAck = ack;
     }
     for (const pair of this.pendingTicks) oldest = Math.min(oldest, (this.latestTicks.get(pair) as PriceTick).ts);
     this.flushAgeMs = oldest === Infinity ? null : Math.max(0, now - oldest);
     this.applyPrices(now, cs, eventRows);
+    // The consumer acknowledges everything up to the last message it is given.
+    queue[queue.length - 1]?.ack();
     return cs;
-  }
-
-  /** Orders changed by lifecycle events since the last call (built from the store as it is now), plus the ack to send after persisting. */
-  takeWriteBatch(): WriteBatch {
-    const orders: Order[] = [];
-    for (const id of this.dirty) {
-      const row = this.store.rowIndexOf(id);
-      if (row !== undefined) orders.push(this.store.orderAt(row));
-    }
-    const batch = { orders, ack: this.lastAck };
-    this.dirty = new Set();
-    this.lastAck = null;
-    return batch;
-  }
-
-  /** Puts a failed batch back so the next pass retries it. */
-  restoreWriteBatch(batch: WriteBatch): void {
-    for (const o of batch.orders) this.dirty.add(o.orderId);
-    this.lastAck ??= batch.ack;
   }
 
   // ------------------------------------------------------------------ events
@@ -161,7 +133,6 @@ export class LiveStore {
       } else {
         this.afterUpdate(result.row, result.changed, result.prev, cs, event.ts);
       }
-      this.dirty.add(event.order.orderId);
       eventRows.add(result.row);
       return;
     }
@@ -175,7 +146,6 @@ export class LiveStore {
     }
     const { changed, prev } = this.store.updateRow(row, this.monotonic(row, event.order));
     this.afterUpdate(row, changed, prev, cs, event.ts);
-    if (changed.length > 0) this.dirty.add(event.order.orderId);
     eventRows.add(row);
   }
 

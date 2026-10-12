@@ -8,7 +8,18 @@ const jsz = (pending: number, ack: number): unknown => ({
 });
 
 describe('parseSnapshot', () => {
-  it('reads the blotter-server consumer only', () => {
+  it('sums the blotter-server and themis consumers and ignores the others', () => {
+    const both = {
+      account_details: [{ stream_detail: [{ consumer_detail: [
+        { name: 'hermes-commands', num_pending: 9, num_ack_pending: 9 },
+        { name: 'blotter-server', num_pending: 1, num_ack_pending: 2 },
+        { name: 'themis', num_pending: 10, num_ack_pending: 20 },
+      ] }] }],
+    };
+    expect(parseSnapshot(health, lag(0, 0), both)).toMatchObject({ consumerPending: 11, consumerAckPending: 22 });
+  });
+
+  it('reads the blotter-server consumer', () => {
     expect(parseSnapshot(health, lag(5, 6), jsz(3, 4))).toMatchObject({
       status: 'ok',
       rows: 10,

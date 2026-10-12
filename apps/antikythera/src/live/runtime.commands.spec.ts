@@ -36,11 +36,9 @@ async function rig(): Promise<Rig> {
   const runtime = new LiveRuntime({
     store,
     engine,
-    repo,
     bus,
     log,
     flushMs: 100,
-    writeBehindMs: 500,
     maxTrackedBlocks: 20,
     commandTimeoutMs: 5_000,
   });

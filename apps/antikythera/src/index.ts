@@ -10,7 +10,6 @@ const server = await buildServer({
   repo,
   bus,
   flushMs: config.flushMs,
-  writeBehindMs: config.writeBehindMs,
   maxTrackedBlocks: config.maxTrackedBlocks,
   logLevel: config.logLevel,
   storeCapacity: config.storeCapacity,

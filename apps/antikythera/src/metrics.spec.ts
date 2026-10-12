@@ -16,7 +16,6 @@ const sources = (over: Partial<MetricSources> = {}): MetricSources => ({
     clientsByCodec: { json: 2, msgpack: 1 },
     liveRows: 500,
     pendingEvents: 7,
-    dirtyOrders: 9,
     commandsPending: 1,
     cpuPercent: 42.5,
     lagMs: { p50: 1, p99: 20, max: 40 },
@@ -59,15 +58,13 @@ describe('Metrics', () => {
     expect(sample(text, 'apeiron_getrows_duration_seconds_count{temp="warm",shape="grouped"}')).toBe(1);
   });
 
-  it('records flush, event age, ingest, write-behind, command, delta, error and backpressure measurements', async () => {
+  it('records flush, event age, ingest, command, delta, error and backpressure measurements', async () => {
     const m = new Metrics();
     m.flush(0.003);
     m.eventAge(0.05);
     m.ingest('price');
     m.ingest('price', 4);
     m.ingest('order');
-    m.writeBehind({ batchSize: 40, seconds: 0.01, ok: true });
-    m.writeBehind({ batchSize: 40, seconds: 0.01, ok: false });
     m.command('ok', 0.02);
     m.command('INVALID_TRANSITION', 0.001);
     m.delta(900);
@@ -80,8 +77,6 @@ describe('Metrics', () => {
     expect(sample(text, 'apeiron_event_age_at_flush_seconds_count')).toBe(1);
     expect(sample(text, 'apeiron_ingest_events_total{type="price"}')).toBe(5);
     expect(sample(text, 'apeiron_ingest_events_total{type="order"}')).toBe(1);
-    expect(sample(text, 'apeiron_write_behind_batch_size_sum')).toBe(40);
-    expect(sample(text, 'apeiron_write_behind_failures_total')).toBe(1);
     expect(sample(text, 'apeiron_command_duration_seconds_count{outcome="ok"}')).toBe(1);
     expect(sample(text, 'apeiron_command_duration_seconds_count{outcome="INVALID_TRANSITION"}')).toBe(1);
     expect(sample(text, 'apeiron_delta_bytes_count')).toBe(1);
@@ -117,7 +112,6 @@ describe('Metrics', () => {
     expect(sample(text, 'apeiron_ws_clients{codec="json"}')).toBe(2);
     expect(sample(text, 'apeiron_ws_clients{codec="msgpack"}')).toBe(1);
     expect(sample(text, 'apeiron_live_rows')).toBe(500);
-    expect(sample(text, 'apeiron_write_behind_queue_depth')).toBe(9);
     expect(sample(text, 'apeiron_process_cpu_percent')).toBe(42.5);
     expect(sample(text, 'apeiron_event_loop_lag_seconds{quantile="0.99"}')).toBeCloseTo(0.02, 6);
     expect(sample(text, 'apeiron_view_cache_views')).toBe(3);

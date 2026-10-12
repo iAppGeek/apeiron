@@ -19,8 +19,6 @@ export type ServerOptions = {
   bus?: Bus;
   /** Flush tick length (default 50). */
   flushMs?: number;
-  /** Write-behind interval (default 500). */
-  writeBehindMs?: number;
   /** Most blocks tracked per client for live deltas (default 100). */
   maxTrackedBlocks?: number;
   backpressure?: BackpressureOptions;
@@ -141,7 +139,6 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
             clientsByCodec: runtime.clientsByCodec(),
             liveRows: runtime.live.liveRows,
             pendingEvents: runtime.live.pendingEvents,
-            dirtyOrders: runtime.live.dirtyCount,
             commandsPending: runtime.commands.size,
             cpuPercent: runtime.system.latest.cpu,
             lagMs: runtime.system.lastWindowLag,
@@ -157,7 +154,6 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
       lag: runtime.system.totalLag(),
       server: runtime.system.latest,
       flush: { ...runtime.flushStats, avgMs: runtime.flushStats.flushes === 0 ? 0 : runtime.flushStats.totalMs / runtime.flushStats.flushes },
-      writeBehind: runtime.writeBehind.stats,
       live: runtime.live.stats,
       clients: runtime.clientCount,
     };
@@ -213,11 +209,9 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
         runtime = new LiveRuntime({
           store,
           engine,
-          repo: options.repo,
           bus: options.bus,
           log: app.log,
           flushMs: options.flushMs ?? 50,
-          writeBehindMs: options.writeBehindMs ?? 500,
           maxTrackedBlocks: options.maxTrackedBlocks ?? 100,
           backpressure: options.backpressure,
           summaryIntervalMs: options.summaryIntervalMs,
