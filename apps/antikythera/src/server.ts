@@ -1,22 +1,20 @@
 import websocket from '@fastify/websocket';
 import type { Bus } from '@apeiron/logos';
-import type { OrderRepository } from '@apeiron/mnemosyne';
 import Fastify, { LogController, type FastifyInstance } from 'fastify';
-import { LiveRuntime } from './live/runtime.js';
+import { LiveRuntime, type Stage } from './live/runtime.js';
 import type { BackpressureOptions } from './live/backpressure.js';
 import { QueryEngine } from './query/engine.js';
 import { LagMonitor, withLagReport } from './lag.js';
 import { Metrics } from './metrics.js';
-import { loadStore, type LoadReport } from './loader.js';
+import { loadSnapshot, type LoadReport } from './snapshot.js';
 import { memorySnapshot } from './memory.js';
 import { ClientSession } from './session.js';
 import { ColumnarStore } from './store/columnar-store.js';
 import { attachWebSocket, DEFAULT_HEARTBEAT, type HeartbeatOptions } from './ws-transport.js';
 
 export type ServerOptions = {
-  repo: OrderRepository;
-  /** The message bus. Without one the server is read-only (no live updates, no control). */
-  bus?: Bus;
+  /** The message bus: the blotter's only source of data. */
+  bus: Bus;
   /** Flush tick length (default 50). */
   flushMs?: number;
   /** Most blocks tracked per client for live deltas (default 100). */
@@ -31,8 +29,15 @@ export type ServerOptions = {
   viewCacheMaxViews?: number;
   viewCacheMaxBytes?: number;
   maxBlockRows?: number;
-  /** Rows per batch when streaming the repository (default 200). */
-  loadBatchSize?: number;
+  /** Most time to wait at startup for a price for every pair (default 10 s). */
+  priceWaitMs?: number;
+  /** Caught up once a watch entry has at most this many pending behind it (default 100). */
+  catchupMaxPending?: number;
+  /** Called when the order-state watch ends and the process can no longer be kept current. */
+  onFatal?: (reason: string) => void;
+  /** Wait between looks at the projection marker, and before retrying an incomplete snapshot (tests shorten them). */
+  snapshotPollMs?: number;
+  snapshotRetryMs?: number;
   /** Largest frame a client may send, in bytes. */
   maxPayload?: number;
   /** A getRows that builds its view in at least this long gets its event-loop lag logged. */
@@ -47,6 +52,7 @@ export type ServerOptions = {
 
 export type HealthBody = {
   status: 'ok' | 'loading' | 'error';
+  stage: Stage;
   rows: number;
   loadMs: number;
   heapMb: number;
@@ -81,10 +87,15 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
   });
   await app.register(websocket, { options: { maxPayload: options.maxPayload ?? 1_048_576 } });
 
+  let loading = true;
   const store = new ColumnarStore({
     capacity: options.storeCapacity,
-    onAscendingBroken: (orderId) =>
-      app.log.warn({ orderId }, 'an appended orderId is not above the previous one; sorts lose the row-order tiebreak (views will rebuild)'),
+    // The snapshot reads orders in the order they last changed and sorts them at the end; only later breaks matter.
+    onAscendingBroken: (orderId) => {
+      if (!loading) {
+        app.log.warn({ orderId }, 'an appended orderId is not above the previous one; sorts lose the row-order tiebreak (views will rebuild)');
+      }
+    },
   });
   const lag = new LagMonitor();
   lag.start();
@@ -104,7 +115,8 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
   const health = (): HealthBody => {
     const mem = memorySnapshot();
     return {
-      status: failed ? 'error' : engine === null ? 'loading' : 'ok',
+      status: failed ? 'error' : runtime?.stage === 'ready' ? 'ok' : 'loading',
+      stage: runtime?.stage ?? 'snapshot',
       rows: store.size,
       loadMs: report?.loadMs ?? (loadStarted === 0 ? 0 : Math.round(performance.now() - loadStarted)),
       heapMb: mem.heapMb,
@@ -129,7 +141,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
 
   metrics.bind({
     storeRows: () => store.size,
-    loaded: () => engine !== null,
+    loaded: () => runtime?.stage === 'ready',
     cache: () => engine?.stats().cache ?? null,
     live: () =>
       runtime === null
@@ -155,6 +167,10 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
       server: runtime.system.latest,
       flush: { ...runtime.flushStats, avgMs: runtime.flushStats.flushes === 0 ? 0 : runtime.flushStats.totalMs / runtime.flushStats.flushes },
       live: runtime.live.stats,
+      stage: runtime.stage,
+      appliedRev: runtime.live.appliedRevision,
+      records: { applied: runtime.live.stats.recordsApplied, ignored: runtime.ignoredCounts },
+      lastTickTs: runtime.live.lastTickTs(),
       clients: runtime.clientCount,
     };
     if (reset) {
@@ -178,7 +194,8 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
       socket,
       (connection) =>
         new ClientSession(connection, {
-          engine: () => engine,
+          // No client is served rows before the blotter is ready: loaded, caught up and priced.
+          engine: () => (runtime?.stage === 'ready' ? engine : null),
           live: () => runtime,
           log: app.log,
           metrics,
@@ -194,37 +211,54 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
   const load = async (): Promise<LoadReport> => {
     loadStarted = performance.now();
     try {
-      const result = await loadStore(options.repo, store, {
+      const snapshot = await loadSnapshot({
+        bus: options.bus,
+        store,
         monitor: lag,
-        batchSize: options.loadBatchSize,
         log: (message, fields) => app.log.info(fields, message),
+        ...(options.snapshotPollMs === undefined ? {} : { markerPollMs: options.snapshotPollMs }),
+        ...(options.snapshotRetryMs === undefined ? {} : { retryMs: options.snapshotRetryMs }),
       });
+      loading = false;
+      const result = snapshot.report;
+      metrics.startup('snapshot', result.loadMs / 1000);
       engine = new QueryEngine(store, {
         maxViews: options.viewCacheMaxViews ?? 64,
         maxBytes: options.viewCacheMaxBytes ?? 384 * 1024 * 1024,
         maxBlockRows: options.maxBlockRows ?? 5_000,
       });
       report = result;
-      if (options.bus !== undefined) {
-        runtime = new LiveRuntime({
-          store,
-          engine,
-          bus: options.bus,
-          log: app.log,
-          flushMs: options.flushMs ?? 50,
-          maxTrackedBlocks: options.maxTrackedBlocks ?? 100,
-          backpressure: options.backpressure,
-          summaryIntervalMs: options.summaryIntervalMs,
-          commandTimeoutMs: options.commandTimeoutMs,
-          metrics,
-          flushBudgetMs: options.flushBudgetMs,
-        });
-        runtime.start();
-      }
+      let becameReady: () => void = () => undefined;
+      const ready = new Promise<void>((resolve) => {
+        becameReady = resolve;
+      });
+      runtime = new LiveRuntime({
+        store,
+        engine,
+        bus: options.bus,
+        log: app.log,
+        flushMs: options.flushMs ?? 50,
+        maxTrackedBlocks: options.maxTrackedBlocks ?? 100,
+        backpressure: options.backpressure,
+        summaryIntervalMs: options.summaryIntervalMs,
+        commandTimeoutMs: options.commandTimeoutMs,
+        metrics,
+        flushBudgetMs: options.flushBudgetMs,
+        snapshot: snapshot,
+        priceWaitMs: options.priceWaitMs,
+        catchupMaxPending: options.catchupMaxPending,
+        onFatal: options.onFatal,
+        onStage: (finished) => {
+          if (finished === 'prices') becameReady();
+        },
+      });
+      runtime.live.noteRevision(snapshot.revision);
+      runtime.start();
       app.log.info(
         {
           rows: result.rows,
           loadMs: result.loadMs,
+          sortMs: result.sortMs,
           rankMs: result.rankMs,
           streamedRssMb: result.streamedRssMb,
           peakRssMb: result.peakRssMb,
@@ -238,6 +272,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
         },
         'store loaded',
       );
+      await ready;
       return result;
     } catch (error) {
       failed = true;

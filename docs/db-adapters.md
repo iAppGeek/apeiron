@@ -36,7 +36,7 @@ type OrderRepository = {
 
 | Method | Used by | Contract |
 |---|---|---|
-| `loadAll(batchSize = 10_000)` | antikythera at startup | **Stream** every order in ascending `orderId`, in batches of at most `batchSize` (the last may be shorter). Must not materialise the full set: the server loads 1M rows into a columnar store with a heap budget of under 800 MB. Early termination (`break`) must release the cursor. Ascending order matters: the store assumes ids ascend so radix sorts keep a free tiebreak |
+| `loadAll(batchSize = 10_000)` | the order service when it rebuilds the projection | **Stream** every order in ascending `orderId`, in batches of at most `batchSize` (the last may be shorter). Must not materialise the full set: the server loads 1M rows into a columnar store with a heap budget of under 800 MB. Early termination (`break`) must release the cursor. Ascending order matters: the store assumes ids ascend so radix sorts keep a free tiebreak |
 | `upsertMany(records)` | gaia (seed), the order service | Insert or **fully replace** by `orderId`, with `v` and `execSeq`; idempotent; unordered batch writes are fine; an empty list is a no-op. Every one of the 50 fields is stored, nulls included |
 | `count()` | gaia, tests | exact number of stored orders |
 | `isSeeded()` | gaia | true when at least one order exists. Must be cheap (no full count) |
@@ -85,16 +85,16 @@ The Mongo spec uses `mongodb-memory-server`; a database without an in-memory mod
 other's rows. Run it with `pnpm --filter @apeiron/mnemosyne test`. An adapter is acceptable when the suite passes
 unchanged; do not weaken the suite to fit a database.
 
-Beyond the suite, also check a 1M-row load: `loadAll` should hold memory flat (watch RSS), and the full load through
-antikythera should stay close to the Mongo figure (about 10 s on a laptop).
+Beyond the suite, also check a 1M-row load: `loadAll` should hold memory flat (watch RSS); the order service streams it into the
+`ORDER_STATE` bucket at startup (about 50 s for 1.7M rows).
 
 ## Wiring an adapter in
 
-The adapter is constructed in each app's `src/index.ts` (`antikythera`, `gaia`, `hermes`), which today call
-`MongoOrderRepository.connect` directly, and antikythera's `DB_ADAPTER` setting only accepts `mongo`. To add one:
-export it from `packages/mnemosyne/src/index.ts`, add the value to the `DB_ADAPTER` enum in
-`apps/antikythera/src/config.ts`, and replace the direct call with a small factory `createRepository(config)` shared by
-the three apps. The engine, the protocol and the web app do not change.
+The adapter is constructed in each app's `src/index.ts` (`themis`, `gaia`, and `hermes` until phase 1.5b), which today call
+`MongoOrderRepository.connect` directly. The blotter (`antikythera`) no longer uses a repository at all: it reads the
+order service's `ORDER_STATE` bucket. To add an adapter, export it from `packages/mnemosyne/src/index.ts` and replace the
+direct call with a small factory `createRepository(config)` shared by those apps. The engine, the protocol and the web app
+do not change.
 
 ## Oracle sketch
 

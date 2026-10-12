@@ -1,10 +1,11 @@
 import {
+  OVERLAY_FIELDS,
   derivePriceFields,
   isOpen,
   type CurrencyPair,
   type Order,
-  type OrderEvent,
   type OrderField,
+  type OrderStateRecord,
   type OrderStatus,
   type PriceDerivationInput,
   type PriceTick,
@@ -16,14 +17,18 @@ import { StatusCounters } from './counters.js';
 export type LiveStoreLogger = { warn(obj: Record<string, unknown>, msg: string): void };
 
 export type LiveStoreStats = {
-  eventsApplied: number;
+  /** Records that changed or created a row. */
+  recordsApplied: number;
+  /** Records at or below the version a row already holds (a replay, or a rebuild of the projection). */
+  recordsStale: number;
   ticksApplied: number;
   priceRecomputes: number;
-  unknownOrders: number;
   rowsAppended: number;
 };
 
-type Queued = { event: OrderEvent; ack: () => void };
+type Queued = { record: OrderStateRecord; revision: number };
+
+const OVERLAY_SET: ReadonlySet<string> = new Set(OVERLAY_FIELDS);
 
 const rowStatus = (store: ColumnarStore, row: number): OrderStatus => {
   const c = store.enumColumn('status');
@@ -34,20 +39,22 @@ const rowStatus = (store: ColumnarStore, row: number): OrderStatus => {
  * Applies the live feed to the store. Events and ticks are queued as they arrive and applied together at
  * flush time, so the store, the views and the clients all move in one synchronous step per tick:
  *
- * - order events (absolute values) are upserted in place, feeding the tick's ChangeSet;
+ * - order records (the full latest state of an order, from the order service) are written in place when their
+ *   version is newer than the row's, feeding the tick's ChangeSet;
  * - the price join keeps `liveByPair` as statuses change and, for each pair that ticked, recomputes the
  *   price-derived fields of its LIVE and PAUSED rows with the shared logos function (price-only changes are
  *   never persisted);
- * - the bus is acknowledged once a flush has applied the events (the order service owns persistence).
+ * - a record never regresses a row: it is applied only when its `v` is above the one the row holds.
  */
 export class LiveStore {
   readonly counters = new StatusCounters();
-  readonly stats: LiveStoreStats = { eventsApplied: 0, ticksApplied: 0, priceRecomputes: 0, unknownOrders: 0, rowsAppended: 0 };
+  readonly stats: LiveStoreStats = { recordsApplied: 0, recordsStale: 0, ticksApplied: 0, priceRecomputes: 0, rowsAppended: 0 };
   private queue: Queued[] = [];
   private readonly latestTicks = new Map<CurrencyPair, PriceTick>();
   private pendingTicks = new Set<CurrencyPair>();
   private readonly liveByPair = new Map<CurrencyPair, Set<number>>();
   private flushAgeMs: number | null = null;
+  private revision = 0;
 
   constructor(
     private readonly store: ColumnarStore,
@@ -78,6 +85,26 @@ export class LiveStore {
     return this.queue.length;
   }
 
+  /** The highest key-value revision applied to the store (records from the initial load count as applied). */
+  get appliedRevision(): number {
+    return this.revision;
+  }
+
+  /** Records the highest revision the initial load saw. */
+  noteRevision(revision: number): void {
+    this.revision = Math.max(this.revision, revision);
+  }
+
+  /** The latest tick time per pair, for diagnostics. */
+  lastTickTs(): Record<string, number> {
+    return Object.fromEntries([...this.latestTicks].map(([pair, tick]) => [pair, tick.ts]));
+  }
+
+  /** How many pairs have a price. */
+  get pairsWithPrice(): number {
+    return this.latestTicks.size;
+  }
+
   /** Age in ms of the oldest event or tick the last `flush` applied, or null when it applied none. */
   get lastFlushAgeMs(): number | null {
     return this.flushAgeMs;
@@ -89,12 +116,15 @@ export class LiveStore {
     return n;
   }
 
-  /** `ack` is called once a flush has applied the event to the store. */
-  enqueueEvent(event: OrderEvent, ack: () => void): void {
-    this.queue.push({ event, ack });
+  /** Queues a record for the next flush; `revision` is its key-value revision. */
+  enqueueRecord(record: OrderStateRecord, revision: number): void {
+    this.queue.push({ record, revision });
   }
 
+  /** A tick older than the one already held for its pair (a replayed last value) is ignored. */
   enqueueTick(tick: PriceTick): void {
+    const held = this.latestTicks.get(tick.pair);
+    if (held !== undefined && held.ts > tick.ts) return;
     this.latestTicks.set(tick.pair, tick);
     this.pendingTicks.add(tick.pair);
   }
@@ -106,51 +136,57 @@ export class LiveStore {
     this.queue = [];
     const eventRows = new Set<number>();
     let oldest = Infinity;
-    for (const { event } of queue) {
-      oldest = Math.min(oldest, event.ts);
-      this.applyEvent(event, cs, eventRows);
+    for (const { record, revision } of queue) {
+      oldest = Math.min(oldest, record.srcTs);
+      this.applyRecord(record, cs, eventRows);
+      this.revision = Math.max(this.revision, revision);
     }
     for (const pair of this.pendingTicks) oldest = Math.min(oldest, (this.latestTicks.get(pair) as PriceTick).ts);
     this.flushAgeMs = oldest === Infinity ? null : Math.max(0, now - oldest);
     this.applyPrices(now, cs, eventRows);
-    // The consumer acknowledges everything up to the last message it is given.
-    queue[queue.length - 1]?.ack();
     return cs;
   }
 
   // ------------------------------------------------------------------ events
 
-  private applyEvent(event: OrderEvent, cs: ChangeSet, eventRows: Set<number>): void {
-    if (event.type === 'REJECT') return;
-    this.stats.eventsApplied++;
-    if (event.type === 'NEW') {
-      const result = this.store.upsert(event.order);
-      if (result.kind === 'append') {
-        cs.noteNew(result.row, event.ts);
-        this.stats.rowsAppended++;
-        this.countRow(result.row, 1);
-        this.syncLive(result.row, undefined);
-      } else {
-        this.afterUpdate(result.row, result.changed, result.prev, cs, event.ts);
-      }
-      eventRows.add(result.row);
-      return;
-    }
-    const row = this.store.rowIndexOf(event.order.orderId);
+  private applyRecord(record: OrderStateRecord, cs: ChangeSet, eventRows: Set<number>): void {
+    const { order } = record;
+    const row = this.store.rowIndexOf(order.orderId);
     if (row === undefined) {
-      this.stats.unknownOrders++;
-      if (this.stats.unknownOrders === 1 || this.stats.unknownOrders % 1000 === 0) {
-        this.log.warn({ orderId: event.order.orderId, unknown: this.stats.unknownOrders }, 'event for an order not in the store');
-      }
+      this.store.appendBatch([order], [record.v]);
+      const appended = this.store.size - 1;
+      cs.noteNew(appended, record.srcTs);
+      this.stats.recordsApplied++;
+      this.stats.rowsAppended++;
+      this.countRow(appended, 1);
+      this.syncLive(appended, undefined);
+      eventRows.add(appended);
       return;
     }
-    const { changed, prev } = this.store.updateRow(row, this.monotonic(row, event.order));
-    this.afterUpdate(row, changed, prev, cs, event.ts);
+    if (record.v <= this.store.versionAt(row)) {
+      this.stats.recordsStale++;
+      return;
+    }
+    const { changed, prev } = this.store.updateRow(row, this.monotonic(row, this.patchOf(order)));
+    this.store.setVersion(row, record.v);
+    this.stats.recordsApplied++;
+    this.afterUpdate(row, changed, prev, cs, record.srcTs);
     eventRows.add(row);
   }
 
   /**
-   * `lastUpdateTime` never moves backwards. Order events carry their producer's clock and repricing uses the
+   * What to write over a row. An open order whose pair has a price keeps its overlay fields (the repricing that
+   * follows rewrites them from the tick), so a record carrying an older market snapshot never flickers them back.
+   */
+  private patchOf(order: Order): Partial<Order> {
+    if (!isOpen(order.status) || !this.latestTicks.has(order.currencyPair)) return order;
+    const patch: Record<string, unknown> = {};
+    for (const key of Object.keys(order)) if (!OVERLAY_SET.has(key)) patch[key] = order[key as keyof Order];
+    return patch as Partial<Order>;
+  }
+
+  /**
+   * `lastUpdateTime` never moves backwards. Order records carry their producer's clock and repricing uses the
    * server's, and two clocks disagree by a few milliseconds; without this a row's update time could step back and
    * a client would see a value older than one it had already shown.
    */

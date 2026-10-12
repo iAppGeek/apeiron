@@ -1,8 +1,21 @@
-import { MemoryBus, applyCommand, getCodec, parseOrderCommand, jsonCodec, type ClientMsg, type CodecName, type Order, type ServerMsg } from '@apeiron/logos';
-import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
+import {
+  BUCKETS,
+  CURRENCY_PAIRS,
+  MemoryBus,
+  PROJECTION_KEY,
+  applyCommand,
+  getCodec,
+  parseOrderCommand,
+  jsonCodec,
+  type ClientMsg,
+  type CodecName,
+  type Order,
+  type ServerMsg,
+} from '@apeiron/logos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket, { type RawData } from 'ws';
-import { buildServer, type BlotterServer } from './server.js';
+import { buildServer, type BlotterServer, type ServerOptions } from './server.js';
+import { ensureBuckets, publishRecord, seedBucket } from './testing/bucket.js';
 import { makeOrders } from './testing/orders.js';
 
 const ROWS = makeOrders(
@@ -31,16 +44,26 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function start(bus: MemoryBus, repo = new InMemoryOrderRepository()): Promise<{ server: BlotterServer; wsUrl: string; base: string }> {
-  if (!(await repo.isSeeded())) await repo.upsertMany(ROWS.map(toStoredOrder));
+const FAST = { priceWaitMs: 20, snapshotPollMs: 5, snapshotRetryMs: 20 } as const;
+
+/** Seeds the bucket like the order service and gives every pair a price, unless the bus already has a projection. */
+async function prepare(bus: MemoryBus): Promise<void> {
+  await ensureBuckets(bus);
+  if ((await bus.kv(BUCKETS.orderStateMeta).get(PROJECTION_KEY)) === null) await seedBucket(bus, ROWS);
+  await Promise.all(CURRENCY_PAIRS.map((pair) => bus.publish(`prices.${pair}`, { pair, bid: 1.08, ask: 1.0802, ts: 1 })));
+}
+
+async function start(bus: MemoryBus, options: Partial<ServerOptions> = {}): Promise<{ server: BlotterServer; wsUrl: string; base: string }> {
+  await prepare(bus);
   const s = await buildServer({
-    repo,
     bus,
     logLevel: 'silent',
     storeCapacity: 64,
     flushMs: 20,
     maxTrackedBlocks: 20,
     summaryIntervalMs: 50,
+    ...FAST,
+    ...options,
   });
   server = s;
   await s.app.listen({ port: 0, host: '127.0.0.1' });
@@ -100,34 +123,26 @@ function connect(url: string, codec: CodecName = 'json'): Promise<Client> {
 const rowsReq = { startRow: 0, endRow: 50, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [], filterModel: null };
 
 describe('live server over a real socket', () => {
-  it('consumes the stream only after the store has loaded', async () => {
+  it('does not subscribe to the bus until the snapshot is loaded, and reports ok only when it is ready', async () => {
     const bus = new MemoryBus();
-    const consume = vi.spyOn(bus, 'consume');
-    const repo = new InMemoryOrderRepository();
-    await repo.upsertMany(ROWS.map(toStoredOrder));
-    const original = repo.loadAll.bind(repo);
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
-    repo.loadAll = async function* (size?: number) {
-      await gate;
-      yield* original(size);
-    };
-    const { server: s, base } = await start(bus, repo);
+    const subscribe = vi.spyOn(bus, 'subscribe');
+    const s = await buildServer({ bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, ...FAST });
+    server = s;
+    await s.app.listen({ port: 0, host: '127.0.0.1' });
+    const addr = s.app.server.address();
+    const base = `http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : 0}`;
     const loading = s.load();
     await new Promise((r) => setTimeout(r, 30));
-    expect(consume).not.toHaveBeenCalled();
+    expect(subscribe).not.toHaveBeenCalled();
     expect((await fetch(`${base}/health`)).status).toBe(503);
-    release();
+    await prepare(bus);
     await loading;
-    await vi.waitFor(() => expect(consume).toHaveBeenCalledTimes(1));
-    const health = (await (await fetch(`${base}/health`)).json()) as { live?: { attached: boolean } };
+    expect(subscribe.mock.calls.map((c) => c[0])).toContain('prices.*');
     await vi.waitFor(async () => {
-      const h = (await (await fetch(`${base}/health`)).json()) as { live?: { attached: boolean } };
+      const h = (await (await fetch(`${base}/health`)).json()) as { status: string; stage: string; live?: { attached: boolean } };
+      expect(h).toMatchObject({ status: 'ok', stage: 'ready' });
       expect(h.live?.attached).toBe(true);
     });
-    expect(health).toHaveProperty('status', 'ok');
   });
 
   it.each<CodecName>(['json', 'msgpack'])('delivers deltas, adds and summaries to a connected client (%s)', async (codec) => {
@@ -149,7 +164,7 @@ describe('live server over a real socket', () => {
     expect(Object.keys(priced ?? {})).toEqual(expect.arrayContaining(['orderId', 'marketMid', 'unrealisedPnlUsd', 'lastUpdateTime']));
 
     const fresh: Order = { ...(ROWS[0] as Order), orderId: 'T0001000', createdAt: 99_999, status: 'LIVE' };
-    await bus.publish('orders.events', { type: 'NEW', order: fresh, ts: 1 });
+    await publishRecord(bus, fresh);
     const add = await c.until((m) => m.t === 'delta' && m.adds.length > 0);
     expect(add).toMatchObject({ adds: [{ route: [], addIndex: 0, rows: [{ orderId: 'T0001000' }] }], rowCounts: [{ route: [], rowCount: 21 }] });
 
@@ -194,28 +209,15 @@ describe('live server over a real socket', () => {
     expect(body.clients).toBe(0);
     expect(body.lag).toHaveProperty('p99');
   });
-
-  it('works without a bus (read-only), refusing control', async () => {
-    const repo = new InMemoryOrderRepository();
-    await repo.upsertMany(ROWS.map(toStoredOrder));
-    const s = await buildServer({ repo, logLevel: 'silent', storeCapacity: 64 });
-    server = s;
-    await s.app.listen({ port: 0, host: '127.0.0.1' });
-    await s.load();
-    expect(s.runtime()).toBeNull();
-    const addr = s.app.server.address();
-    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
-    const c = await connect(`ws://127.0.0.1:${port}/ws`);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'ro' });
-    await c.until((m) => m.t === 'welcome');
-    c.send({ t: 'control', reqId: 1, preset: 'stress' });
-    await expect(c.until((m) => m.t === 'error')).resolves.toMatchObject({ code: 'NOT_IMPLEMENTED' });
-  });
 });
 
-/** Stands in for hermes: consumes `orders.commands`, applies them with the shared lifecycle and answers on `orders.events`. */
+/**
+ * Stands in for hermes and the order service: consumes `orders.commands`, applies them with the shared lifecycle,
+ * answers on `orders.events` and publishes the order's next record to the bucket.
+ */
 async function fakeHermes(bus: MemoryBus, held: Order[], options: { silent?: boolean } = {}): Promise<{ seen: string[] }> {
   const seen: string[] = [];
+  const versions = new Map<string, number>();
   await bus.consume({ stream: 'ORDERS', durable: 'hermes-commands', subject: 'orders.commands' }, (payload, _subject, ack) => {
     const parsed = parseOrderCommand(payload);
     if (!parsed.ok) return ack();
@@ -234,7 +236,10 @@ async function fakeHermes(bus: MemoryBus, held: Order[], options: { silent?: boo
       return;
     }
     Object.assign(order, result.changes);
+    const v = (versions.get(order.orderId) ?? 1) + 1;
+    versions.set(order.orderId, v);
     void bus.publish('orders.events', { type: 'UPDATE', order: { orderId: cmd.orderId, ...result.changes }, ts: Date.now(), commandId: cmd.commandId });
+    void publishRecord(bus, { ...order }, v);
   });
   return { seen };
 }
@@ -315,15 +320,9 @@ describe('command path over a real socket', () => {
   it('errors with INTERNAL when hermes never answers', async () => {
     const bus = new MemoryBus();
     await fakeHermes(bus, held(), { silent: true });
-    const repo = new InMemoryOrderRepository();
-    await repo.upsertMany(ROWS.map(toStoredOrder));
-    const s = await buildServer({ repo, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, commandTimeoutMs: 150 });
-    server = s;
-    await s.app.listen({ port: 0, host: '127.0.0.1' });
+    const { server: s, wsUrl } = await start(bus, { commandTimeoutMs: 150 });
     await s.load();
-    const addr = s.app.server.address();
-    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
-    const c = await connect(`ws://127.0.0.1:${port}/ws`);
+    const c = await connect(wsUrl);
     c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'slow' });
     await c.until((m) => m.t === 'welcome');
     c.send({ t: 'command', reqId: 1, orderId: 'T0000001', action: 'PAUSE' });

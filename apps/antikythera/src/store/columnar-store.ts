@@ -67,6 +67,8 @@ export class ColumnarStore {
   private readonly idToRow = new Map<string, number>();
   private count = 0;
   private cap: number;
+  /** The per-order version `v` of the record each row was last built from (0 for rows appended without one). */
+  private versions: Uint32Array;
   private ascendingIds = true;
   private layout = 0;
   private readonly rankStates = new Map<OrderField, RankState>();
@@ -76,6 +78,7 @@ export class ColumnarStore {
   constructor(options: StoreOptions = {}) {
     this.cap = Math.max(1, options.capacity ?? DEFAULT_STORE_CAPACITY);
     this.onAscendingBroken = options.onAscendingBroken;
+    this.versions = new Uint32Array(this.cap);
     this.columnList = COLUMNS.map((meta): Column => {
       switch (meta.type) {
         case 'enum':
@@ -196,8 +199,82 @@ export class ColumnarStore {
     return this.idToRow.get(orderId);
   }
 
-  /** Appends orders as new rows. Throws on a duplicate `orderId`. Never invalidates anything else. */
-  appendBatch(orders: readonly Order[]): void {
+  /** The version of the record a row was last built from. */
+  versionAt(row: number): number {
+    return this.versions[row] as number;
+  }
+
+  setVersion(row: number, version: number): void {
+    this.versions[row] = version;
+  }
+
+  /** Empties the store so a failed load can start again. Typed arrays keep their capacity. */
+  clear(): void {
+    this.count = 0;
+    this.idToRow.clear();
+    this.ascendingIds = true;
+    this.rankStates.clear();
+    this.grownDictionaries.clear();
+    this.versions.fill(0);
+    for (let i = 0; i < this.columnList.length; i++) {
+      const col = this.columnList[i] as Column;
+      if (col.kind === 'string') col.data.length = 0;
+      else if (col.kind === 'enum') {
+        col.dict = new Dictionary();
+        col.codes = newCodes(this.cap, false);
+      }
+    }
+    this.layout++;
+  }
+
+  /**
+   * Reorders every row into ascending `orderId` order: one permutation applied to every column and to the
+   * version array, then the id-to-row map is rebuilt. A load that reads a key-value bucket sees orders in the
+   * order they last changed, so it calls this once at the end. Invalidates string ranks and bumps
+   * {@link layoutVersion}, so call it before anything captures a column. Returns whether anything moved.
+   */
+  sortByOrderId(): boolean {
+    const n = this.count;
+    const ids = this.stringColumn('orderId');
+    let sorted = true;
+    for (let i = 1; i < n && sorted; i++) if (!((ids[i] as string) > (ids[i - 1] as string))) sorted = false;
+    if (sorted) {
+      this.ascendingIds = true;
+      return false;
+    }
+    const perm = new Int32Array(n);
+    for (let i = 0; i < n; i++) perm[i] = i;
+    perm.sort((a, b) => ((ids[a] as string) < (ids[b] as string) ? -1 : 1));
+    for (const col of this.columnList) {
+      if (col.kind === 'number') {
+        const tmp = col.data.slice(0, n);
+        for (let i = 0; i < n; i++) col.data[i] = tmp[perm[i] as number] as number;
+      } else if (col.kind === 'enum') {
+        const tmp = col.codes.slice(0, n);
+        for (let i = 0; i < n; i++) col.codes[i] = tmp[perm[i] as number] as number;
+      } else {
+        const tmp = col.data;
+        const out = new Array<string>(n);
+        for (let i = 0; i < n; i++) out[i] = tmp[perm[i] as number] as string;
+        col.data = out;
+      }
+    }
+    const tmpV = this.versions.slice(0, n);
+    for (let i = 0; i < n; i++) this.versions[i] = tmpV[perm[i] as number] as number;
+    const sortedIds = this.stringColumn('orderId');
+    this.idToRow.clear();
+    for (let i = 0; i < n; i++) this.idToRow.set(sortedIds[i] as string, i);
+    this.rankStates.clear();
+    this.ascendingIds = true;
+    this.layout++;
+    return true;
+  }
+
+  /**
+   * Appends orders as new rows, with the record version of each (default 0). Throws on a duplicate `orderId`.
+   * Never invalidates anything else.
+   */
+  appendBatch(orders: readonly Order[], versions?: ArrayLike<number>): void {
     if (orders.length === 0) return;
     this.ensureCapacity(this.count + orders.length);
     const base = this.count;
@@ -216,6 +293,7 @@ export class ColumnarStore {
       }
     }
     for (let i = 0; i < orders.length; i++) this.idToRow.set((orders[i] as Order).orderId, base + i);
+    for (let i = 0; i < orders.length; i++) this.versions[base + i] = versions === undefined ? 0 : (versions[i] as number);
     for (const col of this.columnList) {
       const field = col.field;
       if (col.kind === 'number') {
@@ -391,6 +469,9 @@ export class ColumnarStore {
         col.codes = grown;
       }
     }
+    const grownVersions = new Uint32Array(next);
+    grownVersions.set(this.versions.subarray(0, this.count));
+    this.versions = grownVersions;
     this.cap = next;
     this.layout++;
   }

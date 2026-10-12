@@ -1,5 +1,6 @@
 import { COLUMNS, sampleOrders, type Order } from '@apeiron/logos';
 import { describe, expect, it } from 'vitest';
+import { makeOrders } from '../testing/orders.js';
 import { ColumnarStore } from './columnar-store.js';
 
 const orders = sampleOrders(300);
@@ -324,5 +325,71 @@ describe('ColumnarStore', () => {
       const store = make();
       expect([...store.refreshStringRanks('clientOrderId')]).toEqual([]);
     });
+  });
+});
+
+describe('ColumnarStore versions, clear and sortByOrderId', () => {
+  const unordered = (): Order[] => {
+    const base = makeOrders([{}, {}, {}, {}, {}]);
+    return [base[3], base[0], base[4], base[2], base[1]].map((o, i) => ({ ...(o as Order), filledQty: i * 10, status: i % 2 === 0 ? 'LIVE' : 'FILLED', parentOrderId: `P${i}` }) as Order);
+  };
+
+  it('stores the version of each appended row, defaulting to 0, and grows with the store', () => {
+    const store = new ColumnarStore({ capacity: 2 });
+    const [a, b, c] = makeOrders([{}, {}, {}]) as [Order, Order, Order];
+    store.appendBatch([a], [7]);
+    store.appendBatch([b, c]);
+    expect([0, 1, 2].map((r) => store.versionAt(r))).toEqual([7, 0, 0]);
+    store.setVersion(1, 9);
+    expect(store.versionAt(1)).toBe(9);
+  });
+
+  it('sorts rows by orderId, keeping every column and the version of each order together', () => {
+    const store = new ColumnarStore({ capacity: 8 });
+    const rows = unordered();
+    store.appendBatch(rows, rows.map((_, i) => 100 + i));
+    expect(store.idsAscending).toBe(false);
+    const expected = new Map(rows.map((o, i) => [o.orderId, { order: o, v: 100 + i }]));
+    expect(store.sortByOrderId()).toBe(true);
+    expect(store.idsAscending).toBe(true);
+    const ids = [...Array(store.size).keys()].map((r) => store.orderAt(r).orderId);
+    expect(ids).toEqual([...ids].sort());
+    for (let r = 0; r < store.size; r++) {
+      const want = expected.get(ids[r] as string);
+      expect(store.orderAt(r)).toEqual(want?.order);
+      expect(store.versionAt(r)).toBe(want?.v);
+      expect(store.rowIndexOf(ids[r] as string)).toBe(r);
+    }
+  });
+
+  it('leaves an already ordered store alone', () => {
+    const store = new ColumnarStore({ capacity: 4 });
+    store.appendBatch(makeOrders([{}, {}, {}]), [1, 2, 3]);
+    expect(store.sortByOrderId()).toBe(false);
+    expect(store.versionAt(2)).toBe(3);
+  });
+
+  it('invalidates string ranks and bumps the layout version when it reorders', () => {
+    const store = new ColumnarStore({ capacity: 8 });
+    store.appendBatch(unordered());
+    store.stringRank('parentOrderId');
+    const layout = store.layoutVersion;
+    store.sortByOrderId();
+    expect(store.stringRankState('parentOrderId')).toBeNull();
+    expect(store.layoutVersion).toBeGreaterThan(layout);
+    expect(store.stringRank('parentOrderId')).toHaveLength(store.size);
+  });
+
+  it('clear empties the store so it can be loaded again, including a different set of enum values', () => {
+    const store = new ColumnarStore({ capacity: 4 });
+    store.appendBatch(makeOrders([{ status: 'LIVE' }, { status: 'FILLED' }]), [5, 6]);
+    store.clear();
+    expect(store.size).toBe(0);
+    expect(store.rowIndexOf('T0000001')).toBeUndefined();
+    expect(store.idsAscending).toBe(true);
+    const fresh = makeOrders([{ status: 'CANCELLED' }, { status: 'PAUSED' }, { status: 'LIVE' }]);
+    store.appendBatch(fresh, [1, 2, 3]);
+    expect([0, 1, 2].map((r) => store.orderAt(r).status)).toEqual(['CANCELLED', 'PAUSED', 'LIVE']);
+    expect(store.versionAt(2)).toBe(3);
   });
 });

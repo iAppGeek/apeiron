@@ -1,13 +1,10 @@
 import { NatsBus } from '@apeiron/iris';
-import { MongoOrderRepository } from '@apeiron/mnemosyne';
 import { loadConfig } from './config.js';
 import { buildServer } from './server.js';
 
 const config = loadConfig(process.env);
-const repo = await MongoOrderRepository.connect({ url: config.mongoUrl, db: config.mongoDb });
-const bus = config.natsUrl === undefined ? undefined : await NatsBus.connect({ url: config.natsUrl, name: 'antikythera' });
+const bus = await NatsBus.connect({ url: config.natsUrl, name: 'antikythera' });
 const server = await buildServer({
-  repo,
   bus,
   flushMs: config.flushMs,
   maxTrackedBlocks: config.maxTrackedBlocks,
@@ -16,15 +13,17 @@ const server = await buildServer({
   viewCacheMaxViews: config.viewCacheMaxViews,
   viewCacheMaxBytes: config.viewCacheMaxBytes,
   maxBlockRows: config.maxBlockRows,
-  loadBatchSize: config.loadBatchSize,
   flushBudgetMs: config.flushBudgetMs,
+  priceWaitMs: config.priceWaitMs,
+  catchupMaxPending: config.catchupMaxPending,
   heartbeat: { intervalMs: Math.max(250, Math.floor(config.heartbeatTimeoutMs / 3)), timeoutMs: config.heartbeatTimeoutMs },
+  // The store can no longer be kept current: exit so the container restarts and loads a fresh snapshot.
+  onFatal: () => process.exit(1),
 });
 
 const shutdown = async (): Promise<void> => {
   await server.app.close();
-  await bus?.close();
-  await repo.close();
+  await bus.close();
   process.exit(0);
 };
 process.on('SIGTERM', () => void shutdown());

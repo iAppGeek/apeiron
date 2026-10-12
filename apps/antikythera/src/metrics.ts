@@ -5,6 +5,7 @@ import type { ViewCacheStats } from './query/view-cache.js';
 export type Direction = 'in' | 'out';
 export type BackpressureEvent = 'soft_conflate' | 'slow_consumer';
 export type IngestType = 'price' | 'order' | 'command';
+export type IgnoredReason = 'stale' | 'delete' | 'invalid';
 
 /** What a client session reports. Every label has a small fixed set of values: never a client or order id. */
 export type SessionMetrics = {
@@ -23,6 +24,10 @@ export type RuntimeMetrics = {
   eventAge(seconds: number): void;
   ingest(type: IngestType, count?: number): void;
   command(outcome: string, seconds: number): void;
+  /** Records the order service published that a flush applied, and those it ignored. */
+  records(info: { applied: number; ignored: Partial<Record<IgnoredReason, number>> }): void;
+  /** How long a startup stage took. */
+  startup(stage: string, seconds: number): void;
   /** What a flush did with the cached views. */
   views(stats: { patched: number; deferred: number; unsubscribed: number; pendingRebuild: number; stale: number }): void;
   /** A deferred view rebuild ran. */
@@ -69,6 +74,9 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
   private readonly flushSeconds: Histogram;
   private readonly eventAgeSeconds: Histogram;
   private readonly ingestEvents: Counter;
+  private readonly recordsApplied: Counter;
+  private readonly recordsIgnored: Counter;
+  private readonly startupSeconds: Gauge;
   private readonly commandSeconds: Histogram;
   private readonly viewOutcomes: Counter;
   private readonly rebuildSeconds: Histogram;
@@ -127,6 +135,14 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
       labelNames: ['type'],
       registers,
     });
+    this.recordsApplied = new Counter({ name: 'apeiron_records_applied_total', help: 'Order records applied to the store.', registers });
+    this.recordsIgnored = new Counter({
+      name: 'apeiron_records_ignored_total',
+      help: 'Order records not applied: stale (version not above the row), delete (a delete marker) or invalid.',
+      labelNames: ['reason'],
+      registers,
+    });
+    this.startupSeconds = new Gauge({ name: 'apeiron_startup_seconds', help: 'Time each startup stage took.', labelNames: ['stage'], registers });
     this.commandSeconds = new Histogram({
       name: 'apeiron_command_duration_seconds',
       help: 'Command round trip, from the client request to ack or error. outcome is ok or the error code.',
@@ -203,6 +219,15 @@ export class Metrics implements SessionMetrics, RuntimeMetrics {
 
   ingest(type: IngestType, count = 1): void {
     this.ingestEvents.labels(type).inc(count);
+  }
+
+  records(info: { applied: number; ignored: Partial<Record<IgnoredReason, number>> }): void {
+    if (info.applied > 0) this.recordsApplied.inc(info.applied);
+    for (const [reason, n] of Object.entries(info.ignored)) if (n > 0) this.recordsIgnored.labels(reason).inc(n);
+  }
+
+  startup(stage: string, seconds: number): void {
+    this.startupSeconds.labels(stage).set(seconds);
   }
 
   command(outcome: string, seconds: number): void {

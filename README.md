@@ -81,7 +81,7 @@ messages to clients, while `themis` stores the lifecycle changes in Mongo and pu
 or live with a `control` message (it is published on `control.load`). Verify a running stack:
 
 ```bash
-pnpm --filter @apeiron/antikythera exec tsx src/testing/live-report.ts --scenario default --seconds 15   # also: grouped, stress, writebehind, consistency
+pnpm --filter @apeiron/antikythera exec tsx src/testing/live-report.ts --scenario default --seconds 15   # also: grouped, stress, persistence, consistency
 curl localhost:4000/debug/lag                                                                           # flush and lag figures
 ```
 

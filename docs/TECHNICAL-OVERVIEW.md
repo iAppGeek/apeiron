@@ -137,6 +137,7 @@ flowchart TB
   subgraph core["profile: core"]
     pharos["pharos (nginx)<br/>:8080"]
     antikythera["antikythera<br/>:4000 /ws /health /metrics /debug/lag<br/>mem_limit 3g"]
+    themis["themis<br/>(health/metrics :4200, internal)"]
     hermes["hermes<br/>(health/metrics :4100, internal)"]
     nats["nats:2.15-alpine<br/>:4222 client, :8222 monitor"]
     mongo["mongo:9.0<br/>:27017<br/>--wiredTigerCacheSizeGB MONGO_CACHE_GB"]
@@ -157,10 +158,11 @@ flowchart TB
   end
   pharos --> antikythera
   pharose2e --> toxiproxy --> antikythera
-  antikythera --> nats & mongo
+  antikythera --> nats
+  themis --> nats & mongo
   hermes --> nats & mongo
   gaia --> mongo
-  prometheus --> antikythera & hermes
+  prometheus --> antikythera & themis & hermes
   grafana --> prometheus
   talos --> antikythera
 ```
@@ -263,10 +265,15 @@ Measured at 1M rows ([`CP-2.md`](checkpoints/CP-2.md), "Store memory layout"): t
 front (`STORE_CAPACITY`, 1.5M; grows 1.5×), so arrays don't reallocate while serving. Row objects are materialised only
 for blocks being sent (`rowAt`).
 
-**Loading** ([`loader.ts`](../apps/antikythera/src/loader.ts)) streams `repo.loadAll()` in batches of
-`LOAD_BATCH_SIZE=200` (CP-2 F4b: dropping from 10,000 cut peak RSS from 1,808 MB to 876 MB and load time from 15.8 s to
-9.5 s), yields between batches, builds string ranks, and reports load time and RSS. The server listens first, so
-`/health` answers (503) during the load.
+**Loading** ([`snapshot.ts`](../apps/antikythera/src/snapshot.ts)). Since PLAN1 phase 1.3a the blotter has no database:
+it waits for the `ORDER_STATE_META` `projection` marker to be `ready`, then watches the `ORDER_STATE` bucket and decodes
+each initial value straight into the store in batches of 2,000 (no `Order` objects are kept). The initial phase ends at
+the entry with `delta === 0`. A bucket that is empty, or that delivers fewer orders than the marker counted, makes it clear
+the store and start again, so a half-built projection never serves a client. The bucket delivers orders in the order they
+last changed, so the load ends with `store.sortByOrderId()` (one permutation of every column and of the per-row version
+array `v`) and the string ranks. Measured in the compose stack at 1.7M rows: 11.8 s end to end (sort 0.5 s, ranks 1.2 s),
+peak RSS 2.0 GB. The server listens first, so `/health` answers 503 with the current `stage` during the load, and 200 only
+at `ready`: loaded, caught up, and holding a price for every pair.
 
 ### 4.2 Query engine
 

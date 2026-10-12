@@ -1,13 +1,12 @@
-import { MemoryBus, type Order, type OrderEvent, type PriceTick } from '@apeiron/logos';
-import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
+import { CURRENCY_PAIRS, MemoryBus, BUCKETS, jsonCodec, type Order, type PriceTick, type ServerMsg } from '@apeiron/logos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryEngine, type EngineOptions } from '../query/engine.js';
 import { ClientSession } from '../session.js';
 import { ColumnarStore } from '../store/columnar-store.js';
+import { ensureBuckets, publishRecord } from '../testing/bucket.js';
 import { makeOrders } from '../testing/orders.js';
 import type { Connection, Frame } from '../transport.js';
-import { LiveRuntime } from './runtime.js';
-import { jsonCodec, type ServerMsg } from '@apeiron/logos';
+import { LiveRuntime, type Stage, type WatchHandoff } from './runtime.js';
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -27,21 +26,37 @@ const LIVE: Partial<Order> = {
 
 type Rig = {
   bus: MemoryBus;
-  repo: InMemoryOrderRepository;
   store: ColumnarStore;
   engine: QueryEngine;
   runtime: LiveRuntime;
   orders: Order[];
+  handoff: WatchHandoff;
+  stages: Stage[];
+  onFatal: ReturnType<typeof vi.fn>;
+  /** Publishes the order service's next record for the order at `index`: the stored order with `patch`, one version up. */
+  publish(index: number, patch: Partial<Order>): Promise<void>;
 };
 
-async function rig(options: { bus?: MemoryBus; repo?: InMemoryOrderRepository; rows?: Partial<Order>[]; engine?: Partial<EngineOptions>; flushBudgetMs?: number } = {}): Promise<Rig> {
+type RigOptions = {
+  bus?: MemoryBus;
+  rows?: Partial<Order>[];
+  engine?: Partial<EngineOptions>;
+  flushBudgetMs?: number;
+  priceWaitMs?: number;
+};
+
+/** A loaded store (as the snapshot would leave it) and a runtime continuing from an open watch on the bucket. */
+async function rig(options: RigOptions = {}): Promise<Rig> {
   const bus = options.bus ?? new MemoryBus();
-  const repo = options.repo ?? new InMemoryOrderRepository();
+  await ensureBuckets(bus);
   const orders = makeOrders(options.rows ?? [{ ...LIVE }, { ...LIVE, traderId: 'T2' }, { ...LIVE, status: 'FILLED' }]);
-  if (options.repo === undefined) await repo.upsertMany(orders.map(toStoredOrder));
   const store = new ColumnarStore({ capacity: 16 });
-  for await (const batch of repo.loadAll()) store.appendBatch(batch.map((r) => r.order));
+  store.appendBatch(orders, orders.map(() => 1));
   const engine = new QueryEngine(store, { maxViews: 16, maxBytes: 1 << 26, maxBlockRows: 10_000, ...options.engine });
+  const watch = await bus.kv(BUCKETS.orderState).watch({ updatesOnly: true });
+  const handoff: WatchHandoff = { entries: watch[Symbol.asyncIterator](), watch, revision: 0 };
+  const stages: Stage[] = [];
+  const onFatal = vi.fn();
   const runtime = new LiveRuntime({
     store,
     engine,
@@ -51,18 +66,26 @@ async function rig(options: { bus?: MemoryBus; repo?: InMemoryOrderRepository; r
     maxTrackedBlocks: 20,
     retryMs: 1_000,
     flushBudgetMs: options.flushBudgetMs,
+    snapshot: handoff,
+    priceWaitMs: options.priceWaitMs ?? 500,
+    onStage: (finished) => stages.push(finished),
+    onFatal,
   });
-  return { bus, repo, store, engine, runtime, orders };
+  const versions = new Map<string, number>();
+  const publish = async (index: number, patch: Partial<Order>): Promise<void> => {
+    const base = orders[index] as Order;
+    const v = (versions.get(base.orderId) ?? 1) + 1;
+    versions.set(base.orderId, v);
+    const current = store.orderAt(store.rowIndexOf(base.orderId) as number);
+    await publishRecord(bus, { ...current, ...patch }, v);
+  };
+  return { bus, store, engine, runtime, orders, handoff, stages, onFatal, publish };
 }
 
-const update = (orderId: string, order: Partial<Order>): OrderEvent => ({ type: 'UPDATE', order: { orderId, ...order }, ts: 1 });
 const tick = (bid: number, ask: number): PriceTick => ({ pair: 'EURUSD', bid, ask, ts: 1 });
 
-async function persisted(repo: InMemoryOrderRepository): Promise<Order[]> {
-  const out: Order[] = [];
-  for await (const b of repo.loadAll()) out.push(...b.map((r) => r.order));
-  return out;
-}
+const allPairs = (bus: MemoryBus, ts: number): Promise<void[]> =>
+  Promise.all(CURRENCY_PAIRS.map((pair) => bus.publish(`prices.${pair}`, { pair, bid: 1, ask: 1.0002, ts })));
 
 function client(runtime: LiveRuntime, engine: QueryEngine): { sent: ServerMsg[]; session: ClientSession; ask: () => void } {
   const sent: ServerMsg[] = [];
@@ -84,16 +107,30 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe('LiveRuntime', () => {
   it('attaches to the bus on start, not before', async () => {
     vi.useFakeTimers();
     const r = await rig();
-    const consume = vi.spyOn(r.bus, 'consume');
-    expect(consume).not.toHaveBeenCalled();
+    const subscribe = vi.spyOn(r.bus, 'subscribe');
+    expect(subscribe).not.toHaveBeenCalled();
     r.runtime.start();
     await vi.advanceTimersByTimeAsync(0);
-    expect(consume).toHaveBeenCalledWith({ stream: 'ORDERS', durable: 'blotter-server', subject: 'orders.events' }, expect.any(Function));
+    expect(subscribe.mock.calls.map((c) => c[0]).sort()).toEqual(['control.state', 'orders.events', 'prices.*']);
     expect(r.runtime.isAttached).toBe(true);
+    await r.runtime.stop();
+  });
+
+  it('does not consume the order stream: it holds no position in it', async () => {
+    vi.useFakeTimers();
+    const r = await rig();
+    const consume = vi.spyOn(r.bus, 'consume');
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(consume).not.toHaveBeenCalled();
     await r.runtime.stop();
   });
 
@@ -119,7 +156,7 @@ describe('LiveRuntime', () => {
     await r.runtime.stop();
   });
 
-  it('applies events and ticks on each flush, patches cached views and sends clients a delta and a summary', async () => {
+  it('applies records and ticks on each flush, patches cached views and sends clients a delta and a summary', async () => {
     vi.useFakeTimers({ now: 10_000 });
     const r = await rig();
     r.runtime.start();
@@ -129,10 +166,11 @@ describe('LiveRuntime', () => {
     c.sent.length = 0;
 
     await r.bus.publish('prices.EURUSD', tick(1.0899, 1.0901));
-    await r.bus.publish('orders.events', update(r.orders[0]?.orderId ?? '', { filledQty: 900_000, remainingQty: 100_000, numFills: 7 }));
+    await r.publish(0, { filledQty: 900_000, remainingQty: 100_000, numFills: 7 });
     expect(r.store.orderAt(0).filledQty).toBe(400_000);
     await vi.advanceTimersByTimeAsync(100);
     expect(r.store.orderAt(0)).toMatchObject({ filledQty: 900_000, marketMid: 1.09, numFills: 7 });
+    expect(r.store.versionAt(0)).toBe(2);
 
     const delta = c.sent.find((m) => m.t === 'delta');
     expect(delta).toMatchObject({ t: 'delta' });
@@ -141,7 +179,7 @@ describe('LiveRuntime', () => {
     expect(row).toMatchObject({ filledQty: 900_000, marketMid: 1.09, numFills: 7 });
     expect(c.sent.find((m) => m.t === 'summary')).toMatchObject({ t: 'summary', byStatus: { LIVE: 2, FILLED: 1 } });
     expect(r.runtime.flushStats.flushes).toBeGreaterThan(0);
-    expect(r.runtime.flushStats.lastChanges).toBeGreaterThanOrEqual(0);
+    expect(r.runtime.live.appliedRevision).toBeGreaterThan(0);
     await r.runtime.stop();
   });
 
@@ -153,7 +191,7 @@ describe('LiveRuntime', () => {
     const c = client(r.runtime, r.engine);
     c.ask();
     const fresh = makeOrders([{}, {}, {}, { ...LIVE, createdAt: 9_999_999_999_999 }]).slice(3)[0] as Order;
-    await r.bus.publish('orders.events', { type: 'NEW', order: fresh, ts: 1 });
+    await publishRecord(r.bus, fresh);
     await vi.advanceTimersByTimeAsync(100);
     const res = r.engine.getRows('ALL', { startRow: 0, endRow: 10, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [], filterModel: null });
     expect(res.ok && res.value.built).toBe(false);
@@ -163,90 +201,72 @@ describe('LiveRuntime', () => {
     await r.runtime.stop();
   });
 
-  it('applies lifecycle and price changes to the store without writing to the repository', async () => {
+  it('ignores a record at or below the version a row holds, and counts it', async () => {
     vi.useFakeTimers({ now: 10_000 });
     const r = await rig();
     r.runtime.start();
     await vi.advanceTimersByTimeAsync(0);
-    const upsert = vi.spyOn(r.repo, 'upsertMany');
-    await r.bus.publish('prices.EURUSD', tick(1.0899, 1.0901));
-    await r.bus.publish('orders.events', update(r.orders[0]?.orderId ?? '', { filledQty: 900_000, remainingQty: 100_000 }));
-    await vi.advanceTimersByTimeAsync(600);
-    expect(r.store.orderAt(0)).toMatchObject({ filledQty: 900_000, marketMid: 1.09 });
-    expect(upsert).not.toHaveBeenCalled();
-    expect((await persisted(r.repo))[0]).toMatchObject({ filledQty: 400_000, marketMid: 1.08 });
+    await publishRecord(r.bus, { ...(r.orders[0] as Order), filledQty: 1 }, 1);
+    await publishRecord(r.bus, { ...(r.orders[0] as Order), filledQty: 2 }, 1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(r.store.orderAt(0).filledQty).toBe(400_000);
+    expect(r.runtime.ignoredCounts).toMatchObject({ stale: 2 });
     await r.runtime.stop();
   });
 
-  it('acknowledges the bus once a flush has applied the events, so a restart replays only what it had not applied', async () => {
+  it('ignores delete markers and unreadable values, and counts them', async () => {
     vi.useFakeTimers({ now: 10_000 });
-    const first = await rig();
-    first.runtime.start();
+    const r = await rig();
+    r.runtime.start();
     await vi.advanceTimersByTimeAsync(0);
-    const id = first.orders[0]?.orderId ?? '';
-    await first.bus.publish('orders.events', update(id, { filledQty: 500_000, remainingQty: 500_000, numFills: 4 }));
-    await first.bus.publish('orders.events', update(id, { filledQty: 700_000, remainingQty: 300_000, numFills: 5 }));
+    const kv = r.bus.kv(BUCKETS.orderState);
+    await kv.put('JUNK', { nonsense: true });
+    await publishRecord(r.bus, r.orders[2] as Order, 1);
+    await kv.delete(r.orders[2]?.orderId ?? '');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(r.store.size).toBe(3);
+    expect(r.store.orderAt(2).status).toBe('FILLED');
+    expect(r.runtime.ignoredCounts).toMatchObject({ delete: 1, invalid: 1 });
+    await r.runtime.stop();
+  });
+
+  it('reports applied and ignored records to the metrics', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const metrics = { flush: vi.fn(), eventAge: vi.fn(), ingest: vi.fn(), command: vi.fn(), views: vi.fn(), rebuild: vi.fn(), records: vi.fn(), startup: vi.fn() };
+    const r = await rig();
+    const runtime = new LiveRuntime({ store: r.store, engine: r.engine, bus: r.bus, log, flushMs: 100, maxTrackedBlocks: 20, snapshot: r.handoff, priceWaitMs: 100, metrics });
+    runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await r.publish(0, { filledQty: 5 });
+    await publishRecord(r.bus, r.orders[1] as Order, 1);
     await vi.advanceTimersByTimeAsync(150);
-    expect(first.store.orderAt(0).filledQty).toBe(700_000);
-    await first.runtime.stop();
-
-    // Applied and acknowledged: nothing is replayed to the next instance.
-    const second = await rig({ bus: first.bus, repo: first.repo });
-    second.runtime.start();
-    await vi.advanceTimersByTimeAsync(200);
-    expect(second.runtime.live.stats.eventsApplied).toBe(0);
-    await second.runtime.stop();
-
-    // Published while nobody was consuming: replayed and applied by the next one.
-    await first.bus.publish('orders.events', update(id, { filledQty: 800_000, remainingQty: 200_000, numFills: 6 }));
-    const third = await rig({ bus: first.bus, repo: first.repo });
-    third.runtime.start();
-    await vi.advanceTimersByTimeAsync(200);
-    expect(third.runtime.live.stats.eventsApplied).toBe(1);
-    await third.runtime.stop();
+    expect(metrics.records).toHaveBeenCalledWith({ applied: 1, ignored: { stale: 1, delete: 0, invalid: 0 } });
+    expect(metrics.ingest).toHaveBeenCalledWith('order');
+    await runtime.stop();
   });
 
-  it('replaying a stream that includes NEW orders already persisted does not duplicate them', async () => {
-    vi.useFakeTimers({ now: 10_000 });
-    const first = await rig();
-    first.runtime.start();
-    await vi.advanceTimersByTimeAsync(0);
-    const fresh = makeOrders([{}, {}, {}, { ...LIVE }]).slice(3)[0] as Order;
-    await first.bus.publish('orders.events', { type: 'NEW', order: fresh, ts: 1 });
-    await vi.advanceTimersByTimeAsync(100);
-    // Applied and acked; now replay everything anyway into a store that already holds the order.
-    const second = await rig({ bus: first.bus, repo: first.repo });
-    second.store.upsert(fresh);
-    for (const m of first.bus.streamLog('ORDERS')) second.runtime.live.enqueueEvent(m.payload as OrderEvent, () => undefined);
-    second.runtime.flush();
-    expect(second.store.size).toBe(4);
-    await first.runtime.stop();
-  });
-
-  it('drops and acknowledges invalid events', async () => {
+  it('does not touch the order stream or any database when records arrive', async () => {
     vi.useFakeTimers({ now: 10_000 });
     const r = await rig();
     r.runtime.start();
     await vi.advanceTimersByTimeAsync(0);
-    await r.bus.publish('orders.events', { type: 'UPDATE', order: { filledQty: 'nope' }, ts: 1 });
-    await r.bus.publish('prices.EURUSD', { nonsense: true });
-    await vi.advanceTimersByTimeAsync(100);
-    expect(r.runtime.live.stats.eventsApplied).toBe(0);
-    expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ error: expect.any(String) }), 'dropped invalid order event');
+    const publish = vi.spyOn(r.bus, 'publish');
+    await r.publish(0, { filledQty: 900_000 });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(publish).not.toHaveBeenCalled();
     await r.runtime.stop();
   });
 
-  it('retries attaching until the stream exists', async () => {
+  it('retries attaching until the bus accepts the subscriptions', async () => {
     vi.useFakeTimers({ now: 10_000 });
     const r = await rig();
-    const consume = vi.spyOn(r.bus, 'consume');
-    consume.mockRejectedValueOnce(new Error('stream not found'));
+    const subscribe = vi.spyOn(r.bus, 'subscribe');
+    subscribe.mockRejectedValueOnce(new Error('not connected'));
     r.runtime.start();
     await vi.advanceTimersByTimeAsync(0);
     expect(r.runtime.isAttached).toBe(false);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(r.runtime.isAttached).toBe(true);
-    expect(consume).toHaveBeenCalledTimes(2);
     await r.runtime.stop();
   });
 
@@ -298,6 +318,92 @@ describe('LiveRuntime', () => {
   });
 });
 
+describe('LiveRuntime startup stages', () => {
+  it('goes catch-up, prices, then ready: caught up once the entries pending behind the latest are few', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig();
+    await allPairs(r.bus, 5);
+    await r.publish(0, { filledQty: 5 });
+    r.runtime.start();
+    expect(r.runtime.stage).toBe('catchup');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.runtime.stage).toBe('catchup');
+    await vi.advanceTimersByTimeAsync(300);
+    expect(r.runtime.stage).toBe('ready');
+    expect(r.stages).toEqual(['catchup', 'prices']);
+    expect(r.store.orderAt(0).filledQty).toBe(5);
+    await r.runtime.stop();
+  });
+
+  it('is caught up when nothing arrives for a moment', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig();
+    await allPairs(r.bus, 5);
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(r.runtime.stage).toBe('catchup');
+    await vi.advanceTimersByTimeAsync(400);
+    expect(['prices', 'ready']).toContain(r.runtime.stage);
+    await r.runtime.stop();
+  });
+
+  it('takes the last price of every pair before it is ready, so open orders are priced from the start', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig();
+    await r.bus.publish('prices.EURUSD', { pair: 'EURUSD', bid: 1.0899, ask: 1.0901, ts: 7 });
+    await r.bus.publish('prices.EURUSD', { pair: 'EURUSD', bid: 1.0999, ask: 1.1001, ts: 8 });
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.runtime.live.lastTickTs()).toMatchObject({ EURUSD: 8 });
+    expect(r.store.orderAt(0).marketMid).toBe(1.1);
+    await r.runtime.stop();
+  });
+
+  it('waits for a price for every pair, then goes on without the missing ones and says which', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig({ priceWaitMs: 800 });
+    await r.bus.publish('prices.EURUSD', tick(1.0899, 1.0901));
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(r.runtime.stage).toBe('prices');
+    await vi.advanceTimersByTimeAsync(800);
+    expect(r.runtime.stage).toBe('ready');
+    expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ missing: expect.arrayContaining(['GBPUSD']) }), 'starting without a price for some pairs');
+    await r.runtime.stop();
+  });
+
+  it('is ready as soon as every pair has a price', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig({ priceWaitMs: 60_000 });
+    await allPairs(r.bus, 3);
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.runtime.stage).toBe('ready');
+    await r.runtime.stop();
+  });
+
+  it('reports the end of the order-state watch as fatal: the store can no longer be kept current', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig();
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await r.handoff.watch.close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.onFatal).toHaveBeenCalledWith('the order-state watch ended');
+    await r.runtime.stop();
+  });
+
+  it('does not report a fatal error when it is stopped on purpose', async () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const r = await rig();
+    r.runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await r.runtime.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.onFatal).not.toHaveBeenCalled();
+  });
+});
+
 describe('LiveRuntime deferred view maintenance', () => {
   it('rebuilds a view that a tick could not patch after the tick, then tells its clients to refresh every route', async () => {
     vi.useFakeTimers({ now: 10_000 });
@@ -311,7 +417,7 @@ describe('LiveRuntime deferred view maintenance', () => {
     expect(view?.refs).toBe(1);
 
     // createdAt is the default sort key, so this is a structural change.
-    await r.bus.publish('orders.events', update(r.orders[0]?.orderId ?? '', { createdAt: 5 }));
+    await r.publish(0, { createdAt: 5 });
     await vi.advanceTimersByTimeAsync(110);
     expect(view?.rebuildPending).toBe(false);
     expect(r.engine.stats().rebuilds).toBe(1);
@@ -329,7 +435,7 @@ describe('LiveRuntime deferred view maintenance', () => {
     const c = client(r.runtime, r.engine);
     c.ask();
     for (let i = 0; i < 6; i++) {
-      await r.bus.publish('orders.events', update(r.orders[0]?.orderId ?? '', { createdAt: 100 + i }));
+      await r.publish(0, { createdAt: 100 + i });
       await vi.advanceTimersByTimeAsync(100);
     }
     expect(r.engine.stats().rebuilds).toBeLessThanOrEqual(1);
@@ -346,7 +452,7 @@ describe('LiveRuntime deferred view maintenance', () => {
     await vi.advanceTimersByTimeAsync(0);
     const c = client(r.runtime, r.engine);
     c.ask();
-    await r.bus.publish('orders.events', update(r.orders[0]?.orderId ?? '', { createdAt: 7 }));
+    await r.publish(0, { createdAt: 7 });
     await vi.advanceTimersByTimeAsync(100);
     const view = [...r.engine.views()][0];
     expect(view!.appliedSeq).toBeLessThan(r.engine.tickSeq);

@@ -1,4 +1,7 @@
-/** Reads antikythera's `/health` and `/debug/lag` and NATS's `/jsz` to say whether the server has finished with everything published. */
+/**
+ * Reads antikythera's `/health` and `/debug/lag` and NATS's `/jsz` to say whether the system has finished with everything
+ * published: the order service has drained its input, and the blotter has applied every change to the order-state bucket.
+ */
 
 export type ServerProbeOptions = {
   api?: string;
@@ -8,12 +11,16 @@ export type ServerProbeOptions = {
 
 export type ServerSnapshot = {
   status: string;
+  /** The blotter's startup stage; `ready` once it serves clients. */
+  stage: string;
   rows: number;
   clients: number;
   pendingEvents: number;
-  eventsApplied: number;
-  ticksApplied: number;
-  /** Messages in the `blotter-server` and `themis` consumers not yet delivered, and delivered but not acknowledged (themis acks after it has stored and published them). */
+  /** The highest `ORDER_STATE` revision the blotter has applied. */
+  appliedRev: number;
+  /** The last sequence in the `KV_ORDER_STATE` stream: the newest change the order service has published. */
+  kvLastSeq: number;
+  /** Messages in the order service's `themis` consumer not yet delivered, and delivered but not acknowledged (it acks after it has stored and published them). */
   consumerPending: number;
   consumerAckPending: number;
   flushLagMs: number;
@@ -27,14 +34,15 @@ const obj = (value: unknown): Json => (typeof value === 'object' && value !== nu
 export function parseSnapshot(health: unknown, lag: unknown, jsz: unknown): ServerSnapshot {
   const h = obj(health);
   const live = obj(h['live']);
-  const l = obj(obj(lag)['live']);
   let pending = 0;
   let ackPending = 0;
+  let kvLastSeq = 0;
   for (const account of (obj(jsz)['account_details'] as unknown[] | undefined) ?? []) {
     for (const stream of (obj(account)['stream_detail'] as unknown[] | undefined) ?? []) {
+      if (obj(stream)['name'] === 'KV_ORDER_STATE') kvLastSeq = num(obj(obj(stream)['state'])['last_seq']);
       for (const consumer of (obj(stream)['consumer_detail'] as unknown[] | undefined) ?? []) {
         const c = obj(consumer);
-        if (c['name'] !== 'blotter-server' && c['name'] !== 'themis') continue;
+        if (c['name'] !== 'themis') continue;
         pending += num(c['num_pending']);
         ackPending += num(c['num_ack_pending']);
       }
@@ -42,11 +50,12 @@ export function parseSnapshot(health: unknown, lag: unknown, jsz: unknown): Serv
   }
   return {
     status: typeof h['status'] === 'string' ? h['status'] : 'unknown',
+    stage: typeof h['stage'] === 'string' ? h['stage'] : 'unknown',
     rows: num(h['rows']),
     clients: num(live['clients']),
     pendingEvents: num(live['pendingEvents']),
-    eventsApplied: num(l['eventsApplied']),
-    ticksApplied: num(l['ticksApplied']),
+    appliedRev: num(obj(lag)['appliedRev']),
+    kvLastSeq,
     consumerPending: pending,
     consumerAckPending: ackPending,
     flushLagMs: num(obj(obj(lag)['flush'])['lastMs']),
@@ -55,7 +64,10 @@ export function parseSnapshot(health: unknown, lag: unknown, jsz: unknown): Serv
 
 export type ServerProbe = {
   snapshot(): Promise<ServerSnapshot>;
-  /** True once two consecutive snapshots show nothing queued, nothing unacknowledged, and no event or tick applied between them. */
+  /**
+   * True once two consecutive snapshots both show the blotter ready with nothing queued, the order service's consumer
+   * drained, and the blotter's applied revision equal to the newest published one and unchanged between them.
+   */
   isIdle(): Promise<boolean>;
 };
 
@@ -86,11 +98,13 @@ export function createServerProbe(options: ServerProbeOptions = {}): ServerProbe
       return (
         before !== null &&
         now.status === 'ok' &&
+        now.stage === 'ready' &&
+        before.stage === 'ready' &&
         now.pendingEvents === 0 &&
         now.consumerPending === 0 &&
         now.consumerAckPending === 0 &&
-        now.eventsApplied === before.eventsApplied &&
-        now.ticksApplied === before.ticksApplied
+        now.appliedRev === now.kvLastSeq &&
+        now.appliedRev === before.appliedRev
       );
     },
   };
