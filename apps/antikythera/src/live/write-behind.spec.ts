@@ -134,6 +134,6 @@ describe('WriteBehind', () => {
 
 async function collect(repo: InMemoryOrderRepository): Promise<{ orderId: string; numFills: number }[]> {
   const out: { orderId: string; numFills: number }[] = [];
-  for await (const batch of repo.loadAll()) out.push(...batch);
+  for await (const batch of repo.loadAll()) out.push(...batch.map((r) => r.order));
   return out;
 }

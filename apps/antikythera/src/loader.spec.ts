@@ -1,5 +1,5 @@
 import type { Order } from '@apeiron/logos';
-import { InMemoryOrderRepository } from '@apeiron/mnemosyne';
+import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_LOAD_BATCH_SIZE, loadStore } from './loader.js';
 import { ColumnarStore } from './store/columnar-store.js';
@@ -7,7 +7,7 @@ import { makeOrders } from './testing/orders.js';
 
 async function repoWith(orders: Order[]): Promise<InMemoryOrderRepository> {
   const repo = new InMemoryOrderRepository();
-  await repo.upsertMany(orders);
+  await repo.upsertMany(orders.map(toStoredOrder));
   return repo;
 }
 

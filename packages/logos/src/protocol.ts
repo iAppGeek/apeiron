@@ -1,10 +1,14 @@
 import { z } from 'zod';
-import type { Order, OrderStatus, TraderInfo } from './order.js';
+import { URGENCIES, type Order, type OrderStatus, type TraderInfo } from './order.js';
 
 export type CodecName = 'json' | 'msgpack';
 export type LoadPreset = 'medium' | 'stress';
 export const COMMAND_ACTIONS = ['CANCEL', 'PAUSE', 'RESUME'] as const;
 export type CommandAction = (typeof COMMAND_ACTIONS)[number];
+
+/** The fields a trader may amend on a working order. */
+export type AmendChanges = Partial<Pick<Order, 'limitPrice' | 'orderQty' | 'endTime' | 'urgency'>>;
+export const AMEND_FIELDS = ['limitPrice', 'orderQty', 'endTime', 'urgency'] as const satisfies readonly (keyof AmendChanges)[];
 
 /** Subset of AG Grid's `IServerSideGetRowsRequest` that the server supports. */
 export type SsrmRequest = {
@@ -22,10 +26,12 @@ export type SsrmRequest = {
 export type Row = Record<string, string | number | boolean | null | undefined>;
 
 export type ClientMsg =
-  | { t: 'hello'; traderId: string; codec: CodecName; clientId: string }
+  /** `userId` is optional until entitlements arrive (PLAN1 phase 1.6), when it becomes required. */
+  | { t: 'hello'; userId?: string; traderId: string; codec: CodecName; clientId: string }
   | { t: 'getRows'; reqId: number; req: SsrmRequest }
   | { t: 'setFilterValues'; reqId: number; colId: string }
   | { t: 'command'; reqId: number; orderId: string; action: CommandAction }
+  | { t: 'amend'; reqId: number; orderId: string; changes: AmendChanges }
   | { t: 'control'; reqId: number; preset: LoadPreset }
   | { t: 'ping'; ts: number };
 
@@ -37,6 +43,10 @@ export type ServerMsg =
       columnsVersion: string;
       /** The load preset the mock middleware last reported; null until it has. */
       preset: LoadPreset | null;
+      /** The signed-in user; set from PLAN1 phase 1.6. */
+      user?: { userId: string; name: string };
+      /** Which implementation answered; set from PLAN2 phase 2.7. */
+      server?: { impl: 'node' | 'java'; version: string; startedAt: number };
     }
   | { t: 'rows'; reqId: number; rows: Row[]; rowCount: number; ms: number }
   | { t: 'filterValues'; reqId: number; values: string[] }
@@ -92,6 +102,10 @@ export const ERROR_CODES = [
   'INVALID_TRANSITION',
   'UNKNOWN_ORDER',
   'SLOW_CONSUMER',
+  // PLAN1
+  'FORBIDDEN',
+  'UNKNOWN_USER',
+  'INVALID_AMEND',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -109,6 +123,16 @@ export const SERVER_MSG_TYPES = [
 ] as const;
 
 const nonNegInt = z.number().int().min(0);
+
+/** At least one of the four amendable fields, and nothing else. */
+export const amendChangesSchema: z.ZodType<AmendChanges> = z
+  .strictObject({
+    limitPrice: z.number().positive().nullable().optional(),
+    orderQty: z.number().int().positive().optional(),
+    endTime: z.number().optional(),
+    urgency: z.enum(URGENCIES).optional(),
+  })
+  .refine((c) => AMEND_FIELDS.some((f) => c[f] !== undefined), { message: 'no fields to amend' });
 
 const ssrmRequestSchema: z.ZodType<SsrmRequest> = z.object({
   startRow: nonNegInt,
@@ -134,6 +158,7 @@ const ssrmRequestSchema: z.ZodType<SsrmRequest> = z.object({
 export const clientMsgSchema: z.ZodType<ClientMsg> = z.discriminatedUnion('t', [
   z.object({
     t: z.literal('hello'),
+    userId: z.string().min(1).optional(),
     traderId: z.string().min(1),
     codec: z.enum(['json', 'msgpack']),
     clientId: z.string().min(1),
@@ -146,6 +171,7 @@ export const clientMsgSchema: z.ZodType<ClientMsg> = z.discriminatedUnion('t', [
     orderId: z.string().min(1),
     action: z.enum(COMMAND_ACTIONS),
   }),
+  z.object({ t: z.literal('amend'), reqId: nonNegInt, orderId: z.string().min(1), changes: amendChangesSchema }),
   z.object({ t: z.literal('control'), reqId: nonNegInt, preset: z.enum(['medium', 'stress']) }),
   z.object({ t: z.literal('ping'), ts: z.number() }),
 ]);

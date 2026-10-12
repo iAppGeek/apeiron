@@ -7,9 +7,14 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint .",
@@ -19,6 +24,7 @@
   "dependencies": {
     "@apeiron/logos": "workspace:*",
     "@nats-io/jetstream": "^3.4.0",
+    "@nats-io/kv": "^3.4.0",
     "@nats-io/transport-node": "^3.4.0"
   },
   "devDependencies": {

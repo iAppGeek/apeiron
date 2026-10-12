@@ -41,7 +41,7 @@ describe('createDriver', () => {
     const maxId = orders.map((o) => o.orderId).sort().at(-1) ?? null;
     driver = createDriver({
       bus,
-      repo: { loadCurrent: () => Promise.resolve(current()), maxOrderId: () => Promise.resolve(maxId) },
+      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve(maxId) },
       seed: 7,
       rate: 'normal',
       stepMs: 10,
@@ -79,7 +79,7 @@ describe('createDriver', () => {
       const seen = await capture(bus);
       const d = createDriver({
         bus,
-        repo: { loadCurrent: () => Promise.resolve(current()), maxOrderId: () => Promise.resolve('ALG00999999') },
+        repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
         seed: 99,
         rate: 'normal',
         stepMs: 10,
@@ -101,7 +101,7 @@ describe('createDriver', () => {
     const seen = await capture(bus);
     driver = createDriver({
       bus,
-      repo: { loadCurrent: () => Promise.resolve(current()), maxOrderId: () => Promise.resolve('ALG00999999') },
+      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
       seed: 3,
       rate: 'normal',
       stepMs: 10,
@@ -136,7 +136,7 @@ describe('createDriver', () => {
     });
     driver = createDriver({
       bus: flaky,
-      repo: { loadCurrent: () => Promise.resolve(current()), maxOrderId: () => Promise.resolve('ALG00999999') },
+      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
       seed: 1,
       rate: 'normal',
       stepMs: 10,
@@ -162,7 +162,7 @@ describe('createDriver', () => {
     });
     driver = createDriver({
       bus: failing,
-      repo: { loadCurrent: () => Promise.resolve(current()), maxOrderId: () => Promise.resolve('ALG00999999') },
+      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
       seed: 1,
       rate: 'normal',
       stepMs: 10,

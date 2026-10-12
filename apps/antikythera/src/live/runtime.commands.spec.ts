@@ -1,5 +1,5 @@
 import { MemoryBus, jsonCodec, type ClientMsg, type Order, type OrderCommand, type OrderEvent, type ServerMsg } from '@apeiron/logos';
-import { InMemoryOrderRepository } from '@apeiron/mnemosyne';
+import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryEngine } from '../query/engine.js';
 import { ClientSession } from '../session.js';
@@ -29,9 +29,9 @@ type Rig = { bus: MemoryBus; runtime: LiveRuntime; engine: QueryEngine; publishe
 async function rig(): Promise<Rig> {
   const bus = new MemoryBus();
   const repo = new InMemoryOrderRepository();
-  await repo.upsertMany(makeOrders([{ ...LIVE }, { ...LIVE, status: 'PAUSED' }, { ...LIVE, status: 'FILLED' }]));
+  await repo.upsertMany(makeOrders([{ ...LIVE }, { ...LIVE, status: 'PAUSED' }, { ...LIVE, status: 'FILLED' }]).map(toStoredOrder));
   const store = new ColumnarStore({ capacity: 16 });
-  for await (const batch of repo.loadAll()) store.appendBatch(batch);
+  for await (const batch of repo.loadAll()) store.appendBatch(batch.map((r) => r.order));
   const engine = new QueryEngine(store, { maxViews: 16, maxBytes: 1 << 26, maxBlockRows: 10_000 });
   const runtime = new LiveRuntime({
     store,

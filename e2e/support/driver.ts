@@ -10,11 +10,14 @@ import {
   type CommandAction,
   type ConsumeHandler,
   type ConsumeSpec,
+  type KvBucket,
   type LoadPreset,
   type Order,
   type OrderCommand,
   type OrderEvent,
   type PriceTick,
+  type RequestHandler,
+  type StoredMessage,
 } from '@apeiron/logos';
 import { OrderModel } from './model';
 
@@ -52,7 +55,7 @@ export type DriverStats = {
 };
 
 export type DriverRepo = {
-  loadCurrent(): Promise<Order[]>;
+  loadOpen(): Promise<{ order: Order }[]>;
   maxOrderId(): Promise<string | null>;
 };
 
@@ -186,6 +189,10 @@ export function createDriver(options: DriverOptions): Driver {
     },
     subscribe: (subject: string, handler: BusHandler): Promise<BusSubscription> => options.bus.subscribe(subject, handler),
     consume: (spec: ConsumeSpec, handler: ConsumeHandler): Promise<BusSubscription> => options.bus.consume(spec, handler),
+    request: (subject: string, payload: unknown, timeoutMs: number): Promise<unknown> => options.bus.request(subject, payload, timeoutMs),
+    serve: (subject: string, handler: RequestHandler): Promise<BusSubscription> => options.bus.serve(subject, handler),
+    kv: (bucket: string): KvBucket => options.bus.kv(bucket),
+    lastPerSubject: (stream: string, filter: string): Promise<StoredMessage[]> => options.bus.lastPerSubject(stream, filter),
     close: (): Promise<void> => Promise.resolve(),
   };
 
@@ -214,7 +221,7 @@ export function createDriver(options: DriverOptions): Driver {
 
   return {
     async start(): Promise<void> {
-      const current = await options.repo.loadCurrent();
+      const current = (await options.repo.loadOpen()).map((record) => record.order);
       startMax = await options.repo.maxOrderId();
       model.current = new OrderModel(current);
       startedAt = now();

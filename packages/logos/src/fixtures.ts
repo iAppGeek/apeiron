@@ -18,6 +18,7 @@ export function sampleOrders(count: number): Order[] {
 export function sampleClientMsgs(): ClientMsg[] {
   return [
     { t: 'hello', traderId: 'ALL', codec: 'msgpack', clientId: 'client-é-1' },
+    { t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'client-2' },
     {
       t: 'getRows',
       reqId: 7,
@@ -36,6 +37,7 @@ export function sampleClientMsgs(): ClientMsg[] {
     },
     { t: 'setFilterValues', reqId: 8, colId: 'venue' },
     { t: 'command', reqId: 9, orderId: 'ALG00000001', action: 'CANCEL' },
+    { t: 'amend', reqId: 11, orderId: 'ALG00000001', changes: { limitPrice: null, orderQty: 2_000_000, urgency: 'HIGH' } },
     { t: 'control', reqId: 10, preset: 'stress' },
     { t: 'ping', ts: 1_700_000_000_123 },
   ];
@@ -51,6 +53,8 @@ export function sampleServerMsgs(): ServerMsg[] {
       traders: [{ traderId: 'T1', traderName: 'Alice Marlowe' }],
       columnsVersion: 'deadbeef',
       preset: 'medium',
+      user: { userId: 'TRADER1', name: 'Alice Marlowe' },
+      server: { impl: 'node', version: '0.0.0', startedAt: NOW - 5_000 },
     },
     { t: 'rows', reqId: 7, rows: [a, { currencyPair: 'EURUSD', childCount: 12, notionalUsd: 9.5e12, note: null }], rowCount: 1_000_000, ms: 3.25 },
     { t: 'filterValues', reqId: 8, values: ['EBS', 'LMAX', 'ünïcode'] },

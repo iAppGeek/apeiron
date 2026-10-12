@@ -1,5 +1,5 @@
 import { MemoryBus, applyCommand, getCodec, parseOrderCommand, jsonCodec, type ClientMsg, type CodecName, type Order, type ServerMsg } from '@apeiron/logos';
-import { InMemoryOrderRepository } from '@apeiron/mnemosyne';
+import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket, { type RawData } from 'ws';
 import { buildServer, type BlotterServer } from './server.js';
@@ -32,7 +32,7 @@ afterEach(async () => {
 });
 
 async function start(bus: MemoryBus, repo = new InMemoryOrderRepository()): Promise<{ server: BlotterServer; wsUrl: string; base: string }> {
-  if (!(await repo.isSeeded())) await repo.upsertMany(ROWS);
+  if (!(await repo.isSeeded())) await repo.upsertMany(ROWS.map(toStoredOrder));
   const s = await buildServer({
     repo,
     bus,
@@ -105,7 +105,7 @@ describe('live server over a real socket', () => {
     const bus = new MemoryBus();
     const consume = vi.spyOn(bus, 'consume');
     const repo = new InMemoryOrderRepository();
-    await repo.upsertMany(ROWS);
+    await repo.upsertMany(ROWS.map(toStoredOrder));
     const original = repo.loadAll.bind(repo);
     let release: () => void = () => undefined;
     const gate = new Promise<void>((r) => {
@@ -192,7 +192,7 @@ describe('live server over a real socket', () => {
     await bus.publish('orders.events', { type: 'UPDATE', order: { orderId: 'T0000001', status: 'FILLED', filledQty: 1_000_000, remainingQty: 0 }, ts: 1 });
     await vi.waitFor(async () => {
       const out: Order[] = [];
-      for await (const b of repo.loadAll()) out.push(...b);
+      for await (const b of repo.loadAll()) out.push(...b.map((r) => r.order));
       expect(out.find((o) => o.orderId === 'T0000001')).toMatchObject({ status: 'FILLED', filledQty: 1_000_000 });
     });
   });
@@ -211,7 +211,7 @@ describe('live server over a real socket', () => {
 
   it('works without a bus (read-only), refusing control', async () => {
     const repo = new InMemoryOrderRepository();
-    await repo.upsertMany(ROWS);
+    await repo.upsertMany(ROWS.map(toStoredOrder));
     const s = await buildServer({ repo, logLevel: 'silent', storeCapacity: 64 });
     server = s;
     await s.app.listen({ port: 0, host: '127.0.0.1' });
@@ -330,7 +330,7 @@ describe('command path over a real socket', () => {
     const bus = new MemoryBus();
     await fakeHermes(bus, held(), { silent: true });
     const repo = new InMemoryOrderRepository();
-    await repo.upsertMany(ROWS);
+    await repo.upsertMany(ROWS.map(toStoredOrder));
     const s = await buildServer({ repo, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, writeBehindMs: 30, commandTimeoutMs: 150 });
     server = s;
     await s.app.listen({ port: 0, host: '127.0.0.1' });

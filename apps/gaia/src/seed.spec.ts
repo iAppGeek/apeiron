@@ -1,5 +1,5 @@
 import { generateOrders } from '@apeiron/logos';
-import { InMemoryOrderRepository, type OrderRepository } from '@apeiron/mnemosyne';
+import { InMemoryOrderRepository, type OrderRepository, type StoredOrder, toStoredOrder } from '@apeiron/mnemosyne';
 import { describe, expect, it, vi } from 'vitest';
 import { runSeed } from './seed.js';
 
@@ -11,7 +11,7 @@ function setup(): { repo: InMemoryOrderRepository; log: ReturnType<typeof vi.fn<
 
 async function loadIds(repo: OrderRepository): Promise<string[]> {
   const ids: string[] = [];
-  for await (const batch of repo.loadAll()) ids.push(...batch.map((o) => o.orderId));
+  for await (const batch of repo.loadAll()) ids.push(...batch.map((r) => r.order.orderId));
   return ids;
 }
 
@@ -24,6 +24,16 @@ describe('runSeed', () => {
     expect(await repo.count()).toBe(2500);
     const expected = [...generateOrders(42, 2500, NOW)].map((o) => o.orderId).sort();
     expect(await loadIds(repo)).toEqual(expected);
+  });
+
+  it('seeds every order with v = 1 and execSeq = numFills', async () => {
+    const { repo, log } = setup();
+    await runSeed({ repo, rows: 300, seed: 42, now: NOW, batchSize: 100, log });
+    const records: StoredOrder[] = [];
+    for await (const batch of repo.loadAll()) records.push(...batch);
+    expect(records).toHaveLength(300);
+    expect(records.some((r) => r.order.numFills > 0)).toBe(true);
+    for (const r of records) expect([r.v, r.execSeq]).toEqual([1, r.order.numFills]);
   });
 
   it('is a no-op on the second run', async () => {
@@ -50,7 +60,7 @@ describe('runSeed', () => {
 
   it('completes a partial dataset by re-upserting', async () => {
     const { repo, log } = setup();
-    await repo.upsertMany([...generateOrders(5, 1000, NOW)].slice(0, 300));
+    await repo.upsertMany([...generateOrders(5, 1000, NOW)].slice(0, 300).map(toStoredOrder));
     const result = await runSeed({ repo, rows: 1000, seed: 5, now: NOW, log });
     expect(result.skipped).toBe(false);
     expect(await repo.count()).toBe(1000);

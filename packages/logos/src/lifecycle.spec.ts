@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   derivePriceFields,
+  deriveOverlay,
+  OVERLAY_FIELDS,
   applyFill,
   pnlUsdOf,
   slippageBpsOf,
@@ -285,5 +287,33 @@ describe('commands', () => {
   it('exposes canTransition', () => {
     expect(canTransition('LIVE', 'PAUSED')).toBe(true);
     expect(canTransition('FILLED', 'LIVE')).toBe(false);
+  });
+});
+
+describe('deriveOverlay', () => {
+  const quote = { bid: 1.0809, ask: 1.0811 };
+
+  it('returns exactly the six overlay fields', () => {
+    expect(Object.keys(deriveOverlay(liveOrder(), quote)).sort()).toEqual([...OVERLAY_FIELDS].sort());
+  });
+
+  it('matches derivePriceFields for a LIVE order, minus lastUpdateTime and slippage', () => {
+    const order = liveOrder({ filledQty: 500_000, remainingQty: 500_000, avgFillPrice: 1.0802 });
+    const full = derivePriceFields(order, quote, NOW);
+    expect(deriveOverlay(order, quote)).toEqual({
+      marketBid: full.marketBid,
+      marketAsk: full.marketAsk,
+      marketMid: full.marketMid,
+      spreadBps: full.spreadBps,
+      distanceToLimitBps: full.distanceToLimitBps,
+      unrealisedPnlUsd: full.unrealisedPnlUsd,
+    });
+  });
+
+  it('is deterministic and does not read the clock or mutate its input', () => {
+    const order = liveOrder();
+    const copy = structuredClone(order);
+    expect(deriveOverlay(order, quote)).toEqual(deriveOverlay(order, quote));
+    expect(order).toEqual(copy);
   });
 });

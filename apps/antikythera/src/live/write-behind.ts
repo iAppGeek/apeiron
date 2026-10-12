@@ -1,4 +1,4 @@
-import type { OrderRepository } from '@apeiron/mnemosyne';
+import { toStoredOrder, type OrderRepository } from '@apeiron/mnemosyne';
 import type { RuntimeMetrics } from '../metrics.js';
 import type { LiveStore } from './live-store.js';
 
@@ -68,7 +68,7 @@ export class WriteBehind {
     try {
       // In chunks, yielding between them, so persisting a large backlog never holds the event loop.
       for (let i = 0; i < batch.orders.length; i += WRITE_CHUNK) {
-        await this.repo.upsertMany(batch.orders.slice(i, i + WRITE_CHUNK));
+        await this.repo.upsertMany(batch.orders.slice(i, i + WRITE_CHUNK).map(toStoredOrder));
         if (i + WRITE_CHUNK < batch.orders.length) await new Promise<void>((resolve) => setImmediate(resolve));
       }
     } catch (error) {

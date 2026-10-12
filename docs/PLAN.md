@@ -386,10 +386,11 @@ Pivot is not supported; reject the request if `pivotMode` is set.
 ## Appendix C: Protocol types (packages/logos/src/protocol.ts)
 ```ts
 type ClientMsg =
-  | { t: 'hello'; traderId: string; codec: 'json' | 'msgpack'; clientId: string }
+  | { t: 'hello'; userId?: string; traderId: string; codec: 'json' | 'msgpack'; clientId: string }   // userId: PLAN1, optional until 1.6
   | { t: 'getRows'; reqId: number; req: SsrmRequest }
   | { t: 'setFilterValues'; reqId: number; colId: string }
   | { t: 'command'; reqId: number; orderId: string; action: 'CANCEL' | 'PAUSE' | 'RESUME' }
+  | { t: 'amend'; reqId: number; orderId: string; changes: AmendChanges }   // PLAN1 (the server handles it from 1.7)
   | { t: 'control'; reqId: number; preset: 'medium' | 'stress' }   // CP-1: UI dev menu → server → NATS control.load
   | { t: 'ping'; ts: number };
 type ServerMsg =
@@ -421,7 +422,7 @@ type ServerMsg =
   - Request content: `UNSUPPORTED_FILTER`, `UNSUPPORTED_AGG`, `UNSUPPORTED_PIVOT`, `UNSUPPORTED_GROUP`, `UNSUPPORTED_COLUMN`, `UNKNOWN_COLUMN`, `UNKNOWN_TRADER`
   - Message format and order: `BAD_REQUEST`, `BAD_FRAME`, `BAD_MESSAGE`, `HELLO_REQUIRED`
   - Server state: `NOT_READY`, `NOT_IMPLEMENTED`, `INTERNAL`
-  - Phases 5 and 6 add: `INVALID_TRANSITION` (a command not allowed in the order's state), `UNKNOWN_ORDER`, `SLOW_CONSUMER` (sent just before closing a client that is too far behind)
+  - Phases 5 and 6 add: `INVALID_TRANSITION` (a command not allowed in the order's state), `UNKNOWN_ORDER`, `SLOW_CONSUMER` (sent just before closing a client that is too far behind). PLAN1 adds `FORBIDDEN`, `UNKNOWN_USER` and `INVALID_AMEND`; `welcome` gains optional `user` and `server` (see `PLAN1-architecture-split.md`, Appendix 1G)
 - **NATS subjects:** `prices.<PAIR>` with `{pair, bid, ask, ts}`; `orders.events` with `{type: 'NEW'|'UPDATE', order: Partial<Order> & {orderId}, ts}`; `orders.commands` with `{orderId, action, requestedBy, ts}`; `control.load` with `{preset}`.
 - **Event rules (pre-phase-5):**
   - **Absolute values:** events carry **absolute post-change values**, never increments (for example `filledQty: 4_200_000`, not `+100_000`). That makes applying them **idempotent**: replaying the ORDERS stream after a restart, or receiving a NEW for an order already in the store, is a safe upsert.
