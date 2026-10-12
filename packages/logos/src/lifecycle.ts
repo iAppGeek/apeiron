@@ -134,7 +134,7 @@ export function transition(order: Order, to: OrderStatus, now: number): Transiti
 
 export type PriceQuote = { bid: number; ask: number };
 
-/** The fields {@link derivePriceFields} and {@link deriveOverlay} read, so callers can pass a light object instead of a full order. */
+/** The fields {@link deriveOverlay} reads, so callers can pass a light object instead of a full order. */
 export type PriceDerivationInput = Pick<
   Order,
   | 'currencyPair'
@@ -183,19 +183,6 @@ export function deriveOverlay(order: PriceDerivationInput, quote: PriceQuote): O
     distanceToLimitBps: distanceToLimitBpsOf(order, marketMid),
     unrealisedPnlUsd: pnlUsdOf(order, marketMid),
   };
-}
-
-/**
- * The price-derived fields the server owns, recomputed from the latest quote: the overlay fields (with
- * `unrealisedPnlUsd` only for LIVE and PAUSED orders), `slippageBps` when the order has fills, and
- * `lastUpdateTime`.
- */
-export function derivePriceFields(order: PriceDerivationInput, quote: PriceQuote, now: number): Partial<Order> {
-  const { unrealisedPnlUsd, ...rest } = deriveOverlay(order, quote);
-  const changes: Partial<Order> = { ...rest, lastUpdateTime: now };
-  if (order.avgFillPrice !== null) changes.slippageBps = slippageBpsOf(order, order.avgFillPrice);
-  if (isOpen(order.status)) changes.unrealisedPnlUsd = unrealisedPnlUsd;
-  return changes;
 }
 
 /** Applies a command through {@link transition}: the absolute changed fields, or INVALID_TRANSITION. */

@@ -24,6 +24,7 @@ flowchart LR
     NG["nginx<br/>static files + /ws proxy"]
     AN["antikythera<br/>blotter server"]
     TH["themis<br/>order service of record"]
+    HL["helios<br/>price feed"]
     HE["hermes<br/>mock middleware"]
     NA[("NATS JetStream<br/>ORDERS, PRICES, KV ORDER_STATE")]
     MO[("MongoDB")]
@@ -33,7 +34,9 @@ flowchart LR
   end
   W <-->|"WebSocket: JSON or msgpack"| NG
   NG <--> AN
-  HE -->|"prices.*, orders.events"| NA
+  HL -->|"prices.*"| NA
+  HE -->|"orders.events"| NA
+  NA -->|"prices.*"| HE
   NA -->|"durable consumer"| AN
   AN -->|"orders.commands, control.load"| NA
   NA --> HE
@@ -53,7 +56,8 @@ flowchart LR
 | **pharos** | `apps/pharos` | The web app. React 19, AG Grid Enterprise 36 with the server-side row model, a Web Worker that owns the socket and the codec, Zustand for small app state. Served by unprivileged nginx |
 | **antikythera** | `apps/antikythera` | The blotter server (Node, Fastify, `ws`). Holds every order in memory, answers `getRows`, ingests the live feed, and pushes deltas. Connects only to NATS |
 | **themis** | `apps/themis` | The order service of record. Owns the database: it consumes `orders.events` through its own durable consumer, applies them to the full order, stores each batch (group commit, 20 ms or 500 changes), then publishes the order's new version to the `ORDER_STATE` KV bucket and acknowledges the event. Keeps a per-order version `v`, rebuilds the bucket (the "projection") from the database when it is missing, and reconciles anything a crash left unpublished. Never reads prices |
-| **hermes** | `apps/hermes` | Mock middleware: a 20-pair random-walk price feed and the order lifecycle (pending to live, fills, new orders), and it executes commands. Stands in for the real order management system |
+| **helios** | `apps/helios` | The price feed: a 20-pair random walk published as `prices.<PAIR>` at 3 ticks per second each, to the `PRICES` stream (file storage, one message per subject). Starts each walk from the last price on the stream, else from the order service's `ref.mids`, else the pair's reference level. Knows nothing about orders |
+| **hermes** | `apps/hermes` | Mock middleware: the order lifecycle (pending to live, fills, new orders), and it executes commands. Follows `prices.*` for fill prices and for the market snapshot of an order that completes; makes no prices. Stands in for the real order management system |
 | **gaia** | `apps/gaia` | The seeder: deterministic generation of 1M orders over six months, bulk-loaded into the database; a second run is a no-op |
 | **talos** | `apps/talos` | The load harness: N WebSocket clients, each with its own sort, filter, group and scroll pattern, reporting latency percentiles and server CPU, RSS and event-loop lag |
 | **logos** | `packages/logos` | The shared vocabulary: the `Order` type, the 50-column metadata, the protocol, the JSON and msgpack codecs, the PRNG and order generator, the `Bus` port, and the order lifecycle state machine |
@@ -71,6 +75,7 @@ and UI depend on neither NATS nor Mongo, and only `themis`, `hermes` (until phas
 sequenceDiagram
   participant G as gaia
   participant M as MongoDB
+  participant P as helios
   participant H as hermes
   participant N as NATS
   participant A as antikythera
@@ -80,9 +85,9 @@ sequenceDiagram
   G->>M: upsertMany (1M orders, batches of 10,000)
   A->>N: watch ORDER_STATE (latest state of every order), then lastPerSubject(PRICES)
   Note over A: columnar store filled; /health ok
-  H->>M: loadCurrent (PENDING_START, LIVE, PAUSED)
+  H->>M: loadOpen (PENDING_START, LIVE, PAUSED)
   loop every 330 ms per pair
-    H->>N: prices.PAIR
+    P->>N: prices.PAIR
   end
   H->>N: orders.events (new, fills, status changes)
   N->>A: durable consumer, acked after applying
@@ -113,7 +118,7 @@ sequenceDiagram
    On SIGTERM it drains: `/health/ready` turns 503 at once, new WebSocket upgrades are refused, and after `DRAIN_MS` (2 s)
    every socket is closed with code **1012** ("server restarting"), which pharos answers by reconnecting immediately
    (keeping its trader, codec and server choices) instead of backing off.
-3. **Live updates.** `hermes` publishes price ticks (`prices.<PAIR>`, 3 per second per pair) and order events
+3. **Live updates.** `helios` publishes price ticks (`prices.<PAIR>`, 3 per second per pair) and `hermes` order events
    (`orders.events`: new orders, fills, status changes). Both streams are JetStream, and the server reads them through a
    durable consumer that acknowledges only after an event has been applied, so a restart replays what was missed. `themis` reads the
    events and persists them; `antikythera` reads the result: each order's latest state from the `ORDER_STATE` bucket (a record is

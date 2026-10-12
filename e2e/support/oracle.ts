@@ -74,8 +74,7 @@ const flat = (over: Partial<SsrmRequest>): SsrmRequest => ({
 
 /**
  * Reads back every order the stream created and every order an event touched or a tick repriced, and compares each
- * with the model field for field. Excluded fields are the model's own (`Expected.excluded`): the server clock's
- * `lastUpdateTime` everywhere, and the quote-derived fields of closed orders (see `OrderModel.expected`).
+ * with the model field for field. Excluded fields are the model's own (`Expected.excluded`); today there are none.
  */
 export async function checkModelVsServer(input: ModelCheckInput): Promise<Check> {
   const { driver, reader } = input;

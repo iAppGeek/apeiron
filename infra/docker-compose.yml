@@ -115,6 +115,37 @@ services:
       start_period: 300s
     restart: unless-stopped
 
+  # The price feed: a random walk per pair published as prices.<PAIR>. Knows nothing about orders. It starts each
+  # walk from the last price on the PRICES stream (so a restart carries on), else from the order service's levels.
+  helios:
+    profiles: [core]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      args:
+        APP: helios
+    image: ${REGISTRY:-local}/apeiron/helios:${TAG:-dev}
+    environment:
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HEALTH_PORT: "4300"
+    ports:
+      - "127.0.0.1:4300:4300"
+    # After themis, so a first start (no last price on the stream yet) can ask it for the open orders' levels
+    # instead of giving up after 10 s and starting every pair at its reference level.
+    depends_on:
+      nats:
+        condition: service_healthy
+      themis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4300/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
   hermes:
     profiles: [core]
     build:
@@ -136,6 +167,8 @@ services:
       nats:
         condition: service_healthy
       themis:
+        condition: service_healthy
+      helios:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4100/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]

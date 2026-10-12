@@ -12,7 +12,6 @@ const PRESETS: readonly LoadPreset[] = ['medium', 'stress'];
 export class HermesMetrics {
   readonly registry = new Registry();
   private readonly events: Counter;
-  private readonly ticks: Counter;
   private readonly commands: Counter;
   private readonly errors: Counter;
   private snapshot: (() => HermesSnapshot | null) | null = null;
@@ -21,7 +20,6 @@ export class HermesMetrics {
     const registers = [this.registry];
     collectDefaultMetrics({ register: this.registry });
     this.events = new Counter({ name: 'hermes_events_published_total', help: 'Order events published to orders.events, by event type.', labelNames: ['type'], registers });
-    this.ticks = new Counter({ name: 'hermes_price_ticks_total', help: 'Price ticks published to prices.<PAIR>.', registers });
     this.commands = new Counter({ name: 'hermes_commands_handled_total', help: 'Trader commands handled.', registers });
     this.errors = new Counter({ name: 'hermes_publish_errors_total', help: 'Messages that failed to publish.', registers });
     this.gauge('hermes_live_orders', 'Orders currently LIVE.', (g) => g.set(this.snapshot?.()?.live ?? 0));
@@ -45,10 +43,6 @@ export class HermesMetrics {
 
   event(type: string): void {
     this.events.labels(type).inc();
-  }
-
-  tick(): void {
-    this.ticks.inc();
   }
 
   commandHandled(): void {

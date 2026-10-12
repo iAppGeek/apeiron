@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { startHelios, type Helios } from '@apeiron/helios/helios';
 import { startHermes, type Hermes } from '@apeiron/hermes/hermes';
 import {
   SUBJECTS,
@@ -10,6 +11,7 @@ import {
   type CommandAction,
   type ConsumeHandler,
   type ConsumeSpec,
+  type CurrencyPair,
   type KvBucket,
   type LoadPreset,
   type Order,
@@ -27,7 +29,7 @@ function repoRoot(): string {
   return new URL('../../', import.meta.url).pathname;
 }
 
-/** Stops the real hermes so the driver is the only publisher. Safe to call twice. */
+/** Stops the real hermes so the driver is the only publisher of orders. Safe to call twice. */
 export async function stopHermesContainer(): Promise<void> {
   await run('docker', ['compose', '--profile', 'core', 'stop', 'hermes'], { cwd: repoRoot() });
 }
@@ -35,6 +37,16 @@ export async function stopHermesContainer(): Promise<void> {
 /** Starts the real hermes again; teardown calls it whether or not the scenario passed. */
 export async function startHermesContainer(): Promise<void> {
   await run('docker', ['compose', '--profile', 'core', 'start', 'hermes'], { cwd: repoRoot() });
+}
+
+/** Stops the real price feed so the driver is the only publisher of prices. Safe to call twice. */
+export async function stopHeliosContainer(): Promise<void> {
+  await run('docker', ['compose', '--profile', 'core', 'stop', 'helios'], { cwd: repoRoot() });
+}
+
+/** Starts the real price feed again; teardown calls it whether or not the scenario passed. */
+export async function startHeliosContainer(): Promise<void> {
+  await run('docker', ['compose', '--profile', 'core', 'start', 'helios'], { cwd: repoRoot() });
 }
 
 export type DriverRate = 'normal' | 'stress';
@@ -56,6 +68,8 @@ export type DriverStats = {
 
 export type DriverRepo = {
   loadOpen(): Promise<{ order: Order }[]>;
+  /** Where the price walk starts: the latest market mid per pair among the open orders. */
+  latestMidsByPair(): Promise<Record<CurrencyPair, number>>;
   maxOrderId(): Promise<string | null>;
 };
 
@@ -110,6 +124,7 @@ export function createDriver(options: DriverOptions): Driver {
   const now = (): number => Date.now() + offset;
   const pending = new Set<Promise<void>>();
   let hermes: Hermes | null = null;
+  let helios: Helios | null = null;
   let injector: ReturnType<typeof setInterval> | null = null;
   let startMax: string | null = null;
   let startedAt = 0;
@@ -225,6 +240,14 @@ export function createDriver(options: DriverOptions): Driver {
       startMax = await options.repo.maxOrderId();
       model.current = new OrderModel(current);
       startedAt = now();
+      // The price feed first, as in the stack: hermes follows its ticks for fill prices.
+      helios = startHelios({
+        bus: tee,
+        log: SILENT,
+        levels: await options.repo.latestMidsByPair(),
+        seed: options.seed ^ 0x5bd1e995,
+        now,
+      });
       hermes = await startHermes({
         bus: tee,
         log: SILENT,
@@ -248,12 +271,15 @@ export function createDriver(options: DriverOptions): Driver {
       if (injector !== null) clearInterval(injector);
       injector = null;
       const running = hermes;
+      const prices = helios;
       hermes = null;
-      if (running === null) return;
+      helios = null;
+      if (running === null || prices === null) return;
       await running.stop();
+      await prices.stop();
       await Promise.all([...pending]);
       // One last tick per pair, so the server's final price join and the model's agree on the quote.
-      for (const tick of running.feed.tick(now())) {
+      for (const tick of prices.feed.tick(now())) {
         track(tee.publish(`prices.${tick.pair}`, tick));
       }
       await Promise.all([...pending]);

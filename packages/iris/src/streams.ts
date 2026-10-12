@@ -14,7 +14,8 @@ export type StreamSpec = Pick<
 
 /**
  * The two JetStream streams of Appendix C: ORDERS captures `orders.*` (limits retention, 24h) and
- * PRICES captures `prices.*` and keeps one message per subject, so a late joiner can read the last quote.
+ * PRICES captures `prices.*` and keeps one message per subject, so a late joiner can read the last quote. PRICES is on
+ * file storage, so the last quote (and so the price feed's starting level) survives a restart of the broker.
  */
 export function streamSpecs(): StreamSpec[] {
   return [
@@ -32,7 +33,7 @@ export function streamSpecs(): StreamSpec[] {
       name: STREAMS.prices,
       subjects: ['prices.*'],
       retention: RetentionPolicy.Limits,
-      storage: StorageType.Memory,
+      storage: StorageType.File,
       discard: DiscardPolicy.Old,
       max_age: 0,
       max_msgs_per_subject: 1,
@@ -47,10 +48,11 @@ export type StreamManager = {
     info(name: string): Promise<{ config: Partial<StreamConfig> & Record<string, unknown> }>;
     add(config: Partial<StreamConfig>): Promise<unknown>;
     update(name: string, config: Partial<StreamConfig>): Promise<unknown>;
+    delete(name: string): Promise<unknown>;
   };
 };
 
-export type EnsureResult = { name: string; action: 'created' | 'updated' | 'unchanged' };
+export type EnsureResult = { name: string; action: 'created' | 'updated' | 'recreated' | 'unchanged' };
 
 const isMissing = (error: unknown): boolean =>
   error instanceof Error && (error.name === 'StreamNotFoundError' || /stream not found/i.test(error.message));
@@ -79,6 +81,12 @@ export async function ensureStreams(
     if (existing === null) {
       await manager.streams.add(spec);
       results.push({ name: spec.name, action: 'created' });
+    } else if (existing['storage'] !== undefined && spec.storage !== undefined && existing['storage'] !== spec.storage) {
+      // The storage type of a stream cannot be changed in place. Only streams whose contents can be lost without harm
+      // (the last price of each pair) are listed in specs this way, so it is deleted and made again.
+      await manager.streams.delete(spec.name);
+      await manager.streams.add(spec);
+      results.push({ name: spec.name, action: 'recreated' });
     } else if (differs(existing, spec)) {
       await manager.streams.update(spec.name, { ...existing, ...spec } as Partial<StreamConfig>);
       results.push({ name: spec.name, action: 'updated' });

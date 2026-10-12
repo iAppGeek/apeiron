@@ -161,7 +161,7 @@ describe('live server over a real socket', () => {
     if (delta.t !== 'delta') throw new Error('unreachable');
     const priced = delta.updates[0]?.rows.find((r) => r.marketMid === 1.09);
     expect(priced).toBeDefined();
-    expect(Object.keys(priced ?? {})).toEqual(expect.arrayContaining(['orderId', 'marketMid', 'unrealisedPnlUsd', 'lastUpdateTime']));
+    expect(Object.keys(priced ?? {})).toEqual(expect.arrayContaining(['orderId', 'marketMid', 'unrealisedPnlUsd']));
 
     const fresh: Order = { ...(ROWS[0] as Order), orderId: 'T0001000', createdAt: 99_999, status: 'LIVE' };
     await publishRecord(bus, fresh);

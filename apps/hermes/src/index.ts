@@ -1,4 +1,5 @@
-import { NatsBus, ensureStreams } from '@apeiron/iris';
+import { NatsBus, ensureStreams, streamSpecs } from '@apeiron/iris';
+import { STREAMS } from '@apeiron/logos';
 import { MongoOrderRepository } from '@apeiron/mnemosyne';
 import { loadConfig } from './config.js';
 import { closeServer, startHealthServer } from './health.js';
@@ -21,7 +22,8 @@ const health = await startHealthServer(
 const repo = await MongoOrderRepository.connect({ url: config.mongoUrl, db: config.mongoDb });
 const bus = await NatsBus.connect({ url: config.natsUrl, name: 'hermes', log });
 
-const streams = await ensureStreams(await bus.manager());
+// hermes makes sure the order stream exists; the price feed owns PRICES.
+const streams = await ensureStreams(await bus.manager(), streamSpecs().filter((s) => s.name === STREAMS.orders));
 log.info({ streams }, 'streams ready');
 
 const current = (await repo.loadOpen()).map((record) => record.order);
@@ -36,6 +38,7 @@ hermes = await startHermes({
   maxOrderId,
   seed: config.seed ?? Date.now() % 2 ** 31,
   stepMs: config.stepMs,
+  priceWaitMs: config.priceWaitMs,
   metrics,
 });
 log.info({ preset: config.loadPreset }, 'hermes started');

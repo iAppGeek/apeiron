@@ -7,18 +7,16 @@ const sample = (text: string, series: string): number | undefined => {
 };
 
 describe('HermesMetrics', () => {
-  it('counts events by type, ticks, commands and publish errors', async () => {
+  it('counts events by type, commands and publish errors', async () => {
     const m = new HermesMetrics();
     m.event('NEW');
     m.event('UPDATE');
     m.event('UPDATE');
-    m.tick();
     m.commandHandled();
     m.publishError();
     const text = await m.render();
     expect(sample(text, 'hermes_events_published_total{type="UPDATE"}')).toBe(2);
     expect(sample(text, 'hermes_events_published_total{type="NEW"}')).toBe(1);
-    expect(sample(text, 'hermes_price_ticks_total')).toBe(1);
     expect(sample(text, 'hermes_commands_handled_total')).toBe(1);
     expect(sample(text, 'hermes_publish_errors_total')).toBe(1);
     expect(text).toContain('process_cpu_seconds_total');

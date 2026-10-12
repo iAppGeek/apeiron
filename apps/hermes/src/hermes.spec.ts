@@ -1,9 +1,9 @@
-import { MemoryBus, makeCommandId, parseLoadState, parseOrderEvent, parsePriceTick, PAIRS, type OrderCommand, type OrderEvent, type PriceTick } from '@apeiron/logos';
+import { MemoryBus, makeCommandId, parseLoadState, parseOrderEvent, priceSubject, PAIRS, type CurrencyPair, type OrderCommand, type OrderEvent } from '@apeiron/logos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startHermes, type Hermes } from './hermes.js';
 import { createLogger } from './log.js';
 import { HermesMetrics } from './metrics.js';
-import { SEED_NOW, currentOrders } from './testing.js';
+import { SEED_NOW, currentOrders, quotesFor } from './testing.js';
 
 const log = createLogger('error', () => undefined);
 let running: Hermes | null = null;
@@ -14,8 +14,18 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function start(bus: MemoryBus, overrides: { maxOrderId?: string | null; seed?: number; metrics?: HermesMetrics } = {}): Promise<Hermes> {
+/** What the price feed leaves on the stream: a quote for every pair. */
+async function publishQuotes(bus: MemoryBus, ts = SEED_NOW): Promise<void> {
+  for (const tick of quotesFor(currentOrders(), ts)) await bus.publish(priceSubject(tick.pair), tick);
+}
+
+async function start(
+  bus: MemoryBus,
+  overrides: { maxOrderId?: string | null; seed?: number; metrics?: HermesMetrics; quotes?: boolean; priceWaitMs?: number } = {},
+): Promise<Hermes> {
+  if (overrides.quotes !== false) await publishQuotes(bus);
   const hermes = await startHermes({
+    priceWaitMs: overrides.priceWaitMs ?? 0,
     bus,
     log,
     preset: 'medium',
@@ -30,23 +40,16 @@ async function start(bus: MemoryBus, overrides: { maxOrderId?: string | null; se
 }
 
 describe('startHermes', () => {
-  it('reconciles at startup, then publishes prices at 3 ticks/s per pair and events at the preset rate', async () => {
+  it('reconciles at startup, then publishes events at the preset rate, and no prices of its own', async () => {
     vi.useFakeTimers({ now: SEED_NOW + 2 * 86_400_000 });
     const bus = new MemoryBus();
-    const ticks: PriceTick[] = [];
-    await bus.subscribe('prices.*', (p) => {
-      const parsed = parsePriceTick(p);
-      if (parsed.ok) ticks.push(parsed.value);
-    });
     await start(bus);
+    const quoteMessages = bus.streamLog('PRICES').length;
     const startupEvents = bus.streamLog('ORDERS').length;
     expect(startupEvents).toBeGreaterThan(0);
-    expect(ticks).toHaveLength(PAIRS.length);
 
-    ticks.length = 0;
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(ticks.length / PAIRS.length / 10).toBeGreaterThan(2.5);
-    expect(ticks.length / PAIRS.length / 10).toBeLessThan(3.5);
+    expect(bus.streamLog('PRICES')).toHaveLength(quoteMessages);
     const events = bus.streamLog('ORDERS').slice(startupEvents);
     expect(events.length / 10).toBeGreaterThan(90);
     for (const m of events) {
@@ -55,17 +58,68 @@ describe('startHermes', () => {
     }
   });
 
-  it('reports published events and ticks, LIVE count and the preset to its metrics', async () => {
+  it('reports published events, LIVE count and the preset to its metrics', async () => {
     vi.useFakeTimers({ now: SEED_NOW + 2 * 86_400_000 });
     const metrics = new HermesMetrics();
     const hermes = await start(new MemoryBus(), { metrics });
     await vi.advanceTimersByTimeAsync(3_000);
     const text = await metrics.render();
     const value = (series: string): number => Number(text.split('\n').find((l) => l.startsWith(`${series} `))?.split(' ')[1]);
-    expect(value('hermes_price_ticks_total')).toBeGreaterThanOrEqual(PAIRS.length * 8);
     expect(value('hermes_events_published_total{type="UPDATE"}')).toBeGreaterThan(100);
     expect(value('hermes_live_orders')).toBe(hermes.status().live);
     expect(value('hermes_preset{preset="medium"}')).toBe(1);
+  });
+
+  it('takes the last quote of every pair from the stream and prices completions against it', async () => {
+    vi.useFakeTimers({ now: SEED_NOW + 2 * 86_400_000 });
+    const bus = new MemoryBus();
+    const hermes = await start(bus);
+    expect(hermes.quotes.missing()).toEqual([]);
+    expect(hermes.quotes.size).toBe(PAIRS.length);
+    const updates = bus.streamLog('ORDERS').flatMap((m) => {
+      const parsed = parseOrderEvent(m.payload);
+      return parsed.ok && parsed.value.type === 'UPDATE' && parsed.value.order.status === 'FILLED' ? [parsed.value.order] : [];
+    });
+    expect(updates.length).toBeGreaterThan(0);
+    for (const order of updates) {
+      const quote = hermes.quotes.quote(order.orderId === undefined ? 'EURUSD' : (hermes.simulator.order(order.orderId)?.currencyPair ?? 'EURUSD'));
+      expect(quote).toBeDefined();
+    }
+  });
+
+  it('follows live ticks: a newer quote replaces the one it holds, an older one does not', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const hermes = await start(bus);
+    const before = hermes.quotes.quote('EURUSD');
+    await bus.publish('prices.EURUSD', { pair: 'EURUSD', bid: 2, ask: 2.0002, ts: SEED_NOW + 10 });
+    expect(hermes.quotes.mid('EURUSD')).toBeCloseTo(2.0001, 6);
+    await bus.publish('prices.EURUSD', { pair: 'EURUSD', bid: 3, ask: 3.0002, ts: SEED_NOW - 5 });
+    expect(hermes.quotes.mid('EURUSD')).toBeCloseTo(2.0001, 6);
+    expect(before).toBeDefined();
+  });
+
+  it('waits for the feed to publish, and starts without the missing pairs once the wait is over', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const starting = start(bus, { quotes: false, priceWaitMs: 500 });
+    await vi.advanceTimersByTimeAsync(200);
+    for (const tick of quotesFor(currentOrders(), SEED_NOW).filter((t) => t.pair !== 'USDTRY' && t.pair !== 'USDZAR')) await bus.publish(priceSubject(tick.pair), tick);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const hermes = await starting;
+    expect(hermes.quotes.missing().sort()).toEqual(['USDTRY', 'USDZAR'] satisfies CurrencyPair[]);
+    // A pair with no quote is priced at its reference level.
+    expect(hermes.quotes.mid('USDTRY')).toBe(PAIRS.find((p) => p.pair === 'USDTRY')?.mid);
+  });
+
+  it('stops following the feed when it stops', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    const hermes = await start(bus);
+    await hermes.stop();
+    await bus.publish('prices.EURUSD', { pair: 'EURUSD', bid: 9, ask: 9, ts: SEED_NOW + 99 });
+    expect(hermes.quotes.mid('EURUSD')).not.toBe(9);
+    running = null;
   });
 
   it('continues order ids above maxOrderId', async () => {
@@ -128,8 +182,9 @@ describe('startHermes', () => {
   it('counts publish failures without crashing', async () => {
     vi.useFakeTimers({ now: SEED_NOW });
     const bus = new MemoryBus();
+    await publishQuotes(bus);
     const publish = vi.spyOn(bus, 'publish').mockRejectedValue(new Error('nats down'));
-    const hermes = await start(bus);
+    const hermes = await start(bus, { quotes: false });
     await vi.advanceTimersByTimeAsync(1_000);
     expect(publish).toHaveBeenCalled();
     expect(hermes.status().publishErrors).toBeGreaterThan(0);

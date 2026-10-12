@@ -1,4 +1,4 @@
-import { PAIRS, PAIR_BY_NAME, normal, uniform, type CurrencyPair, type Order, type PriceTick, type Rng } from '@apeiron/logos';
+import { PAIRS, PAIR_BY_NAME, normal, uniform, type CurrencyPair, type PriceTick, type Rng } from '@apeiron/logos';
 import { TICKS_PER_SECOND } from './presets.js';
 
 /** The walk is run faster than real FX so moves are visible: 5x the volatility a true per-tick scaling gives. */
@@ -12,22 +12,9 @@ const roundTo = (value: number, decimals: number): number => {
   return Math.round(value * f) / f;
 };
 
-/**
- * Each pair's starting mid: the `marketMid` of the most recently updated current order (so LIVE rows do not
- * jump on the first tick), falling back to the reference level for a pair with no current orders.
- */
-export function startingMids(current: readonly Order[]): Record<CurrencyPair, number> {
-  const latest = new Map<CurrencyPair, Order>();
-  for (const order of current) {
-    const seen = latest.get(order.currencyPair);
-    if (seen === undefined || order.lastUpdateTime > seen.lastUpdateTime || (order.lastUpdateTime === seen.lastUpdateTime && order.orderId > seen.orderId)) {
-      latest.set(order.currencyPair, order);
-    }
-  }
-  return Object.fromEntries(PAIRS.map((p): [CurrencyPair, number] => [p.pair, latest.get(p.pair)?.marketMid ?? p.mid])) as Record<
-    CurrencyPair,
-    number
-  >;
+/** Every pair's reference level: where the walk starts when nothing better is known. */
+export function referenceMids(): Record<CurrencyPair, number> {
+  return Object.fromEntries(PAIRS.map((p): [CurrencyPair, number] => [p.pair, p.mid])) as Record<CurrencyPair, number>;
 }
 
 /** A random walk per pair with a G10 or EM spread (Appendix E), rounded to the pair's decimals. */

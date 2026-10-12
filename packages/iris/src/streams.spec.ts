@@ -1,4 +1,4 @@
-import { RetentionPolicy } from '@nats-io/jetstream';
+import { RetentionPolicy, StorageType } from '@nats-io/jetstream';
 import { describe, expect, it, vi } from 'vitest';
 import { ensureStreams, streamSpecs, type StreamManager } from './streams.js';
 
@@ -18,6 +18,7 @@ function manager(existing: Record<string, Record<string, unknown>>): StreamManag
       }),
       add: vi.fn(() => Promise.resolve({})),
       update: vi.fn(() => Promise.resolve({})),
+      delete: vi.fn(() => Promise.resolve({})),
     },
   };
 }
@@ -66,6 +67,22 @@ describe('ensureStreams', () => {
     expect(results[0]).toEqual({ name: 'ORDERS', action: 'updated' });
     expect(m.streams.update).toHaveBeenCalledTimes(1);
     expect(m.streams.update).toHaveBeenCalledWith('ORDERS', expect.objectContaining({ max_age: DAY_NS, num_replicas: 1 }));
+  });
+
+  it('keeps PRICES on file storage', () => {
+    expect(streamSpecs()[1]?.storage).toBe(StorageType.File);
+  });
+
+  it('recreates a stream whose storage type differs, since that cannot be changed in place', async () => {
+    const specs = streamSpecs();
+    const m = manager({ ORDERS: { ...specs[0] }, PRICES: { ...specs[1], storage: StorageType.Memory } });
+    expect(await ensureStreams(m)).toEqual([
+      { name: 'ORDERS', action: 'unchanged' },
+      { name: 'PRICES', action: 'recreated' },
+    ]);
+    expect(m.streams.delete).toHaveBeenCalledWith('PRICES');
+    expect(m.streams.add).toHaveBeenCalledWith(expect.objectContaining({ name: 'PRICES', storage: StorageType.File }));
+    expect(m.streams.update).not.toHaveBeenCalled();
   });
 
   it('rethrows unexpected errors', async () => {

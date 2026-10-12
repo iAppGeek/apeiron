@@ -73,17 +73,29 @@ describe('checkModelVsServer', () => {
     return model;
   };
 
-  it('passes when the server holds exactly what the model says, ignoring the server clock', async () => {
+  it('passes when the server holds exactly what the model says, field for field', async () => {
     const model = build();
     const table = [
-      { ...order('ALG00000001', { status: 'FILLED' }), lastUpdateTime: 5 },
-      { ...order('ALG00000002', { filledQty: 10, numFills: 1 }), lastUpdateTime: 99 },
+      order('ALG00000001', { status: 'FILLED' }),
+      order('ALG00000002', { filledQty: 10, numFills: 1 }),
       order('ALG00000003'),
     ] as unknown as Row[];
     const check = await checkModelVsServer({ driver: driverOf(model, 'ALG00000002'), reader: fakeReader(table), baselineRowCount: 2 });
     expect(check.failures).toEqual([]);
     expect(check.ok).toBe(true);
     expect(check.stats['created']).toBe(1);
+  });
+
+  it('fails when only the update time differs: the blotter no longer writes it, so it must match', async () => {
+    const model = build();
+    const table = [
+      order('ALG00000001', { status: 'FILLED' }),
+      { ...order('ALG00000002', { filledQty: 10, numFills: 1 }), lastUpdateTime: 99 },
+      order('ALG00000003'),
+    ] as unknown as Row[];
+    const check = await checkModelVsServer({ driver: driverOf(model, 'ALG00000002'), reader: fakeReader(table), baselineRowCount: 2 });
+    expect(check.ok).toBe(false);
+    expect(check.failures.join('\n')).toContain('lastUpdateTime');
   });
 
   it('fails on a lost update, a missing new order and a wrong row count', async () => {

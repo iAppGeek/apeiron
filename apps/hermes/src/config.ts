@@ -20,6 +20,8 @@ const envSchema = z.object({
     .transform((s): number | undefined => (s === undefined || s === '' ? undefined : Number(s))),
   /** Port of the internal `/health` endpoint. */
   HEALTH_PORT: posInt('4100').pipe(z.number().max(65535)),
+  /** How long to wait at startup for a quote for every pair from the price feed. */
+  PRICE_WAIT_MS: posInt('10000'),
   /** Lifecycle simulator step length. */
   STEP_MS: posInt('100'),
 });
@@ -35,6 +37,7 @@ export type HermesConfig = {
   seed: number | undefined;
   healthPort: number;
   stepMs: number;
+  priceWaitMs: number;
 };
 
 export function loadConfig(env: Record<string, string | undefined>): HermesConfig {
@@ -56,5 +59,6 @@ export function loadConfig(env: Record<string, string | undefined>): HermesConfi
     seed: e.HERMES_SEED,
     healthPort: e.HEALTH_PORT,
     stepMs: e.STEP_MS,
+    priceWaitMs: e.PRICE_WAIT_MS,
   };
 }

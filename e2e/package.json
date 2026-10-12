@@ -15,6 +15,7 @@
     "e2e:resilience:quick": "RESILIENCE_TIER=quick playwright test -c playwright.resilience.config.ts"
   },
   "dependencies": {
+    "@apeiron/helios": "workspace:*",
     "@apeiron/hermes": "workspace:*",
     "@apeiron/iris": "workspace:*",
     "@apeiron/logos": "workspace:*",

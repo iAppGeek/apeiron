@@ -1,4 +1,4 @@
-import { derivePriceFields, type Order, type OrderEvent } from '@apeiron/logos';
+import { deriveOverlay, type Order, type OrderEvent } from '@apeiron/logos';
 import { describe, expect, it } from 'vitest';
 import { OrderModel } from './model';
 
@@ -55,19 +55,18 @@ describe('OrderModel', () => {
     model.applyTick({ pair: 'EURUSD', bid: 1.0, ask: 1.0004, ts: 1 });
     model.applyTick({ pair: 'EURUSD', bid: 1.2, ask: 1.2004, ts: 2 });
     const expected = model.expected('ALG00000001');
-    const direct = derivePriceFields(order({ avgFillPrice: 1.01, filledQty: 100 }), { bid: 1.2, ask: 1.2004 }, 0);
+    const direct = deriveOverlay(order({ avgFillPrice: 1.01, filledQty: 100 }), { bid: 1.2, ask: 1.2004 });
     expect(expected?.order.marketMid).toBe(direct.marketMid);
     expect(expected?.order.unrealisedPnlUsd).toBe(direct.unrealisedPnlUsd);
-    expect([...(expected?.excluded ?? [])]).toEqual(['lastUpdateTime']);
+    expect([...(expected?.excluded ?? [])]).toEqual([]);
   });
 
-  it('does not reprice closed orders, and excludes their quote fields from comparison', () => {
+  it('does not reprice closed orders: they show what their last event left, and nothing is excluded', () => {
     const model = new OrderModel([order({ status: 'FILLED' })]);
     model.applyTick({ pair: 'EURUSD', bid: 1.2, ask: 1.2004, ts: 2 });
     const expected = model.expected('ALG00000001');
     expect(expected?.order.marketMid).toBe(1);
-    expect(expected?.excluded.has('marketMid')).toBe(true);
-    expect(expected?.excluded.has('filledQty')).toBe(false);
+    expect(expected?.excluded.size).toBe(0);
   });
 
   it('lists what to verify: touched orders plus repriced open orders', () => {

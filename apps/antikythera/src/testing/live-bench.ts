@@ -1,4 +1,4 @@
-import { ORDER_STATUSES, derivePriceFields, mulberry32, type Order, type SsrmRequest } from '@apeiron/logos';
+import { ORDER_STATUSES, deriveOverlay, mulberry32, type Order, type SsrmRequest } from '@apeiron/logos';
 import { QueryEngine } from '../query/engine.js';
 import { ChangeSet } from '../query/changeset.js';
 import { generateStore } from './dataset.js';
@@ -61,7 +61,7 @@ for (let tick = 0; tick < 100; tick++) {
   for (const row of order) {
     const o = store.orderAt(row);
     const mid = o.marketMid * (1 + (rng() - 0.5) * 1e-4);
-    const changes = derivePriceFields(o, { bid: mid * 0.99999, ask: mid * 1.00001 }, 1_800_000_000_000 + tick);
+    const changes = deriveOverlay(o, { bid: mid * 0.99999, ask: mid * 1.00001 });
     const { changed, prev } = store.updateRow(row, changes);
     cs.noteUpdate(row, changed, prev);
   }

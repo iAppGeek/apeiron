@@ -1,8 +1,4 @@
-import { derivePriceFields, isOpen, type CurrencyPair, type Order, type OrderEvent, type PriceTick } from '@apeiron/logos';
-
-/** Fields the server fills from its own clock or from a quote race, which a model cannot reproduce for a closed order. */
-export const SERVER_CLOCK_FIELDS: readonly (keyof Order)[] = ['lastUpdateTime'];
-export const QUOTE_FIELDS: readonly (keyof Order)[] = ['marketBid', 'marketAsk', 'marketMid', 'spreadBps', 'distanceToLimitBps'];
+import { deriveOverlay, isOpen, type CurrencyPair, type Order, type OrderEvent, type PriceTick } from '@apeiron/logos';
 
 export type Expected = {
   order: Order;
@@ -80,21 +76,17 @@ export class OrderModel {
 
   /**
    * What the server must hold for an order once everything has settled.
-   * - An open order (LIVE or PAUSED) was repriced from the latest tick of its pair, whatever else happened, so the
-   *   model applies the same logos function to that tick. Only `lastUpdateTime` (the server's clock) is ignored.
-   * - A closed or pending order is not repriced. Its quote fields depend on whether a tick landed on the server
-   *   before or after its closing event within one flush, which no model can know, so those five fields are ignored too.
+   * - An open order (LIVE or PAUSED) has the overlay of the latest tick of its pair, whatever else happened, so the
+   *   model applies the same logos function (`deriveOverlay`) to that tick.
+   * - Any other order shows exactly what its last event left: the market snapshot of the completing fill or cancel, and
+   *   the `lastUpdateTime` the simulator stamped. The blotter never writes either, so nothing is excluded.
    */
   expected(orderId: string): Expected | undefined {
     const base = this.orders.get(orderId);
     if (base === undefined) return undefined;
-    const excluded = new Set<string>(SERVER_CLOCK_FIELDS);
+    const excluded = new Set<string>();
     const tick = this.ticks.get(base.currencyPair);
-    if (isOpen(base.status)) {
-      if (tick === undefined) return { order: base, excluded };
-      return { order: { ...base, ...derivePriceFields(base, tick, base.lastUpdateTime) }, excluded };
-    }
-    for (const field of QUOTE_FIELDS) excluded.add(field);
+    if (isOpen(base.status) && tick !== undefined) return { order: { ...base, ...deriveOverlay(base, tick) }, excluded };
     return { order: base, excluded };
   }
 

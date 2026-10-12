@@ -65,6 +65,26 @@ describe('startThemis: startup', () => {
   });
 });
 
+describe('startThemis: reference levels', () => {
+  it('answers ref.mids with the latest market mid per pair among the open orders, and the reference level for the rest', async () => {
+    const bus = new MemoryBus();
+    const rows = [...history, ...open(3)].map((o, i): Order => (i === 5 ? { ...o, currencyPair: 'EURUSD', marketMid: 1.2345, lastUpdateTime: 9_999_999 } : o));
+    const themis = await startThemis(options(bus, await seeded(rows)));
+    const mids = (await bus.request('ref.mids', {}, 100)) as Record<string, number>;
+    expect(Object.keys(mids)).toHaveLength(20);
+    expect(mids['EURUSD']).toBe(1.2345);
+    expect(mids['USDTRY']).toBe(32);
+    await themis.stop();
+  });
+
+  it('stops answering when it stops', async () => {
+    const bus = new MemoryBus();
+    const themis = await startThemis(options(bus, await seeded()));
+    await themis.stop();
+    await expect(bus.request('ref.mids', {}, 50)).rejects.toThrow(/No responders/);
+  });
+});
+
 describe('startThemis: order events', () => {
   async function running(): Promise<{ bus: MemoryBus; repo: InMemoryOrderRepository; themis: Themis; state: KvBucket; metrics: ThemisMetrics; target: Order }> {
     const bus = new MemoryBus();

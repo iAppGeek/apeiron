@@ -333,7 +333,9 @@ per-tick **ChangeSet** ([`query/changeset.ts`](../apps/antikythera/src/query/cha
   row: `{row, isNew, fields, prev, lo/hi field mask, ts}`. `prev` keeps the *first* old value per field in the tick, and
   `ts` the earliest source-event timestamp (used for `delta.srcTs`).
 - **Price join:** `liveByPair` maps each pair to its LIVE/PAUSED rows; a tick reprices only those rows (market bid/ask/mid,
-  spread, distance-to-limit, slippage, unrealised P&L), and `lastUpdateTime` never moves backwards (resilience bug 3).
+  spread, distance-to-limit, unrealised P&L: `deriveOverlay`, a pure function of the record and the quote). The blotter
+  never writes `lastUpdateTime` (only the order service does), so a price move is not a change to the order and the column
+  no longer ticks; this is what the old "never moves backwards" guard (resilience bug 3) turned into.
 - `View.applyChanges` classifies each changed row with a 64-bit field-mask intersection:
   - **value-only**: no changed field is in the view's sort, filter or group columns → nothing moves; clients holding the
     row get the new values.
@@ -966,7 +968,8 @@ flowchart LR
 - **The three checks** (after the stream stops and everything is quiet; [`oracle.ts`](../e2e/support/oracle.ts),
   [`sampler.ts`](../e2e/support/sampler.ts)):
   1. **Model vs server.** A fresh protocol client reads every created and touched order; every field must equal the
-     model (except `lastUpdateTime`, the server's clock, and the quote fields of orders closed within a flush window).
+     model, every field (`lastUpdateTime` and the market snapshot of closed orders included, since the blotter writes
+     neither).
   2. **Server vs screen.** Every row each page holds must equal a fresh server read at the same position, field for field
      including `lastUpdateTime`; plus the root row count, group `childCount`s and aggregates (relative 1e-9), and the
      status chips.
@@ -1056,7 +1059,6 @@ From PLAN.md's decisions table and "Decisions log", and the review files.
 | **Non-default-sort anchoring drift** | Under a sort other than `createdAt desc`, rows arrive by background refresh; the first refresh after scrolling can drift about one row | CP-5 review |
 | **Connect-storm cold burst** | 50 clients opening cold views at the same instant queue on one thread: startup burst max 265 ms (json) / 445 ms (msgpack) | CP-4 §12.1 |
 | **Rare long stalls** | Single event-loop stalls of 200–350 ms show in the longest-stall figure (p99 stays 19–23 ms) | CP-4 §12.1 |
-| **`lastUpdateTime` after a restart** | Price-driven changes aren't persisted, so after a server restart an open order's update time steps back for under a second until the next tick | CP-6, TESTING.md |
 | **Saturated links** | At 16 KB/s the client's heartbeat gives up before the server does; tick-to-screen reaches 20 s+ while throttled | TESTING.md |
 | **Tracking bound** | The server follows at most 2,000 rows below the top of a route; rows beyond that in an unrefreshed cache would go stale (not observed) | TESTING.md |
 | **`getRowNode` is a linear scan** in SSRM | Cheap at ≤ 2,000 cached rows; won't scale to a much larger client cache | CP-3 |

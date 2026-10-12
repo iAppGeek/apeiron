@@ -1,7 +1,7 @@
 import type { Browser } from '@playwright/test';
 import { NatsBus } from '@apeiron/iris';
 import { MongoOrderRepository } from '@apeiron/mnemosyne';
-import { createDriver, startHermesContainer, stopHermesContainer, type Driver, type DriverRate } from './driver';
+import { createDriver, startHeliosContainer, startHermesContainer, stopHeliosContainer, stopHermesContainer, type Driver, type DriverRate } from './driver';
 import { createFaults, type Faults } from './faults';
 import {
   checkInvariants,
@@ -13,7 +13,7 @@ import {
 } from './oracle';
 import { openView, readSnapshot, readStats, type PageStats, type ViewId, type ViewPage } from './pages';
 import { failuresOf, summariseLatency, writeReport, type ScenarioReport, type ViewReport } from './report';
-import { installSamplerInPage, readSamplerInPage, setLenientUpdateTimeInPage } from './sampler';
+import { installSamplerInPage, readSamplerInPage } from './sampler';
 import { createServerProbe, type ServerProbe } from './server-probe';
 import { TIER } from './tiers';
 import { openReader } from './ws-client';
@@ -65,8 +65,6 @@ export type Harness = {
   since(): Promise<{ reconnects: number; deltasApplied: number }[]>;
   /** Waits until every page shows Connected and is not busy. */
   allConnected(timeoutMs: number): Promise<boolean>;
-  /** Lets `lastUpdateTime` step back on every page while a server restart settles (see `setLenientUpdateTimeInPage`). */
-  lenientUpdateTime(on: boolean): Promise<void>;
   /** Runs check 2 on every page right now, without stopping anything. The canary uses it to prove the check can fail. */
   screens(): Promise<Check[]>;
   /** Stops the stream, waits for everything to go quiet, runs the three checks and writes the report. */
@@ -110,12 +108,14 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
     await attempt(() => bus?.close() ?? Promise.resolve());
     await attempt(() => repo?.close() ?? Promise.resolve());
     await attempt(() => startHermesContainer());
+    await attempt(() => startHeliosContainer());
     if (errors.length > 0) throw new AggregateError(errors, 'teardown had errors');
   };
 
   try {
     await faults.clear();
     await stopHermesContainer();
+    await stopHeliosContainer();
     const quiet = await until(() => probe.isIdle(), 90_000);
     if (!quiet) throw new Error('the server did not go idle after hermes stopped');
     bus = await NatsBus.connect({ url: NATS_URL, name: `e2e-${options.scenario}` });
@@ -179,10 +179,6 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 
     allConnected: (timeoutMs) =>
       until(async () => (await Promise.all(pages.map((p) => readStats(p.page)))).every((s) => s.state === 'connected' && !s.busy), timeoutMs, 250),
-
-    async lenientUpdateTime(on: boolean): Promise<void> {
-      await Promise.all(pages.map((p) => p.page.evaluate(setLenientUpdateTimeInPage, on)));
-    },
 
     async screens(): Promise<Check[]> {
       const out: Check[] = [];

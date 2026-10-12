@@ -1,7 +1,9 @@
-import { MemoryBus, generateOrders, type Order, type OrderCommand, type OrderEvent, type PriceTick } from '@apeiron/logos';
+import { MemoryBus, PAIRS, generateOrders, type CurrencyPair, type Order, type OrderCommand, type OrderEvent, type PriceTick } from '@apeiron/logos';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createDriver, type Driver } from './driver';
 import { OrderModel } from './model';
+
+const referenceMids = (): Record<CurrencyPair, number> => Object.fromEntries(PAIRS.map((p) => [p.pair, p.mid])) as Record<CurrencyPair, number>;
 
 const SEED_NOW = Date.UTC(2026, 9, 6, 12, 0, 0);
 
@@ -41,7 +43,7 @@ describe('createDriver', () => {
     const maxId = orders.map((o) => o.orderId).sort().at(-1) ?? null;
     driver = createDriver({
       bus,
-      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve(maxId) },
+      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), latestMidsByPair: () => Promise.resolve(referenceMids()), maxOrderId: () => Promise.resolve(maxId) },
       seed: 7,
       rate: 'normal',
       stepMs: 10,
@@ -79,7 +81,7 @@ describe('createDriver', () => {
       const seen = await capture(bus);
       const d = createDriver({
         bus,
-        repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
+        repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), latestMidsByPair: () => Promise.resolve(referenceMids()), maxOrderId: () => Promise.resolve('ALG00999999') },
         seed: 99,
         rate: 'normal',
         stepMs: 10,
@@ -101,7 +103,7 @@ describe('createDriver', () => {
     const seen = await capture(bus);
     driver = createDriver({
       bus,
-      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
+      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), latestMidsByPair: () => Promise.resolve(referenceMids()), maxOrderId: () => Promise.resolve('ALG00999999') },
       seed: 3,
       rate: 'normal',
       stepMs: 10,
@@ -136,7 +138,7 @@ describe('createDriver', () => {
     });
     driver = createDriver({
       bus: flaky,
-      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
+      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), latestMidsByPair: () => Promise.resolve(referenceMids()), maxOrderId: () => Promise.resolve('ALG00999999') },
       seed: 1,
       rate: 'normal',
       stepMs: 10,
@@ -162,7 +164,7 @@ describe('createDriver', () => {
     });
     driver = createDriver({
       bus: failing,
-      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
+      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), latestMidsByPair: () => Promise.resolve(referenceMids()), maxOrderId: () => Promise.resolve('ALG00999999') },
       seed: 1,
       rate: 'normal',
       stepMs: 10,

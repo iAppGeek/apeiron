@@ -1,4 +1,5 @@
-import { NatsBus, ensureStreams } from '@apeiron/iris';
+import { NatsBus, ensureStreams, streamSpecs } from '@apeiron/iris';
+import { STREAMS } from '@apeiron/logos';
 import { MongoOrderRepository } from '@apeiron/mnemosyne';
 import { loadConfig } from './config.js';
 import { closeServer, startHealthServer } from './health.js';
@@ -23,7 +24,7 @@ const repo = await MongoOrderRepository.connect({ url: config.mongoUrl, db: conf
 const bus = await NatsBus.connect({ url: config.natsUrl, name: 'themis', log });
 
 // themis starts before the simulator, so it makes sure the streams it reads exist (idempotent).
-log.info({ streams: await ensureStreams(await bus.manager()) }, 'streams ready');
+log.info({ streams: await ensureStreams(await bus.manager(), streamSpecs().filter((s) => s.name === STREAMS.orders)) }, 'streams ready');
 
 themis = await startThemis({
   bus,

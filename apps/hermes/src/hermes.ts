@@ -5,8 +5,8 @@ import {
   parseOrderCommand,
   mulberry32,
   parseLoadControl,
+  parsePriceTick,
   type LoadState,
-  priceSubject,
   type Bus,
   type BusSubscription,
   type LoadPreset,
@@ -15,8 +15,7 @@ import {
 } from '@apeiron/logos';
 import type { Logger } from './log.js';
 import type { HermesMetrics } from './metrics.js';
-import { PriceFeed, startingMids } from './price-feed.js';
-import { TICKS_PER_SECOND } from './presets.js';
+import { QuoteBook } from './quotes.js';
 import { Simulator, nextSeqFrom } from './simulator.js';
 
 export type HermesOptions = {
@@ -29,6 +28,8 @@ export type HermesOptions = {
   maxOrderId: string | null;
   seed: number;
   stepMs: number;
+  /** Most time to wait at startup for a quote for every pair (default 10 s); the rest use their reference level. */
+  priceWaitMs?: number;
   now?: () => number;
   metrics?: HermesMetrics;
 };
@@ -40,7 +41,6 @@ export type HermesStatus = {
   pending: number;
   eventsPublished: number;
   commandsHandled: number;
-  ticksPublished: number;
   publishErrors: number;
   inflight: number;
 };
@@ -58,37 +58,33 @@ export type Hermes = {
   stop(): Promise<void>;
   status(): HermesStatus;
   simulator: Simulator;
-  feed: PriceFeed;
+  /** The latest quote of each pair, from the price feed. */
+  quotes: QuoteBook;
 };
 
 /**
- * Wires the price feed and lifecycle simulator to a bus: reconciles stale orders at startup, publishes
- * `prices.<PAIR>` at 3 ticks/s per pair and `orders.events` at the preset rate, and follows `control.load`.
+ * Wires the lifecycle simulator to a bus: follows the price feed (`prices.*`) for fill prices and market snapshots,
+ * reconciles stale orders at startup, publishes `orders.events` at the preset rate, and follows `control.load`. It makes
+ * no prices of its own.
  */
 export async function startHermes(options: HermesOptions): Promise<Hermes> {
   const { bus, log } = options;
   const now = options.now ?? ((): number => Date.now());
   const rng = mulberry32(options.seed);
-  const feed = new PriceFeed(rng, startingMids(options.current));
+  const quotes = new QuoteBook();
   let eventsPublished = 0;
-  let ticksPublished = 0;
   let publishErrors = 0;
   let inflight = 0;
   let stopped = false;
 
   /** Resolves true once the broker has the message, false if the publish failed. Never rejects. */
-  const publish = (subject: string, payload: unknown, kind: 'event' | 'tick'): Promise<boolean> => {
+  const publish = (subject: string, payload: unknown): Promise<boolean> => {
     inflight++;
     return bus
       .publish(subject, payload)
       .then(() => {
-        if (kind === 'event') {
-          eventsPublished++;
-          options.metrics?.event((payload as OrderEvent).type);
-        } else {
-          ticksPublished++;
-          options.metrics?.tick();
-        }
+        eventsPublished++;
+        options.metrics?.event((payload as OrderEvent).type);
         return true;
       })
       .catch((error: unknown) => {
@@ -106,20 +102,32 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
 
   const simulator = new Simulator({
     rng,
-    feed,
+    feed: quotes,
     preset: options.preset,
     current: options.current,
     startSeq: nextSeqFrom(options.maxOrderId),
     emit: (event: OrderEvent): void => {
-      lastEventPublish = publish(SUBJECTS.ordersEvents, event, 'event');
+      lastEventPublish = publish(SUBJECTS.ordersEvents, event);
     },
   });
 
-  // Prices first, so reconciliation fills and new orders use the starting levels.
-  const publishTicks = (): void => {
-    for (const tick of feed.tick(now())) void publish(priceSubject(tick.pair), tick, 'tick');
-  };
-  publishTicks();
+  // Prices first, so reconciliation fills and new orders use the market: follow the feed, take the last quote of
+  // every pair, and give a feed that is still starting a moment to publish.
+  const prices = await bus.subscribe(SUBJECTS.pricesWildcard, (payload) => {
+    const parsed = parsePriceTick(payload);
+    if (parsed.ok) quotes.update(parsed.value);
+  });
+  try {
+    for (const message of await bus.lastPerSubject(STREAMS.prices, SUBJECTS.pricesWildcard)) {
+      const parsed = parsePriceTick(message.payload);
+      if (parsed.ok) quotes.update(parsed.value);
+    }
+  } catch (error) {
+    log.warn({ err: error }, 'could not read the last prices');
+  }
+  const priceDeadline = Date.now() + (options.priceWaitMs ?? 10_000);
+  while (quotes.missing().length > 0 && Date.now() < priceDeadline) await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  if (quotes.missing().length > 0) log.warn({ missing: quotes.missing() }, 'starting without a quote for some pairs; using their reference levels');
 
   const reconciled = simulator.reconcile(now());
   log.info(
@@ -177,18 +185,11 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
   );
 
   let last = now();
-  const tickEveryMs = 1000 / TICKS_PER_SECOND;
-  let nextTickAt = last + tickEveryMs;
   const timer = setInterval(() => {
     if (stopped) return;
     const t = now();
     const dt = Math.min(t - last, 1_000);
     last = t;
-    if (t >= nextTickAt) {
-      // Advance on a fixed grid so the average rate is 3/s however coarse the step is.
-      nextTickAt = Math.max(nextTickAt + tickEveryMs, t + 1);
-      publishTicks();
-    }
     if (inflight > MAX_INFLIGHT) {
       log.warn({ inflight }, 'publish backlog, skipping simulation step');
       return;
@@ -203,7 +204,6 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
       pending: simulator.pendingCount,
       eventsPublished,
       commandsHandled,
-      ticksPublished,
       publishErrors,
       inflight,
     });
@@ -214,13 +214,14 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
 
   return {
     simulator,
-    feed,
+    quotes,
     status,
     stop: async (): Promise<void> => {
       stopped = true;
       clearInterval(timer);
       clearInterval(stateTimer);
       await control?.close();
+      await prices.close();
       await commands.close();
     },
   };

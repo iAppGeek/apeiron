@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 # Reset rule: stop everything, purge NATS (streams and the ORDER_STATE buckets), seed, then start themis, which
 # rebuilds the projection, before everything else. `up -d` follows the depends_on order.
-docker compose --profile core stop antikythera hermes themis nats >/dev/null
+docker compose --profile core stop antikythera hermes helios themis nats >/dev/null
 docker compose --profile core rm -f nats >/dev/null
 docker volume rm apeiron_nats-data >/dev/null 2>&1 || true
 docker compose --profile core --profile seed run --rm -e SEED_RESET=true gaia 2>&1 | tail -3

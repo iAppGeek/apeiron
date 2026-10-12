@@ -1,50 +1,17 @@
-import { PAIRS, PAIR_BY_NAME, finalMids, mulberry32, type CurrencyPair } from '@apeiron/logos';
+import { PAIRS, PAIR_BY_NAME, mulberry32, type CurrencyPair } from '@apeiron/logos';
 import { describe, expect, it } from 'vitest';
-import { PriceFeed, startingMids } from './price-feed.js';
-import { SEED_NOW, currentOrders } from './testing.js';
+import { PriceFeed, referenceMids } from './price-feed.js';
 
-function feed(seed = 1, start = startingMids([])): PriceFeed {
+function feed(seed = 1, start = referenceMids()): PriceFeed {
   return new PriceFeed(mulberry32(seed), start);
 }
 
-describe('startingMids', () => {
-  it('falls back to the reference mid for pairs without current orders', () => {
-    const mids = startingMids([]);
+describe('referenceMids', () => {
+  it('has the reference level of every pair', () => {
+    const mids = referenceMids();
+    expect(Object.keys(mids)).toHaveLength(PAIRS.length);
     for (const p of PAIRS) expect(mids[p.pair]).toBe(p.mid);
   });
-
-  it('uses the marketMid of the most recently updated order per pair', () => {
-    const orders = currentOrders();
-    const eur = orders.filter((o) => o.currencyPair === 'EURUSD');
-    expect(eur.length).toBeGreaterThan(1);
-    const newest = eur[0];
-    if (newest === undefined) throw new Error('no EURUSD order');
-    newest.lastUpdateTime += 10_000_000;
-    newest.marketMid = 1.00123;
-    expect(startingMids(orders).EURUSD).toBe(1.00123);
-  });
-
-  it('breaks lastUpdateTime ties by the higher orderId', () => {
-    const [a, b] = currentOrders().filter((o) => o.currencyPair === 'EURUSD');
-    if (a === undefined || b === undefined) throw new Error('need two orders');
-    a.lastUpdateTime = b.lastUpdateTime = 5;
-    a.orderId = 'ALG00000001';
-    b.orderId = 'ALG00000002';
-    a.marketMid = 1.1;
-    b.marketMid = 1.2;
-    expect(startingMids([b, a]).EURUSD).toBe(1.2);
-  });
-
-  it('starts from the generator final mids, not the reference levels', () => {
-    const final = finalMids(42, 50_000, SEED_NOW);
-    const mids = startingMids(currentOrders());
-    for (const p of PAIRS) {
-      const dec = PAIR_BY_NAME.get(p.pair)?.decimals ?? 5;
-      const live = currentOrders().some((o) => o.currencyPair === p.pair);
-      if (live) expect(mids[p.pair]).toBeCloseTo(final[p.pair], dec - 1);
-    }
-    expect(Math.abs(mids.EURUSD - 1.08)).toBeGreaterThan(0);
-  }, 30_000);
 });
 
 describe('PriceFeed', () => {
@@ -92,7 +59,7 @@ describe('PriceFeed', () => {
   });
 
   it('walks near its start and records the latest quote', () => {
-    const start = startingMids([]);
+    const start = referenceMids();
     const f = new PriceFeed(mulberry32(9), start);
     expect(f.quote('EURUSD')).toBeUndefined();
     let maxMove = 0;

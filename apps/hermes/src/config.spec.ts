@@ -14,6 +14,7 @@ describe('loadConfig', () => {
       seed: undefined,
       healthPort: 4100,
       stepMs: 100,
+      priceWaitMs: 10_000,
     });
   });
 

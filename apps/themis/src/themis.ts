@@ -136,6 +136,9 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
   );
   log.info({ stream: STREAMS.orders, durable: CONSUMERS.themis }, 'consuming order events');
 
+  // The price feed asks for a starting level per pair when its stream has no last price (it never reads orders).
+  const refMids = await bus.serve(SUBJECTS.refMids, () => repo.latestMidsByPair());
+
   return {
     status: (): ThemisStatus => ({ status: stopped ? 'stopped' : 'ok', openOrders: openOrders(), applied, commits: committer.stats.batches }),
     debug: (): Record<string, unknown> => ({
@@ -153,6 +156,7 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
     stop: async (stopOptions: { flush?: boolean } = {}): Promise<void> => {
       stopped = true;
       await consumer?.close();
+      await refMids.close();
       if (stopOptions.flush === false) return;
       await chain;
       await committer.stop();

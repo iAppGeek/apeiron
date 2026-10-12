@@ -17,7 +17,7 @@ import {
   type OrderEvent,
   type Rng,
 } from '@apeiron/logos';
-import type { PriceFeed } from './price-feed.js';
+import type { Quotes } from './quotes.js';
 import { LOAD_PRESETS, type PresetRates } from './presets.js';
 
 const MIN_MS = 60_000;
@@ -30,7 +30,8 @@ export const NEW_LIVE_SHARE = 0.8;
 
 export type SimulatorOptions = {
   rng: Rng;
-  feed: PriceFeed;
+  /** The market now, from the price feed's ticks. */
+  feed: Quotes;
   /** Receives every `orders.events` message the simulator produces. */
   emit: (event: OrderEvent) => void;
   preset: LoadPreset;
