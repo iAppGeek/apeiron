@@ -252,15 +252,20 @@ class NatsKvBucket implements KvBucket {
         return Promise.resolve();
       },
       async *[Symbol.asyncIterator](): AsyncGenerator<KvEntry> {
+        // The server flags the last initial value (delta 0) as an update too, so the boundary is tracked here:
+        // the initial phase ends at the first entry with nothing pending behind it.
+        let initial = !updatesOnly;
         for await (const e of watch) {
+          const delta = e.delta ?? 0;
           yield {
             key: e.key,
             value: e.operation === 'PUT' ? decodeValue(e.value, log, e.key) : null,
             revision: e.revision,
             op: e.operation,
-            isUpdate: updatesOnly || e.isUpdate,
-            delta: e.delta ?? 0,
+            isUpdate: !initial,
+            delta,
           };
+          if (delta === 0) initial = false;
         }
       },
     };
