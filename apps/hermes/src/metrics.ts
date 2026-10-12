@@ -19,7 +19,7 @@ export class HermesMetrics {
   constructor() {
     const registers = [this.registry];
     collectDefaultMetrics({ register: this.registry });
-    this.events = new Counter({ name: 'hermes_events_published_total', help: 'Order events published to orders.events, by event type.', labelNames: ['type'], registers });
+    this.events = new Counter({ name: 'hermes_events_published_total', help: 'Execution reports published to exec.reports, by report type.', labelNames: ['type'], registers });
     this.commands = new Counter({ name: 'hermes_commands_handled_total', help: 'Trader commands handled.', registers });
     this.errors = new Counter({ name: 'hermes_publish_errors_total', help: 'Messages that failed to publish.', registers });
     this.gauge('hermes_live_orders', 'Orders currently LIVE.', (g) => g.set(this.snapshot?.()?.live ?? 0));

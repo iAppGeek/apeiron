@@ -89,9 +89,8 @@ export type FlushStats = {
 const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /**
- * The live half of the server. After the store has loaded it attaches to the bus (the durable `blotter-server`
- * consumer on `orders.events`, `prices.*`), then every `flushMs` it applies the queued events and ticks to the
- * store, patches every cached view from the tick's ChangeSet, and lets each client session send its delta. It
+ * The live half of the server. After the store has loaded it attaches to the bus (the order-state watch, `prices.*`),
+ * then every `flushMs` it applies the queued records and ticks to the store, patches every cached view from the tick's ChangeSet, and lets each client session send its delta. It
  * keeps string ranks fresh in the background and drops idle views.
  */
 export class LiveRuntime implements LiveHooks {
@@ -510,16 +509,13 @@ export class LiveRuntime implements LiveHooks {
         if (parsed.ok) this.currentPreset = parsed.value.preset;
       });
       this.subscriptions.push(state);
-      // Until commands go through the order service (phase 1.5c), the answer to a command is still an event on
-      // `orders.events`. Listened to plain: this is not a consumer and holds no position in the stream.
-      // hermes answers on `orders.events` in its `events` mode and on `orders.answers` in its `reports` mode.
-      for (const subject of [SUBJECTS.ordersEvents, SUBJECTS.ordersAnswers]) {
-        const answers = await bus.subscribe(subject, (payload) => {
-          const parsed = parseOrderEvent(payload);
-          if (parsed.ok) this.correlate(parsed.value);
-        });
-        this.subscriptions.push(answers);
-      }
+      // Until commands go through the order service (phase 1.5c), hermes answers a command on `orders.answers`.
+      // Listened to plain: this is not a consumer and holds no position in the stream.
+      const answers = await bus.subscribe(SUBJECTS.ordersAnswers, (payload) => {
+        const parsed = parseOrderEvent(payload);
+        if (parsed.ok) this.correlate(parsed.value);
+      });
+      this.subscriptions.push(answers);
       this.attached = true;
       log.info({}, 'attached to the message bus');
     } catch (error) {

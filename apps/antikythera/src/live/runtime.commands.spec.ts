@@ -82,7 +82,7 @@ const hermesUpdate = (commandId: string, orderId: string, order: Partial<Order>)
  * (one version up) on the bucket. The blotter acks once the record shows the new status.
  */
 async function answer(r: Rig, commandId: string, orderId: string, patch: Partial<Order>, options: { record?: boolean } = {}): Promise<void> {
-  await r.bus.publish('orders.events', hermesUpdate(commandId, orderId, patch));
+  await r.bus.publish('orders.answers', hermesUpdate(commandId, orderId, patch));
   if (options.record === false) return;
   const row = r.store.rowIndexOf(orderId) as number;
   await publishRecord(r.bus, { ...r.store.orderAt(row), ...patch }, r.store.versionAt(row) + 1);
@@ -159,29 +159,6 @@ describe('LiveRuntime command correlation', () => {
     await r.runtime.stop();
   });
 
-  it('takes the answer from orders.answers too, which is where hermes answers in reports mode', async () => {
-    vi.useFakeTimers({ now: 50_000 });
-    const r = await rig();
-    const c = client(r, 'rep');
-    c.send(command(3, 'T0000001', 'PAUSE'));
-    await r.bus.publish('orders.answers', hermesUpdate('rep:3', 'T0000001', { status: 'PAUSED' }));
-    const row = r.store.rowIndexOf('T0000001') as number;
-    await publishRecord(r.bus, { ...r.store.orderAt(row), status: 'PAUSED' }, r.store.versionAt(row) + 1);
-    await vi.advanceTimersByTimeAsync(100);
-    expect(types(c)).toEqual(['delta', 'ack']);
-    c.send(command(4, 'T0000002', 'RESUME'));
-    await r.bus.publish('orders.answers', {
-      type: 'REJECT',
-      commandId: 'rep:4',
-      orderId: 'T0000002',
-      code: 'INVALID_TRANSITION',
-      message: 'no',
-      ts: 1,
-    } satisfies OrderEvent);
-    expect(c.sent.at(-1)).toMatchObject({ t: 'error', reqId: 4, code: 'INVALID_TRANSITION' });
-    await r.runtime.stop();
-  });
-
   it('applies the record for every client but acks only the one that asked', async () => {
     vi.useFakeTimers();
     const r = await rig();
@@ -200,7 +177,7 @@ describe('LiveRuntime command correlation', () => {
     const r = await rig();
     const c = client(r);
     c.send(command(2, 'T0000001', 'PAUSE'));
-    await r.bus.publish('orders.events', {
+    await r.bus.publish('orders.answers', {
       type: 'REJECT',
       commandId: 'c1:2',
       orderId: 'T0000001',
@@ -275,7 +252,7 @@ describe('LiveRuntime command correlation', () => {
     const r = await rig();
     const c = client(r);
     await answer(r, 'other-process:1', 'T0000001', { status: 'PAUSED' });
-    await r.bus.publish('orders.events', {
+    await r.bus.publish('orders.answers', {
       type: 'REJECT',
       commandId: 'other-process:2',
       orderId: 'T0000001',

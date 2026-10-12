@@ -3,8 +3,10 @@ import { promisify } from 'node:util';
 import { startHelios, type Helios } from '@apeiron/helios/helios';
 import { startHermes, type Hermes } from '@apeiron/hermes/hermes';
 import {
+  BUCKETS,
   SUBJECTS,
   mulberry32,
+  parseOrderStateRecord,
   type Bus,
   type BusHandler,
   type BusSubscription,
@@ -13,10 +15,11 @@ import {
   type ConsumeSpec,
   type CurrencyPair,
   type KvBucket,
+  type KvWatch,
   type LoadPreset,
   type Order,
   type OrderCommand,
-  type OrderEvent,
+  type ExecReport,
   type PriceTick,
   type RequestHandler,
   type StoredMessage,
@@ -93,8 +96,12 @@ export type DriverOptions = {
 
 export type Driver = {
   start(): Promise<void>;
-  /** Stops the stream, waits for every publish to settle, then publishes a last tick per pair. */
+  /** Stops the stream, waits for every publish to settle, then publishes a last tick per pair. The record stream stays open. */
   stop(): Promise<void>;
+  /** Waits until no record has reached the model for `quietMs` (the order service has caught up with what was published). */
+  settled(quietMs?: number, timeoutMs?: number): Promise<void>;
+  /** Stops, and closes the record stream. */
+  dispose(): Promise<void>;
   setRate(rate: DriverRate): void;
   model(): OrderModel;
   stats(): DriverStats;
@@ -112,10 +119,11 @@ const SILENT = {
 };
 
 /**
- * The deterministic update driver. It runs hermes in-process on a seeded generator, through a bus that applies every
- * event and tick it publishes to an independent {@link OrderModel} before forwarding it, and adds PAUSE and RESUME
- * commands through the normal command path. Hermes's generator, the lifecycle maths in logos and the model are all
- * shared code; nothing here reimplements them.
+ * The deterministic update driver. It runs hermes and helios in-process on a seeded generator, through a bus that applies
+ * every tick it publishes to an independent {@link OrderModel}, and adds PAUSE and RESUME commands through the normal
+ * command path. hermes's reports go to the real order service, which publishes the resulting records to `ORDER_STATE`;
+ * the model is fed from that record stream (the blotter's own source), so what is checked is the path from the bucket to
+ * the blotter and on to the screen. hermes's generator, the lifecycle maths in logos and the model are shared code.
  */
 export function createDriver(options: DriverOptions): Driver {
   const model: { current: OrderModel } = { current: new OrderModel([]) };
@@ -128,6 +136,8 @@ export function createDriver(options: DriverOptions): Driver {
   let injector: ReturnType<typeof setInterval> | null = null;
   let startMax: string | null = null;
   let startedAt = 0;
+  let watch: KvWatch | null = null;
+  let lastRecordAt = 0;
   let commandSeq = 0;
   const resumes: { orderId: string; at: number }[] = [];
 
@@ -149,9 +159,8 @@ export function createDriver(options: DriverOptions): Driver {
   const tails = new Map<string, Promise<void>>();
 
   const orderOf = (subject: string, payload: unknown): string | null => {
-    if (subject !== SUBJECTS.ordersEvents) return null;
-    const event = payload as OrderEvent;
-    return event.type === 'NEW' ? event.order.orderId : event.type === 'UPDATE' ? event.order.orderId : event.orderId;
+    if (subject !== SUBJECTS.execReports) return null;
+    return (payload as ExecReport).orderId;
   };
 
   const attempt = async (subject: string, payload: unknown): Promise<void> => {
@@ -189,17 +198,12 @@ export function createDriver(options: DriverOptions): Driver {
 
   const tee: Bus = {
     publish(subject: string, payload: unknown): Promise<void> {
-      if (subject === SUBJECTS.ordersEvents) {
-        const event = payload as OrderEvent;
-        model.current.applyEvent(event);
-        if (event.type !== 'REJECT') stats.events += 1;
-        if (event.type === 'NEW') stats.created += 1;
-      } else if (subject.startsWith('prices.')) {
+      if (subject.startsWith('prices.')) {
         model.current.applyTick(payload as PriceTick);
         stats.ticks += 1;
       }
       const published = publishWithRetry(subject, payload);
-      if (subject === SUBJECTS.ordersEvents || subject.startsWith('prices.')) track(published);
+      if (subject === SUBJECTS.execReports || subject.startsWith('prices.')) track(published);
       return published;
     },
     subscribe: (subject: string, handler: BusHandler): Promise<BusSubscription> => options.bus.subscribe(subject, handler),
@@ -240,6 +244,21 @@ export function createDriver(options: DriverOptions): Driver {
       startMax = await options.repo.maxOrderId();
       model.current = new OrderModel(current);
       startedAt = now();
+      // The model follows the order service's record stream from before anything is published.
+      watch = await options.bus.kv(BUCKETS.orderState).watch({ updatesOnly: true });
+      const records = watch;
+      void (async (): Promise<void> => {
+        for await (const entry of records) {
+          if (entry.op !== 'PUT') continue;
+          const parsed = parseOrderStateRecord(entry.value);
+          if (!parsed.ok) continue;
+          const created = model.current.createdIds.length;
+          model.current.applyRecord(parsed.value);
+          lastRecordAt = Date.now();
+          stats.events = model.current.events;
+          if (model.current.createdIds.length > created) stats.created += 1;
+        }
+      })().catch(() => undefined);
       // The price feed first, as in the stack: hermes follows its ticks for fill prices.
       helios = startHelios({
         bus: tee,
@@ -252,8 +271,6 @@ export function createDriver(options: DriverOptions): Driver {
         bus: tee,
         log: SILENT,
         preset: RATE_PRESET[options.rate],
-        current,
-        maxOrderId: startMax,
         seed: options.seed,
         stepMs: options.stepMs ?? 100,
         now,
@@ -283,6 +300,21 @@ export function createDriver(options: DriverOptions): Driver {
         track(tee.publish(`prices.${tick.pair}`, tick));
       }
       await Promise.all([...pending]);
+    },
+
+    async settled(quietMs = 750, timeoutMs = 30_000): Promise<void> {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline && Date.now() - lastRecordAt < quietMs) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 50);
+        });
+      }
+    },
+
+    async dispose(): Promise<void> {
+      await this.stop();
+      await watch?.close();
+      watch = null;
     },
 
     setRate(rate: DriverRate): void {

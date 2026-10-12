@@ -16,7 +16,6 @@ import { COMMAND_ACTIONS, type CommandAction, type LoadPreset, type ParseResult 
 
 /** NATS subjects and JetStream names (Appendix C). */
 export const SUBJECTS = {
-  ordersEvents: 'orders.events',
   ordersCommands: 'orders.commands',
   controlLoad: 'control.load',
   /** Hermes reports the preset it is running, at startup, on every change and every few seconds. */
@@ -38,12 +37,9 @@ export const SUBJECTS = {
 
 export const STREAMS = { orders: 'ORDERS', prices: 'PRICES', exec: 'EXEC', venue: 'VENUE' } as const;
 export const CONSUMERS = {
-  blotterServer: 'blotter-server',
   hermesCommands: 'hermes-commands',
   themisExec: 'themis-exec',
   hermesVenue: 'hermes-venue',
-  /** PLAN1 phase 1.2: the order service's own consumer of `orders.events`, until execution reports replace them. */
-  themis: 'themis',
 } as const;
 /** PLAN1: JetStream KV buckets. `ORDER_STATE` is keyed by `orderId`; `ORDER_STATE_META` holds the `projection` marker. */
 export const BUCKETS = { orderState: 'ORDER_STATE', orderStateMeta: 'ORDER_STATE_META' } as const;
@@ -62,11 +58,11 @@ export const REJECT_CODES = ['INVALID_TRANSITION', 'UNKNOWN_ORDER'] as const sat
 export const makeCommandId = (clientId: string, reqId: number): string => `${clientId}:${reqId}`;
 
 /**
- * `orders.events` payloads. Every field value is absolute and post-change, never an increment, so
- * applying an event is idempotent: replaying the stream, or a NEW for an order already stored, is an upsert.
+ * hermes's answer to a command (`orders.answers`; until phase 1.5c): an UPDATE carrying the command's id and the
+ * status the command set, or a REJECT. The order data itself no longer travels this way: orders are submitted and
+ * changed through the order service.
  */
 export type OrderEvent =
-  | { type: 'NEW'; order: Order; ts: number; commandId?: string }
   | { type: 'UPDATE'; order: Partial<Order> & { orderId: string }; ts: number; commandId?: string }
   | { type: 'REJECT'; commandId: string; orderId: string; code: RejectCode; message: string; ts: number };
 
@@ -155,7 +151,6 @@ export const priceTickSchema: z.ZodType<PriceTick> = z.object({
 });
 
 export const orderEventSchema: z.ZodType<OrderEvent> = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('NEW'), order: orderSchema, ts: num, commandId: z.string().optional() }),
   z.object({ type: z.literal('UPDATE'), order: partialOrderSchema, ts: num, commandId: z.string().optional() }),
   z.object({
     type: z.literal('REJECT'),

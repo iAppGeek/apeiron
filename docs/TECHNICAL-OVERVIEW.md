@@ -115,7 +115,8 @@ flowchart LR
   PR["Prometheus + Grafana"]
   TA["talos (50 clients)"]
   W <-->|"WebSocket: JSON text or msgpack binary"| NG <--> WS
-  HE -->|"prices.PAIR, orders.events, control.state"| NA
+  HE -->|"orders.submit, exec.reports, control.state"| NA
+  HL -->|"prices.PAIR"| NA
   NA -->|"durable consumer blotter-server"| LIVE
   WS -->|"orders.commands, control.load"| NA --> HE
   WB -->|"upsertMany"| MO
@@ -428,17 +429,15 @@ When a held client asks for a block while adds are pending, the delta carrying t
 The blotter no longer writes to Mongo (the write-behind pass was removed). [`apps/themis`](../apps/themis/src/themis.ts)
 is the order service of record; Mongo is its durable copy.
 
-- `themis` consumes `orders.events` through its own durable consumer, applies each event to the full order (`v + 1`),
-  and a group committer ([`committer.ts`](../apps/themis/src/committer.ts)) stores each batch (at most 20 ms or 500
+- `themis` takes hermes's submissions and execution reports (durable consumer `themis-exec`), applies each to the full
+  order with the shared rules (`v + 1`), and a group committer ([`committer.ts`](../apps/themis/src/committer.ts)) stores each batch (at most 20 ms or 500
   changes) with `upsertMany`, **then** puts the new records into the `ORDER_STATE` bucket in the same order, **then**
-  acknowledges the events. A failed write is retried with backoff, so nothing is published before it is stored and
-  nothing is dropped. **Price-only changes are never persisted** (they are not events).
-- The `blotter-server` consumer is acked as soon as a flush has applied the events to the store. Its restart still loads
-  from Mongo until phase 1.3a, so for the few tens of milliseconds themis needs to commit, a restarting blotter can miss an
-  event; the move to the bucket removes that window.
-- Both consumers use `AckPolicy.All`; a crash replays exactly the events not yet acknowledged.
-- Replays are safe because NATS events carry **absolute** post-change values (`filledQty: 4_200_000`, never `+100_000`),
-  so applying one twice is an idempotent upsert.
+  acknowledges the input. A failed write is retried with backoff, so nothing is published before it is stored and
+  nothing is dropped. **Price-only changes are never persisted** (the blotter's overlay is not data).
+- The blotter holds no consumer position: it watches the bucket, and a restart loads each order's latest state again.
+- `themis-exec` uses `AckPolicy.All`; a crash replays exactly the reports not yet acknowledged, and the `execSeq` rule drops the
+  ones that were already applied.
+- Replays are safe because a report is applied only if its `execSeq` is above the last accepted one.
 - CP-4 R5: `ack_wait` 60 s, `max_ack_pending` 20,000, pulls bounded to 500 messages.
 
 ## 5. Protocol

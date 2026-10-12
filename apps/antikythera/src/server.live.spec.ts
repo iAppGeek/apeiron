@@ -227,18 +227,18 @@ async function fakeHermes(bus: MemoryBus, held: Order[], options: { silent?: boo
     if (options.silent === true) return;
     const order = held.find((o) => o.orderId === cmd.orderId);
     if (order === undefined) {
-      void bus.publish('orders.events', { type: 'REJECT', commandId: cmd.commandId, orderId: cmd.orderId, code: 'UNKNOWN_ORDER', message: 'not held', ts: Date.now() });
+      void bus.publish('orders.answers', { type: 'REJECT', commandId: cmd.commandId, orderId: cmd.orderId, code: 'UNKNOWN_ORDER', message: 'not held', ts: Date.now() });
       return;
     }
     const result = applyCommand(order, cmd.action, Date.now());
     if (!result.ok) {
-      void bus.publish('orders.events', { type: 'REJECT', commandId: cmd.commandId, orderId: cmd.orderId, code: result.code, message: result.message, ts: Date.now() });
+      void bus.publish('orders.answers', { type: 'REJECT', commandId: cmd.commandId, orderId: cmd.orderId, code: result.code, message: result.message, ts: Date.now() });
       return;
     }
     Object.assign(order, result.changes);
     const v = (versions.get(order.orderId) ?? 1) + 1;
     versions.set(order.orderId, v);
-    void bus.publish('orders.events', { type: 'UPDATE', order: { orderId: cmd.orderId, ...result.changes }, ts: Date.now(), commandId: cmd.commandId });
+    void bus.publish('orders.answers', { type: 'UPDATE', order: { orderId: cmd.orderId, ...result.changes }, ts: Date.now(), commandId: cmd.commandId });
     void publishRecord(bus, { ...order }, v);
   });
   return { seen };

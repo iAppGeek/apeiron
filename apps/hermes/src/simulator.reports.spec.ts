@@ -43,7 +43,8 @@ function rig(options: { current?: Order[]; hold?: boolean; reject?: boolean; see
   };
   const current = options.current ?? currentOrders();
   const rng = mulberry32(options.seed ?? 1);
-  const sim = new Simulator({ rng, feed: quoteBookFor(current), reports: sink, preset: 'medium', current, startSeq: 100_000, runTag: 'run1' });
+  const sim = new Simulator({ rng, feed: quoteBookFor(current), reports: sink, preset: 'medium', runTag: 'run1' });
+  for (const order of current) sim.syncRecord({ v: 1, execSeq: 0, srcTs: order.lastUpdateTime, order });
   return {
     sim,
     reports,
@@ -59,11 +60,7 @@ function rig(options: { current?: Order[]; hold?: boolean; reject?: boolean; see
 const command = (orderId: string, action: OrderCommand['action'], n = 1): OrderCommand => ({ orderId, action, requestedBy: 'u', ts: SEED_NOW, commandId: `c:${n}` });
 const recordOf = (order: Order, execSeq = 0, v = 2): OrderStateRecord => ({ v, execSeq, srcTs: 1, order });
 
-describe('Simulator in reports mode', () => {
-  it('needs somewhere to send what happens', () => {
-    expect(() => new Simulator({ rng: mulberry32(1), feed: quoteBookFor([]), preset: 'medium', current: [], startSeq: 0 })).toThrow(/emit.*reports/);
-  });
-
+describe('Simulator reports', () => {
   it('reconciles stale orders as reports: LIVE past its end fills the remainder or is cancelled as expired, PENDING_START is activated', async () => {
     const r = rig();
     const before = currentOrders();

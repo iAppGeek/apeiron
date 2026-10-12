@@ -7,7 +7,6 @@ import {
   formatOrderId,
   isTerminal,
   parseExecReport,
-  parseOrderEvent,
   parseOrderSeq,
   parseOrderStateRecord,
   recordFromSubmission,
@@ -19,7 +18,6 @@ import {
   type SubmitReply,
 } from '@apeiron/logos';
 import type { OrderRepository, StoredOrder } from '@apeiron/mnemosyne';
-import { applyOrderEvent } from './apply-event.js';
 import { GroupCommitter, toStateRecord } from './committer.js';
 import type { Logger } from './log.js';
 import type { ThemisMetrics } from './metrics.js';
@@ -61,9 +59,9 @@ export const ORDER_STATE_META_CONFIG = { history: 1, storage: 'file', replicas: 
 const isOpenRecord = (stored: StoredOrder): boolean => !isTerminal(stored.order.status);
 
 /**
- * The order service of record, in projection mode (phase 1.2). It owns the database: it reads today's
- * `orders.events` through its own durable consumer, applies them to the full order, stores each batch (group
- * commit) and only then publishes the new version to the `ORDER_STATE` bucket and acknowledges the input.
+ * The order service of record. It owns the database: it takes submissions and execution reports from the venue,
+ * applies them to the full order with the shared rules, stores each batch (group commit) and only then publishes the new
+ * version to the `ORDER_STATE` bucket and acknowledges the input.
  * Startup makes sure the bucket holds every order, reconciles anything a crash left unpublished, and loads the
  * open orders into memory. Events are handled one at a time, so an order's versions are strictly ordered.
  */
@@ -117,29 +115,6 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
     ack();
   };
 
-  const handle = async (payload: unknown, ack: () => void): Promise<void> => {
-    const parsed = parseOrderEvent(payload);
-    if (!parsed.ok) {
-      log.warn({ error: parsed.error }, 'dropped invalid order event');
-      metrics?.event('invalid', 'invalid');
-      committer.whenCommitted(ack);
-      return;
-    }
-    const event = parsed.value;
-    const current = event.type === 'REJECT' ? undefined : await lookup(event.order.orderId, state);
-    const outcome = applyOrderEvent(current, event);
-    if (outcome.kind !== 'changed') {
-      metrics?.event(event.type, outcome.kind);
-      committer.whenCommitted(ack);
-      return;
-    }
-    const { record, srcTs } = outcome;
-    book.set(record.order.orderId, record);
-    applied++;
-    metrics?.event(event.type, 'applied');
-    committer.submit(record, srcTs, finish(record, ack));
-  };
-
   // Inputs are applied one at a time, in arrival order, so an order's versions are strictly ordered. Applying does not
   // wait for the commit: the batch window is what makes this fast.
   let chain: Promise<void> = Promise.resolve();
@@ -155,12 +130,6 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
   };
 
   const consumers: BusSubscription[] = [];
-  consumers.push(
-    await bus.consume({ stream: STREAMS.orders, durable: CONSUMERS.themis, subject: SUBJECTS.ordersEvents }, (payload, _subject, ack) => {
-      void enqueue(() => handle(payload, ack));
-    }),
-  );
-  log.info({ stream: STREAMS.orders, durable: CONSUMERS.themis }, 'consuming order events');
 
   // ---- execution: submissions, execution reports from the venue, and the open orders for whoever needs them
 

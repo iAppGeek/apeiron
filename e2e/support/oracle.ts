@@ -168,7 +168,6 @@ export async function checkModelVsServer(input: ModelCheckInput): Promise<Check>
     readOneByOne: far.length,
     rowCount: rootCount,
     modelEvents: model.events,
-    unknownUpdates: model.unknown,
   });
 }
 

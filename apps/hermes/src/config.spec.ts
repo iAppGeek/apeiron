@@ -1,14 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from './config.js';
 
-const base = { MONGO_URL: 'mongodb://mongo:27017', NATS_URL: 'nats://nats:4222' };
+const base = { NATS_URL: 'nats://nats:4222' };
 
 describe('loadConfig', () => {
   it('applies defaults', () => {
     expect(loadConfig(base)).toEqual({
-      mongoUrl: 'mongodb://mongo:27017',
-      mongoDb: 'blotter',
-      execMode: 'events',
       natsUrl: 'nats://nats:4222',
       loadPreset: 'medium',
       logLevel: 'info',
@@ -32,10 +29,8 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, HEALTH_PORT: '99999' })).toThrow(/HEALTH_PORT/);
   });
 
-  it('needs the database only in events mode: in reports mode the order service owns it', () => {
-    expect(() => loadConfig({ NATS_URL: 'nats://nats:4222' })).toThrow(/MONGO_URL/);
-    expect(loadConfig({ NATS_URL: 'nats://nats:4222', EXEC_MODE: 'reports' })).toMatchObject({ execMode: 'reports', mongoUrl: undefined });
-    expect(loadConfig({ ...base, EXEC_MODE: 'reports' }).execMode).toBe('reports');
-    expect(() => loadConfig({ ...base, EXEC_MODE: 'both' })).toThrow(/EXEC_MODE/);
+  it('has no database settings: hermes does not touch the database', () => {
+    const c = loadConfig({ ...base, MONGO_URL: 'mongodb://mongo:27017', MONGO_DB: 'x', EXEC_MODE: 'events' });
+    expect(Object.keys(c).join(' ')).not.toMatch(/mongo|execMode/i);
   });
 });

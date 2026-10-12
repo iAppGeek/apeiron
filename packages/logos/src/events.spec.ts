@@ -28,17 +28,16 @@ describe('events', () => {
     expect(parsePriceTick(null).ok).toBe(false);
   });
 
-  it('accepts a NEW event carrying all 50 fields (including nulls)', () => {
+  it('has a full order schema: 50 fields, nulls allowed', () => {
     expect(Object.keys(order)).toHaveLength(50);
-    const result = parseOrderEvent({ type: 'NEW', order: { ...order, limitPrice: null }, ts: 5 });
-    expect(result.ok).toBe(true);
-    expect(orderSchema.safeParse(order).success).toBe(true);
-  });
-
-  it('rejects a NEW event with a missing field', () => {
+    expect(orderSchema.safeParse({ ...order, limitPrice: null }).success).toBe(true);
     const partial: Record<string, unknown> = { ...order };
     delete partial.venue;
-    expect(parseOrderEvent({ type: 'NEW', order: partial, ts: 5 }).ok).toBe(false);
+    expect(orderSchema.safeParse(partial).success).toBe(false);
+  });
+
+  it('no longer accepts a NEW event: orders are created through the order service', () => {
+    expect(parseOrderEvent({ type: 'NEW', order, ts: 5 }).ok).toBe(false);
   });
 
   it('accepts partial UPDATE events that carry an orderId and strips unknown keys', () => {

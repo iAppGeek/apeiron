@@ -74,10 +74,10 @@ mutate a few orders; `scripts/loadtest-reset.sh` restores the dataset.
 
 ## Live updates
 
-`hermes` publishes `prices.<PAIR>` (3 ticks/s per pair) and `orders.events` (fills, status changes, new orders) to NATS;
-`antikythera` applies them to its store, patches every cached view incrementally and pushes `delta` and `summary`
-messages to clients, while `themis` stores the lifecycle changes in Mongo and publishes each order's latest state to the
-`ORDER_STATE` bucket. Switch the load with `LOAD_PRESET=medium|stress`
+`helios` publishes `prices.<PAIR>` (3 ticks/s per pair); `hermes` sends new orders and execution reports (fills, status
+changes) to `themis`, which stores them in Mongo and publishes each order's latest state to the `ORDER_STATE` bucket;
+`antikythera` watches the bucket and the prices, patches every cached view incrementally and pushes `delta` and `summary`
+messages to clients. Switch the load with `LOAD_PRESET=medium|stress`
 or live with a `control` message (it is published on `control.load`). Verify a running stack:
 
 ```bash

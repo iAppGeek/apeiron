@@ -102,7 +102,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
         errors.push(error);
       }
     };
-    await attempt(() => driver?.stop() ?? Promise.resolve());
+    await attempt(() => driver?.dispose() ?? Promise.resolve());
     await attempt(() => faults.clear());
     await attempt(() => Promise.all(pages.map((p) => p.page.context().close())));
     await attempt(() => bus?.close() ?? Promise.resolve());
@@ -206,6 +206,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
         const all = await Promise.all(pages.map((p) => readStats(p.page)));
         return all.every((s) => s.state === 'connected' && !s.busy && !s.loading && (s.sinceLastDeltaMs === null || s.sinceLastDeltaMs > QUIET_MS));
       }, 180_000);
+      await runningDriver.settled();
       const settleMs = Date.now() - settleStart;
 
       const verifyStart = Date.now();

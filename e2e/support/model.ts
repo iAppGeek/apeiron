@@ -1,4 +1,4 @@
-import { deriveOverlay, isOpen, type CurrencyPair, type Order, type OrderEvent, type PriceTick } from '@apeiron/logos';
+import { deriveOverlay, isOpen, type CurrencyPair, type Order, type OrderStateRecord, type PriceTick } from '@apeiron/logos';
 
 export type Expected = {
   order: Order;
@@ -7,50 +7,41 @@ export type Expected = {
 };
 
 /**
- * The independent model of the final state: the orders the stream started from, with every published event applied
- * (NEW upserts, UPDATE merges its absolute fields) and the latest tick per pair remembered. It uses nothing from the
- * server; the price recompute is the shared logos function.
+ * The independent model of the final state: the open orders the run started from, with every record the order service
+ * publishes applied (the newest version of each order wins) and the latest tick per pair remembered. It uses nothing
+ * from the blotter; the price overlay is the shared logos function.
  */
 export class OrderModel {
   private readonly orders = new Map<string, Order>();
+  private readonly versions = new Map<string, number>();
   private readonly touched = new Set<string>();
   private readonly created: string[] = [];
   private readonly ticks = new Map<CurrencyPair, PriceTick>();
-  private eventCount = 0;
-  private unknownUpdates = 0;
+  private recordCount = 0;
 
   constructor(initial: readonly Order[]) {
     for (const order of initial) this.orders.set(order.orderId, { ...order });
   }
 
-  applyEvent(event: OrderEvent): void {
-    if (event.type === 'REJECT') return;
-    this.eventCount += 1;
-    if (event.type === 'NEW') {
-      if (!this.orders.has(event.order.orderId)) this.created.push(event.order.orderId);
-      this.orders.set(event.order.orderId, { ...event.order });
-      this.touched.add(event.order.orderId);
-      return;
-    }
-    const current = this.orders.get(event.order.orderId);
-    if (current === undefined) {
-      this.unknownUpdates += 1;
-      return;
-    }
-    this.orders.set(event.order.orderId, { ...current, ...event.order });
-    this.touched.add(event.order.orderId);
+  /** Applies a record from `ORDER_STATE`. An order never seen before is a new one; a version not above the held one is ignored. */
+  applyRecord(record: OrderStateRecord): void {
+    const id = record.order.orderId;
+    const held = this.versions.get(id);
+    if (held !== undefined && held >= record.v) return;
+    this.versions.set(id, record.v);
+    this.recordCount += 1;
+    if (!this.orders.has(id)) this.created.push(id);
+    this.orders.set(id, { ...record.order });
+    this.touched.add(id);
   }
 
   applyTick(tick: PriceTick): void {
     this.ticks.set(tick.pair, tick);
   }
 
+  /** How many records changed the model. */
   get events(): number {
-    return this.eventCount;
-  }
-
-  get unknown(): number {
-    return this.unknownUpdates;
+    return this.recordCount;
   }
 
   /** Ids of orders the stream created, in creation order (ascending). */
@@ -58,7 +49,7 @@ export class OrderModel {
     return this.created;
   }
 
-  /** Ids of orders any event touched. */
+  /** Ids of orders any record touched. */
   get touchedIds(): ReadonlySet<string> {
     return this.touched;
   }

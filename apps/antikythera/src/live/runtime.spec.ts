@@ -120,7 +120,7 @@ describe('LiveRuntime', () => {
     expect(subscribe).not.toHaveBeenCalled();
     r.runtime.start();
     await vi.advanceTimersByTimeAsync(0);
-    expect(subscribe.mock.calls.map((c) => c[0]).sort()).toEqual(['control.state', 'orders.answers', 'orders.events', 'prices.*']);
+    expect(subscribe.mock.calls.map((c) => c[0]).sort()).toEqual(['control.state', 'orders.answers', 'prices.*']);
     expect(r.runtime.isAttached).toBe(true);
     await r.runtime.stop();
   });

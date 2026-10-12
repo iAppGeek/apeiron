@@ -15,30 +15,20 @@ import {
   type BusSubscription,
   type KvWatch,
   type LoadPreset,
-  type Order,
   type OrderEvent,
   type OrderStateRecord,
 } from '@apeiron/logos';
 import type { Logger } from './log.js';
 import type { HermesMetrics } from './metrics.js';
 import { QuoteBook } from './quotes.js';
-import { Simulator, nextSeqFrom, type ReportSink } from './simulator.js';
+import { Simulator, type ReportSink } from './simulator.js';
 
 export type HermesOptions = {
   bus: Bus;
   log: Logger;
   preset: LoadPreset;
-  /** `loadCurrent()` result. */
-  current: readonly Order[];
-  /** `maxOrderId()` result. */
-  maxOrderId: string | null;
   seed: number;
   stepMs: number;
-  /**
-   * `events` (default): publish `orders.events`, hold the orders from `current`. `reports`: send submissions and execution
-   * reports to the order service, and load the open orders from it (`current` and `maxOrderId` are not used).
-   */
-  execMode?: 'events' | 'reports';
   /** Most time to wait at startup for a quote for every pair (default 10 s); the rest use their reference level. */
   priceWaitMs?: number;
   now?: () => number;
@@ -79,8 +69,9 @@ export type Hermes = {
 
 /**
  * Wires the lifecycle simulator to a bus: follows the price feed (`prices.*`) for fill prices and market snapshots,
- * reconciles stale orders at startup, publishes `orders.events` at the preset rate, and follows `control.load`. It makes
- * no prices of its own.
+ * loads the open orders from the order service, reconciles stale ones at startup, then reports what happens at the venue
+ * (new orders as submissions, everything else as execution reports) at the preset rate, and follows `control.load`. It
+ * makes no prices of its own and has no database.
  */
 export async function startHermes(options: HermesOptions): Promise<Hermes> {
   const { bus, log } = options;
@@ -114,7 +105,6 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
   };
 
   let lastEventPublish: Promise<boolean> | null = null;
-  const reportsMode = options.execMode === 'reports';
 
   const reportSink: ReportSink = {
     report: (report): void => {
@@ -144,18 +134,10 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
     rng,
     feed: quotes,
     preset: options.preset,
-    current: reportsMode ? [] : options.current,
-    startSeq: reportsMode ? 0 : nextSeqFrom(options.maxOrderId),
-    ...(reportsMode
-      ? { reports: reportSink }
-      : {
-          emit: (event: OrderEvent): void => {
-            lastEventPublish = publish(SUBJECTS.ordersEvents, event);
-          },
-        }),
+    reports: reportSink,
   });
 
-  // `reports` mode: follow the order service's records of the orders. The watch is opened before the open orders are
+  // Follow the order service's records of the orders. The watch is opened before the open orders are
   // asked for, so nothing between the two is missed; whatever it delivered meanwhile is applied afterwards, and a record
   // is applied only if its version is above the one already held.
   const heldVersions = new Map<string, number>();
@@ -169,30 +151,28 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
   let following = false;
   let watch: KvWatch | null = null;
   let inboxSub: BusSubscription | null = null;
-  if (reportsMode) {
-    // The bucket belongs to the order service, which may still be starting.
-    let kvWatch: KvWatch | null = null;
-    for (let attempt = 1; kvWatch === null; attempt++) {
-      try {
-        kvWatch = await bus.kv(BUCKETS.orderState).watch({ updatesOnly: true });
-      } catch (error) {
-        if (attempt >= 30) throw error;
-        log.warn({ err: error, attempt }, 'could not watch the order state yet, retrying');
-        await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
-      }
+  // The bucket belongs to the order service, which may still be starting.
+  let kvWatch: KvWatch | null = null;
+  for (let attempt = 1; kvWatch === null; attempt++) {
+    try {
+      kvWatch = await bus.kv(BUCKETS.orderState).watch({ updatesOnly: true });
+    } catch (error) {
+      if (attempt >= 30) throw error;
+      log.warn({ err: error, attempt }, 'could not watch the order state yet, retrying');
+      await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
     }
-    watch = kvWatch;
-    const orderState = kvWatch;
-    void (async (): Promise<void> => {
-      for await (const entry of orderState) {
-        if (entry.op !== 'PUT') continue;
-        const parsed = parseOrderStateRecord(entry.value);
-        if (!parsed.ok) continue;
-        if (following) adopt(parsed.value);
-        else buffered.push(parsed.value);
-      }
-    })().catch((error: unknown) => log.warn({ err: error }, 'order-state watch ended'));
   }
+  watch = kvWatch;
+  const orderState = kvWatch;
+  void (async (): Promise<void> => {
+    for await (const entry of orderState) {
+      if (entry.op !== 'PUT') continue;
+      const parsed = parseOrderStateRecord(entry.value);
+      if (!parsed.ok) continue;
+      if (following) adopt(parsed.value);
+      else buffered.push(parsed.value);
+    }
+  })().catch((error: unknown) => log.warn({ err: error }, 'order-state watch ended'));
 
   // Prices first, so reconciliation fills and new orders use the market: follow the feed, take the last quote of
   // every pair, and give a feed that is still starting a moment to publish.
@@ -212,38 +192,36 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
   while (quotes.missing().length > 0 && Date.now() < priceDeadline) await new Promise<void>((resolve) => setTimeout(resolve, 50));
   if (quotes.missing().length > 0) log.warn({ missing: quotes.missing() }, 'starting without a quote for some pairs; using their reference levels');
 
-  if (reportsMode) {
-    const inbox = `inbox.hermes.${randomUUID().replaceAll('-', '')}`;
-    const chunks: { records: unknown[] }[] = [];
-    inboxSub = await bus.subscribe(inbox, (payload) => {
-      chunks.push(payload as { records: unknown[] });
-    });
-    let expected = -1;
-    for (let attempt = 1; expected < 0; attempt++) {
-      try {
-        const reply = (await bus.request(SUBJECTS.ordersQueryOpen, { inbox }, QUERY_TIMEOUT_MS)) as { chunks: number };
-        expected = reply.chunks;
-      } catch (error) {
-        if (attempt >= 30) throw error;
-        log.warn({ err: error, attempt }, 'could not ask the order service for the open orders yet, retrying');
-        await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
-      }
+  const inbox = `inbox.hermes.${randomUUID().replaceAll('-', '')}`;
+  const chunks: { records: unknown[] }[] = [];
+  inboxSub = await bus.subscribe(inbox, (payload) => {
+    chunks.push(payload as { records: unknown[] });
+  });
+  let expected = -1;
+  for (let attempt = 1; expected < 0; attempt++) {
+    try {
+      const reply = (await bus.request(SUBJECTS.ordersQueryOpen, { inbox }, QUERY_TIMEOUT_MS)) as { chunks: number };
+      expected = reply.chunks;
+    } catch (error) {
+      if (attempt >= 30) throw error;
+      log.warn({ err: error, attempt }, 'could not ask the order service for the open orders yet, retrying');
+      await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
     }
-    for (let waited = 0; chunks.length < expected && waited < 100; waited++) await new Promise<void>((resolve) => setTimeout(resolve, 20));
-    let loaded = 0;
-    for (const chunk of chunks) {
-      for (const raw of chunk.records) {
-        const parsed = parseOrderStateRecord(raw);
-        if (parsed.ok) {
-          adopt(parsed.value);
-          loaded++;
-        }
-      }
-    }
-    following = true;
-    for (const record of buffered.splice(0)) adopt(record);
-    log.info({ loaded, chunks: chunks.length }, 'loaded the open orders from the order service');
   }
+  for (let waited = 0; chunks.length < expected && waited < 100; waited++) await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  let loaded = 0;
+  for (const chunk of chunks) {
+    for (const raw of chunk.records) {
+      const parsed = parseOrderStateRecord(raw);
+      if (parsed.ok) {
+        adopt(parsed.value);
+        loaded++;
+      }
+    }
+  }
+  following = true;
+  for (const record of buffered.splice(0)) adopt(record);
+  log.info({ loaded, chunks: chunks.length }, 'loaded the open orders from the order service');
 
   const reconciled = simulator.reconcile(now());
   log.info(

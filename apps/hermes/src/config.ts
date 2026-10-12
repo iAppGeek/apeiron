@@ -8,12 +8,7 @@ const posInt = (fallback: string): z.ZodType<number> =>
     .pipe(z.number().int().positive());
 
 const envSchema = z.object({
-  /** Needed only in `events` mode: in `reports` mode the order service owns the database. */
-  MONGO_URL: z.url({ protocol: /^mongodb(\+srv)?$/ }).optional(),
-  MONGO_DB: z.string().min(1).default('blotter'),
   NATS_URL: z.url({ protocol: /^nats$/ }),
-  /** `events`: publish orders.events (default for now). `reports`: submissions and execution reports to the order service. */
-  EXEC_MODE: z.enum(['events', 'reports']).default('events'),
   LOAD_PRESET: z.enum(['medium', 'stress']).default('medium'),
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
   /** Seeds the random walk and the lifecycle simulator; unset uses the clock. */
@@ -32,9 +27,6 @@ const envSchema = z.object({
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
 
 export type HermesConfig = {
-  mongoUrl: string | undefined;
-  execMode: 'events' | 'reports';
-  mongoDb: string;
   natsUrl: string;
   loadPreset: 'medium' | 'stress';
   logLevel: LogLevel;
@@ -54,11 +46,7 @@ export function loadConfig(env: Record<string, string | undefined>): HermesConfi
   if (e.HERMES_SEED !== undefined && !Number.isFinite(e.HERMES_SEED)) {
     throw new Error('Invalid configuration: HERMES_SEED must be a number');
   }
-  if (e.EXEC_MODE === 'events' && e.MONGO_URL === undefined) throw new Error('Invalid configuration: MONGO_URL: required when EXEC_MODE is events');
   return {
-    mongoUrl: e.MONGO_URL,
-    execMode: e.EXEC_MODE,
-    mongoDb: e.MONGO_DB,
     natsUrl: e.NATS_URL,
     loadPreset: e.LOAD_PRESET,
     logLevel: e.LOG_LEVEL,

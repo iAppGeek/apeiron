@@ -1,4 +1,4 @@
-import type { Order, OrderEvent, Row, SsrmRequest } from '@apeiron/logos';
+import type { Order, OrderStateRecord, Row, SsrmRequest } from '@apeiron/logos';
 import { describe, expect, it } from 'vitest';
 import type { Driver } from './driver';
 import { OrderModel } from './model';
@@ -63,13 +63,13 @@ const driverOf = (model: OrderModel, startMax: string | null): Driver => ({ mode
 
 describe('checkModelVsServer', () => {
   const initial = [order('ALG00000001', { status: 'FILLED' }), order('ALG00000002')];
-  const events: OrderEvent[] = [
-    { type: 'NEW', order: order('ALG00000003'), ts: 1 },
-    { type: 'UPDATE', order: { orderId: 'ALG00000002', filledQty: 10, numFills: 1 }, ts: 2 },
+  const records: OrderStateRecord[] = [
+    { v: 1, execSeq: 0, srcTs: 1, order: order('ALG00000003') },
+    { v: 2, execSeq: 1, srcTs: 2, order: order('ALG00000002', { filledQty: 10, numFills: 1 }) },
   ];
   const build = (): OrderModel => {
     const model = new OrderModel(initial);
-    for (const e of events) model.applyEvent(e);
+    for (const r of records) model.applyRecord(r);
     return model;
   };
 

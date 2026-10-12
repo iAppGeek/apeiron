@@ -19,7 +19,8 @@
     "@apeiron/hermes": "workspace:*",
     "@apeiron/iris": "workspace:*",
     "@apeiron/logos": "workspace:*",
-    "@apeiron/mnemosyne": "workspace:*"
+    "@apeiron/mnemosyne": "workspace:*",
+    "@apeiron/themis": "workspace:*"
   },
   "devDependencies": {
     "@apeiron/eslint-config": "workspace:*",

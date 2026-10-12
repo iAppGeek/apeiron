@@ -3,11 +3,8 @@ import {
   PAIR_BY_NAME,
   applyCommand,
   applyFill,
-  deriveOverlay,
   isTerminal,
   normal,
-  pnlUsdOf,
-  parseOrderSeq,
   sideSign,
   transition,
   uniform,
@@ -46,17 +43,11 @@ export type SimulatorOptions = {
   rng: Rng;
   /** The market now, from the price feed's ticks. */
   feed: Quotes;
-  /** Receives every `orders.events` message the simulator produces (`events` mode). */
-  emit?: (event: OrderEvent) => void;
-  /** Set for `reports` mode: the simulator then emits nothing on `orders.events`. */
-  reports?: ReportSink;
+  /** Where what happens at the venue goes: reports, submissions and command answers. */
+  reports: ReportSink;
   /** Makes the `clientOrderId` of each submission unique to this run (default: random). */
   runTag?: string;
   preset: LoadPreset;
-  /** The LIVE, PAUSED and PENDING_START orders at startup (`loadCurrent()`). */
-  current: readonly Order[];
-  /** Highest order sequence number issued so far (from `maxOrderId()`); new ids continue above it. */
-  startSeq: number;
 };
 
 /** What a change to an order is, as a report to the order service. */
@@ -73,14 +64,6 @@ const roundTo = (value: number, decimals: number): number => {
   const f = 10 ** decimals;
   return Math.round(value * f) / f;
 };
-
-/** The sequence number to continue from, given the highest stored order id. */
-export function nextSeqFrom(maxOrderId: string | null): number {
-  if (maxOrderId === null) return 0;
-  const seq = parseOrderSeq(maxOrderId);
-  if (seq === null) throw new Error(`maxOrderId is not in the ALG + 8 digit format: ${maxOrderId}`);
-  return seq;
-}
 
 /** Index-addressable set with O(1) add, remove and uniform random pick. */
 class Pool {
@@ -146,10 +129,7 @@ export class Simulator {
     this.presetName = options.preset;
     this.rates = LOAD_PRESETS[options.preset];
     this.factory = new OrderFactory(options.rng);
-    this.factory.seq = options.startSeq;
     this.runTag = options.runTag ?? Math.random().toString(36).slice(2, 10);
-    if (options.emit === undefined && options.reports === undefined) throw new Error('Simulator needs emit (events mode) or reports (reports mode)');
-    for (const order of options.current) this.track(order);
   }
 
   get preset(): LoadPreset {
@@ -240,9 +220,9 @@ export class Simulator {
   }
 
   /**
-   * Applies a trader command to an order the simulator holds and answers it on `orders.events`: an UPDATE
-   * carrying the command's id and the absolute changed fields, or a REJECT (INVALID_TRANSITION from the
-   * lifecycle rules, UNKNOWN_ORDER for an order that is not held, such as a historical one).
+   * Applies a trader command to an order the simulator holds: the change goes out as an execution report and the answer
+   * as an UPDATE carrying the command's id and the new status, or a REJECT (INVALID_TRANSITION from the lifecycle
+   * rules, UNKNOWN_ORDER for an order that is not held, such as a historical one).
    */
   command(command: OrderCommand, now: number): void {
     const order = this.orders.get(command.orderId);
@@ -300,16 +280,10 @@ export class Simulator {
     this.track({ ...record.order });
   }
 
-  /** Answers a command: on `orders.events` in `events` mode, to the report sink's answer channel in `reports` mode. */
+  /** Answers a command on the report sink's answer channel. */
   private reply(event: OrderEvent): void {
     this.emitted++;
-    if (this.options.reports !== undefined) this.options.reports.answer(event);
-    else this.options.emit?.(event);
-  }
-
-  private emit(event: OrderEvent): void {
-    this.emitted++;
-    this.options.emit?.(event);
+    this.options.reports.answer(event);
   }
 
   private nextExecSeq(orderId: string): number {
@@ -328,37 +302,14 @@ export class Simulator {
   }
 
   /**
-   * A change that completes the order (fill to completion, cancel) also carries the market snapshot from the
-   * feed's current quote and the realised P&L at that quote's mid, because the order service stores the record
-   * and nothing else will price a terminal order again.
+   * Applies a change to the simulator's own copy of the order and reports it to the order service: an execution report
+   * numbered per order, with the quote for a fill or a cancel. The order service applies it with the same rules and
+   * computes the market snapshot and the realised P&L from that quote. A command's answer goes out as well.
    */
-  private completed(order: Order, changes: Partial<Order>): Partial<Order> {
-    const after: Order = { ...order, ...changes };
-    if (!isTerminal(after.status) || isTerminal(order.status)) return changes;
-    const quote = this.options.feed.quote(order.currencyPair) ?? { bid: this.options.feed.mid(order.currencyPair), ask: this.options.feed.mid(order.currencyPair) };
-    const overlay = deriveOverlay(after, quote);
-    return { ...changes, ...overlay, unrealisedPnlUsd: 0, realisedPnlUsd: pnlUsdOf(after, overlay.marketMid) };
-  }
-
-  /**
-   * Applies a change to the simulator's own copy of the order and tells the world: an UPDATE with the absolute changed
-   * fields in `events` mode, an execution report (numbered per order, with the quote for a fill or a cancel) in `reports`
-   * mode, where a command's answer also goes out.
-   */
-  private commit(order: Order, rawChanges: Partial<Order>, now: number, report: ReportSpec, commandId?: string): Order {
+  private commit(order: Order, changes: Partial<Order>, now: number, report: ReportSpec, commandId?: string): Order {
     const sink = this.options.reports;
-    const changes = sink === undefined ? this.completed(order, rawChanges) : rawChanges;
     const next = { ...order, ...changes };
     this.track(next);
-    if (sink === undefined) {
-      this.emit({
-        type: 'UPDATE',
-        order: { orderId: order.orderId, ...changes },
-        ts: now,
-        ...(commandId === undefined ? {} : { commandId }),
-      });
-      return next;
-    }
     const base = { orderId: order.orderId, execSeq: this.nextExecSeq(order.orderId), ts: now };
     const quote = (): { bid: number; ask: number } => {
       const q = this.options.feed.quote(order.currencyPair);
@@ -474,12 +425,7 @@ export class Simulator {
       now,
       current: true,
     });
-    if (this.options.reports !== undefined) {
-      this.submitNew(order, status);
-      return;
-    }
-    this.track(order);
-    this.emit({ type: 'NEW', order, ts: now });
+    this.submitNew(order, status);
   }
 
   /**
@@ -488,7 +434,7 @@ export class Simulator {
    * not overshoot the preset.
    */
   private submitNew(order: Order, status: 'LIVE' | 'PENDING_START'): void {
-    const sink = this.options.reports as ReportSink;
+    const sink = this.options.reports;
     const key = `${this.runTag}-${++this.submitted}`;
     const { orderId: _provisional, ...rest } = order;
     this.inflight[status]++;

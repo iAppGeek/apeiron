@@ -12,7 +12,6 @@ export class ThemisMetrics {
   private readonly batchSize: Histogram;
   private readonly commitSeconds: Histogram;
   private readonly kvPutSeconds: Histogram;
-  private readonly events: Counter;
   private readonly rebuildSeconds: Gauge;
   private readonly reports: Counter;
   private readonly clampedFills: Counter;
@@ -25,12 +24,6 @@ export class ThemisMetrics {
     this.batchSize = new Histogram({ name: 'themis_commit_batch_size', help: 'Orders per group commit.', buckets: COUNTS, registers });
     this.commitSeconds = new Histogram({ name: 'themis_commit_duration_seconds', help: 'Time to store and publish one group commit.', buckets: SECONDS, registers });
     this.kvPutSeconds = new Histogram({ name: 'themis_kv_put_duration_seconds', help: 'Time to publish one group commit to ORDER_STATE.', buckets: SECONDS, registers });
-    this.events = new Counter({
-      name: 'themis_events_total',
-      help: 'orders.events messages handled, by event type and result.',
-      labelNames: ['type', 'result'],
-      registers,
-    });
     this.reports = new Counter({
       name: 'themis_exec_reports_total',
       help: 'Execution reports handled, by type and result (applied, duplicate, rejected, unknown, invalid).',
@@ -75,10 +68,6 @@ export class ThemisMetrics {
 
   kvPut(seconds: number): void {
     this.kvPutSeconds.observe(seconds);
-  }
-
-  event(type: string, result: 'applied' | 'unchanged' | 'unknown' | 'ignored' | 'invalid'): void {
-    this.events.inc({ type, result });
   }
 
   report(type: string, result: 'applied' | 'duplicate' | 'rejected' | 'unknown' | 'invalid'): void {
