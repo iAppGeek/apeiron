@@ -1,7 +1,7 @@
 import type { CommandAction } from './protocol.js';
 import { PAIR_BY_NAME, type Order, type OrderStatus, type Side } from './order.js';
 
-const roundTo = (value: number, decimals: number): number => {
+export const roundTo = (value: number, decimals: number): number => {
   const f = 10 ** decimals;
   return Math.round(value * f) / f;
 };
@@ -134,7 +134,7 @@ export function transition(order: Order, to: OrderStatus, now: number): Transiti
 
 export type PriceQuote = { bid: number; ask: number };
 
-/** The fields {@link derivePriceFields} reads, so the server can pass a light object instead of a full order. */
+/** The fields {@link derivePriceFields} and {@link deriveOverlay} read, so callers can pass a light object instead of a full order. */
 export type PriceDerivationInput = Pick<
   Order,
   | 'currencyPair'
@@ -148,30 +148,53 @@ export type PriceDerivationInput = Pick<
   | 'notionalUsd'
 >;
 
+/** The price-derived fields the blotter overlays on open orders from the latest quote (PLAN1, field ownership). */
+export const OVERLAY_FIELDS = [
+  'marketBid',
+  'marketAsk',
+  'marketMid',
+  'spreadBps',
+  'distanceToLimitBps',
+  'unrealisedPnlUsd',
+] as const satisfies readonly (keyof Order)[];
+export type OverlayField = (typeof OVERLAY_FIELDS)[number];
+export type Overlay = Pick<Order, OverlayField>;
+
+/** Distance to the limit in bps, positive when the market is inside the limit (by side); null without a limit. */
+export function distanceToLimitBpsOf(order: Pick<Order, 'side' | 'limitPrice'>, marketMid: number): number | null {
+  return order.limitPrice === null ? null : roundTo((sideSign(order.side) * (order.limitPrice - marketMid) * 1e4) / marketMid, 2);
+}
+
 /**
- * The price-derived fields the server owns, recomputed from the latest quote: `marketBid/Ask/Mid`,
- * `spreadBps`, `distanceToLimitBps` (positive when the market is inside the limit, by side),
- * `slippageBps` when the order has fills, `unrealisedPnlUsd` for LIVE and PAUSED orders, and
- * `lastUpdateTime`.
+ * The six overlay fields as a pure function of an order and the latest quote: `marketBid/Ask/Mid`, `spreadBps`,
+ * `distanceToLimitBps` and `unrealisedPnlUsd` (0 until the order has fills). The caller applies it to LIVE and
+ * PAUSED orders only. Two blotters with the same record and the same tick get identical values.
  */
-export function derivePriceFields(order: PriceDerivationInput, quote: PriceQuote, now: number): Partial<Order> {
+export function deriveOverlay(order: PriceDerivationInput, quote: PriceQuote): Overlay {
   const dec = decimalsOf(order);
   const marketBid = roundTo(quote.bid, dec);
   const marketAsk = roundTo(quote.ask, dec);
   const marketMid = roundTo((quote.bid + quote.ask) / 2, dec);
-  const changes: Partial<Order> = {
+  return {
     marketBid,
     marketAsk,
     marketMid,
     spreadBps: roundTo(((marketAsk - marketBid) / marketMid) * 1e4, 2),
-    distanceToLimitBps:
-      order.limitPrice === null
-        ? null
-        : roundTo((sideSign(order.side) * (order.limitPrice - marketMid) * 1e4) / marketMid, 2),
-    lastUpdateTime: now,
+    distanceToLimitBps: distanceToLimitBpsOf(order, marketMid),
+    unrealisedPnlUsd: pnlUsdOf(order, marketMid),
   };
+}
+
+/**
+ * The price-derived fields the server owns, recomputed from the latest quote: the overlay fields (with
+ * `unrealisedPnlUsd` only for LIVE and PAUSED orders), `slippageBps` when the order has fills, and
+ * `lastUpdateTime`.
+ */
+export function derivePriceFields(order: PriceDerivationInput, quote: PriceQuote, now: number): Partial<Order> {
+  const { unrealisedPnlUsd, ...rest } = deriveOverlay(order, quote);
+  const changes: Partial<Order> = { ...rest, lastUpdateTime: now };
   if (order.avgFillPrice !== null) changes.slippageBps = slippageBpsOf(order, order.avgFillPrice);
-  if (isOpen(order.status)) changes.unrealisedPnlUsd = pnlUsdOf(order, marketMid);
+  if (isOpen(order.status)) changes.unrealisedPnlUsd = unrealisedPnlUsd;
   return changes;
 }
 

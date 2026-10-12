@@ -7,7 +7,7 @@ import {
   type ServerMsg,
   type SsrmRequest,
 } from '@apeiron/logos';
-import { InMemoryOrderRepository } from '@apeiron/mnemosyne';
+import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import WebSocket, { type RawData } from 'ws';
 import { buildServer, type BlotterServer } from './server.js';
@@ -79,7 +79,7 @@ let wsUrl: string;
 
 beforeEach(async () => {
   const repo = new InMemoryOrderRepository();
-  await repo.upsertMany(ORDERS);
+  await repo.upsertMany(ORDERS.map(toStoredOrder));
   server = await buildServer({ repo, logLevel: 'silent', storeCapacity: 2_000 });
   await server.app.listen({ port: 0, host: '127.0.0.1' });
   const addr = server.app.server.address();
@@ -252,7 +252,7 @@ describe('GET /ws robustness', () => {
 
   it('logs cold builds that cross the slow threshold', async () => {
     const repo = new InMemoryOrderRepository();
-    await repo.upsertMany(ORDERS);
+    await repo.upsertMany(ORDERS.map(toStoredOrder));
     const slow = await buildServer({ repo, logLevel: 'silent', storeCapacity: 2_000, slowBuildMs: 0 });
     await slow.app.listen({ port: 0, host: '127.0.0.1' });
     await slow.load();

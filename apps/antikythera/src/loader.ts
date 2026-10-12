@@ -56,7 +56,7 @@ export async function loadStore(
     const { lag } = await withLagReport(monitor, async () => {
       let lastLog = start;
       for await (const batch of repo.loadAll(options.batchSize ?? DEFAULT_LOAD_BATCH_SIZE)) {
-        store.appendBatch(batch);
+        store.appendBatch(batch.map((record) => record.order));
         const now = performance.now();
         if (now - lastLog > 5_000) {
           lastLog = now;

@@ -15,24 +15,34 @@ untested starting points: nothing here has been run against those databases.
 ## The contract
 
 ```ts
+/** An order plus the two counters its owner keeps: `v` (1 at creation, +1 per accepted change) and `execSeq` (last accepted execution). */
+type StoredOrder = { order: Order; v: number; execSeq: number };
+
 type OrderRepository = {
-  loadAll(batchSize?: number): AsyncIterable<Order[]>;
-  upsertMany(orders: readonly Order[]): Promise<void>;
+  loadAll(batchSize?: number): AsyncIterable<StoredOrder[]>;
+  upsertMany(records: readonly StoredOrder[]): Promise<void>;
   count(): Promise<number>;
   isSeeded(): Promise<boolean>;
-  loadCurrent(): Promise<Order[]>;
+  loadOpen(): Promise<StoredOrder[]>;
+  loadUpdatedSince(ts: number, batchSize?: number): AsyncIterable<StoredOrder[]>;
+  latestMidsByPair(): Promise<Record<CurrencyPair, number>>;
   maxOrderId(): Promise<string | null>;
   clear(): Promise<void>;
 };
 ```
 
+`v` and `execSeq` are stored beside the 50 fields (Mongo: `_v` and `_execSeq`). A stored row that has neither reads as
+`v = 1` and `execSeq = numFills`, so data seeded before they existed still loads. The `Order` type itself is unchanged.
+
 | Method | Used by | Contract |
 |---|---|---|
 | `loadAll(batchSize = 10_000)` | antikythera at startup | **Stream** every order in ascending `orderId`, in batches of at most `batchSize` (the last may be shorter). Must not materialise the full set: the server loads 1M rows into a columnar store with a heap budget of under 800 MB. Early termination (`break`) must release the cursor. Ascending order matters: the store assumes ids ascend so radix sorts keep a free tiebreak |
-| `upsertMany(orders)` | gaia (seed), antikythera (write-behind) | Insert or **fully replace** by `orderId`; idempotent; unordered batch writes are fine; an empty list is a no-op. Every one of the 50 fields is stored, nulls included |
+| `upsertMany(records)` | gaia (seed), the order service | Insert or **fully replace** by `orderId`, with `v` and `execSeq`; idempotent; unordered batch writes are fine; an empty list is a no-op. Every one of the 50 fields is stored, nulls included |
 | `count()` | gaia, tests | exact number of stored orders |
 | `isSeeded()` | gaia | true when at least one order exists. Must be cheap (no full count) |
-| `loadCurrent()` | hermes at startup | only `PENDING_START`, `LIVE` and `PAUSED` orders, ascending by `orderId`. This is a few hundred rows out of a million, so the adapter needs an index (or partition) on status |
+| `loadOpen()` | the order service, hermes at startup | only `PENDING_START`, `LIVE` and `PAUSED` orders, ascending by `orderId`. This is a few hundred rows out of a million, so the adapter needs an index (or partition) on status |
+| `loadUpdatedSince(ts, batchSize = 10_000)` | the order service at startup | **Stream** the orders whose `lastUpdateTime` is at or after `ts`, ascending by `orderId`, in batches. Needs an index on `lastUpdateTime` (Mongo: `{lastUpdateTime: -1}`) |
+| `latestMidsByPair()` | the pricing service's start levels | the `marketMid` of the most recently updated open order of each pair (ties: larger `orderId`), else the pair's reference level. All 20 pairs are present |
 | `maxOrderId()` | hermes, gaia | the highest `orderId`, or `null` when empty, so new ids can keep ascending (`ALG` + a zero-padded sequence, so string order equals numeric order) |
 | `clear()` | gaia (`SEED_RESET=true`), tests | remove every order; idempotent on an empty repository; the repository stays usable afterwards (recreate indexes if the drop removed them) |
 
@@ -46,7 +56,7 @@ by key at runtime, because the server serves queries from memory.
 fresh, empty repository and a `cleanup` function for each test. The suite covers: empty state, count and `isSeeded`,
 empty upserts, idempotency, replacement by `orderId`, an exact round trip of all 50 fields on 300 generated orders
 (including nulls), ascending streaming regardless of insertion order, batch sizes (including a remainder batch), early
-termination, `clear()` (idempotent and reusable), several upserts in a row, `loadCurrent` and `maxOrderId`.
+termination, `clear()` (idempotent and reusable), several upserts in a row, `loadOpen`, `loadUpdatedSince`, `latestMidsByPair`, the round trip of `v` and `execSeq`, and `maxOrderId`.
 
 Add a spec next to the adapter, exactly as the Mongo one does:
 

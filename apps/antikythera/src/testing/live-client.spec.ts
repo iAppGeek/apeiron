@@ -1,5 +1,5 @@
 import { MemoryBus, type Order } from '@apeiron/logos';
-import { InMemoryOrderRepository } from '@apeiron/mnemosyne';
+import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildServer, type BlotterServer } from '../server.js';
 import { LiveClient, flatRequest, groupedRequest, measureDefaultView, measureGroupedView, median, percentile } from './live-client.js';
@@ -29,7 +29,7 @@ afterEach(async () => {
 async function start(): Promise<{ bus: MemoryBus; url: string }> {
   const bus = new MemoryBus();
   const repo = new InMemoryOrderRepository();
-  await repo.upsertMany(ROWS);
+  await repo.upsertMany(ROWS.map(toStoredOrder));
   server = await buildServer({ repo, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, writeBehindMs: 50, summaryIntervalMs: 100 });
   await server.app.listen({ port: 0, host: '127.0.0.1' });
   await server.load();

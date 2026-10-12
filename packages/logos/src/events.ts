@@ -22,10 +22,30 @@ export const SUBJECTS = {
   /** Hermes reports the preset it is running, at startup, on every change and every few seconds. */
   controlState: 'control.state',
   pricesWildcard: 'prices.*',
+  /** PLAN1: request/reply from hermes to themis. */
+  ordersSubmit: 'orders.submit',
+  /** PLAN1: request/reply from a blotter to themis. */
+  ordersCmd: 'orders.cmd',
+  /** PLAN1: request/reply from hermes to themis; the reply is chunked. */
+  ordersQueryOpen: 'orders.query.open',
+  /** PLAN1: request/reply from helios to themis (startup fallback only). */
+  refMids: 'ref.mids',
+  execReports: 'exec.reports',
+  execCommands: 'exec.commands',
 } as const;
 
-export const STREAMS = { orders: 'ORDERS', prices: 'PRICES' } as const;
-export const CONSUMERS = { blotterServer: 'blotter-server', hermesCommands: 'hermes-commands' } as const;
+export const STREAMS = { orders: 'ORDERS', prices: 'PRICES', exec: 'EXEC', venue: 'VENUE' } as const;
+export const CONSUMERS = {
+  blotterServer: 'blotter-server',
+  hermesCommands: 'hermes-commands',
+  themisExec: 'themis-exec',
+  hermesVenue: 'hermes-venue',
+} as const;
+/** PLAN1: JetStream KV buckets. `ORDER_STATE` is keyed by `orderId`; `ORDER_STATE_META` holds the `projection` marker. */
+export const BUCKETS = { orderState: 'ORDER_STATE', orderStateMeta: 'ORDER_STATE_META' } as const;
+export const PROJECTION_KEY = 'projection';
+/** KV keys must match this; themis rejects any other `orderId`. */
+export const KV_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 export const priceSubject = (pair: CurrencyPair): string => `prices.${pair}`;
 
@@ -63,7 +83,7 @@ export type OrderCommand = {
 const num = z.number();
 const nullableNum = z.number().nullable();
 
-const orderShape = {
+export const orderShape = {
   orderId: z.string().min(1),
   parentOrderId: z.string(),
   clientOrderId: z.string(),

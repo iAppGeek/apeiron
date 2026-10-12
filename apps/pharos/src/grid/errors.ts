@@ -36,6 +36,12 @@ export function describeFailure(code: FailureCode, serverMessage?: string): stri
       return 'The server does not know that order.';
     case 'SLOW_CONSUMER':
       return 'The connection fell too far behind and was closed by the server.';
+    case 'FORBIDDEN':
+      return 'You are not entitled to do that.';
+    case 'UNKNOWN_USER':
+      return 'The server does not know that user.';
+    case 'INVALID_AMEND':
+      return 'That amendment is not valid.';
     case 'DISCONNECTED':
       return 'The connection to the server was lost.';
     case 'TIMEOUT':

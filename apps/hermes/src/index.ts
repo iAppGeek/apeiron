@@ -24,7 +24,7 @@ const bus = await NatsBus.connect({ url: config.natsUrl, name: 'hermes', log });
 const streams = await ensureStreams(await bus.manager());
 log.info({ streams }, 'streams ready');
 
-const current = await repo.loadCurrent();
+const current = (await repo.loadOpen()).map((record) => record.order);
 const maxOrderId = await repo.maxOrderId();
 log.info({ current: current.length, maxOrderId }, 'loaded current orders');
 

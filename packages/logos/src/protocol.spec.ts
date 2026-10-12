@@ -23,6 +23,12 @@ describe('parseClientMsg', () => {
       { t: 'ping', ts: 'now' },
       { t: 'control', reqId: 1, preset: 'turbo' },
       { t: 'control', preset: 'medium' },
+      { t: 'hello', userId: '', traderId: 'T1', codec: 'json', clientId: 'c' },
+      { t: 'amend', reqId: 1, orderId: 'A', changes: {} },
+      { t: 'amend', reqId: 1, orderId: 'A', changes: { status: 'LIVE' } },
+      { t: 'amend', reqId: 1, orderId: 'A', changes: { orderQty: 1.5 } },
+      { t: 'amend', reqId: 1, orderId: 'A', changes: { limitPrice: 0 } },
+      { t: 'amend', reqId: 1, orderId: 'A', changes: { urgency: 'URGENT' } },
     ];
     for (const input of bad) {
       const result = parseClientMsg(input);
@@ -57,9 +63,9 @@ describe('isServerMsg', () => {
 });
 
 describe('ERROR_CODES', () => {
-  it('lists every code once, including the phase 5 and 6 ones', () => {
+  it('lists every code once, including the phase 5, 6 and PLAN1 ones', () => {
     expect(new Set(ERROR_CODES).size).toBe(ERROR_CODES.length);
-    for (const c of ['UNSUPPORTED_FILTER', 'UNSUPPORTED_AGG', 'NOT_IMPLEMENTED', 'INVALID_TRANSITION', 'UNKNOWN_ORDER', 'SLOW_CONSUMER']) {
+    for (const c of ['UNSUPPORTED_FILTER', 'UNSUPPORTED_AGG', 'NOT_IMPLEMENTED', 'INVALID_TRANSITION', 'UNKNOWN_ORDER', 'SLOW_CONSUMER', 'FORBIDDEN', 'UNKNOWN_USER', 'INVALID_AMEND']) {
       expect(ERROR_CODES).toContain(c);
     }
   });

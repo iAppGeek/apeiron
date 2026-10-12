@@ -1,5 +1,5 @@
 import { generateOrderBatches } from '@apeiron/logos';
-import type { OrderRepository } from '@apeiron/mnemosyne';
+import { toStoredOrder, type OrderRepository } from '@apeiron/mnemosyne';
 
 export type SeedParams = {
   repo: OrderRepository;
@@ -61,7 +61,7 @@ export async function runSeed(params: SeedParams): Promise<SeedResult> {
 
   for (const batch of generateOrderBatches({ seed, n: rows, now, batchSize })) {
     const task: Promise<void> = repo
-      .upsertMany(batch)
+      .upsertMany(batch.map(toStoredOrder))
       .then((): void => {
         written += batch.length;
         if (written >= nextProgress) {

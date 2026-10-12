@@ -1,5 +1,5 @@
 import { MemoryBus, type Order, type OrderEvent, type PriceTick } from '@apeiron/logos';
-import { InMemoryOrderRepository } from '@apeiron/mnemosyne';
+import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryEngine, type EngineOptions } from '../query/engine.js';
 import { ClientSession } from '../session.js';
@@ -38,9 +38,9 @@ async function rig(options: { bus?: MemoryBus; repo?: InMemoryOrderRepository; r
   const bus = options.bus ?? new MemoryBus();
   const repo = options.repo ?? new InMemoryOrderRepository();
   const orders = makeOrders(options.rows ?? [{ ...LIVE }, { ...LIVE, traderId: 'T2' }, { ...LIVE, status: 'FILLED' }]);
-  if (options.repo === undefined) await repo.upsertMany(orders);
+  if (options.repo === undefined) await repo.upsertMany(orders.map(toStoredOrder));
   const store = new ColumnarStore({ capacity: 16 });
-  for await (const batch of repo.loadAll()) store.appendBatch(batch);
+  for await (const batch of repo.loadAll()) store.appendBatch(batch.map((r) => r.order));
   const engine = new QueryEngine(store, { maxViews: 16, maxBytes: 1 << 26, maxBlockRows: 10_000, ...options.engine });
   const runtime = new LiveRuntime({
     store,
@@ -62,7 +62,7 @@ const tick = (bid: number, ask: number): PriceTick => ({ pair: 'EURUSD', bid, as
 
 async function persisted(repo: InMemoryOrderRepository): Promise<Order[]> {
   const out: Order[] = [];
-  for await (const b of repo.loadAll()) out.push(...b);
+  for await (const b of repo.loadAll()) out.push(...b.map((r) => r.order));
   return out;
 }
 

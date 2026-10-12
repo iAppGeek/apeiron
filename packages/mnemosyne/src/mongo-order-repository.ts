@@ -1,10 +1,20 @@
-import type { Order } from '@apeiron/logos';
-import { MongoClient, MongoServerError, type Collection, type Db } from 'mongodb';
-import { DEFAULT_BATCH_SIZE, type OrderRepository } from './order-repository.js';
+import type { CurrencyPair, Order, OrderStatus } from '@apeiron/logos';
+import { MongoClient, MongoServerError, type Collection, type Db, type Filter } from 'mongodb';
+import { DEFAULT_BATCH_SIZE, latestMidsOf, type OrderRepository, type StoredOrder } from './order-repository.js';
 
 const COLLECTION = 'orders';
 
-type OrderDoc = Order & { _id: string };
+/** A stored document: the 50 fields, the id, and the counters (absent in documents written before PLAN1). */
+type OrderDoc = Order & { _id: string; _v?: number; _execSeq?: number };
+
+const OPEN_STATUSES: OrderStatus[] = ['PENDING_START', 'LIVE', 'PAUSED'];
+
+const fromDoc = (doc: Omit<OrderDoc, '_id'>): StoredOrder => {
+  const { _v, _execSeq, ...order } = doc;
+  return { order, v: _v ?? 1, execSeq: _execSeq ?? order.numFills };
+};
+
+const toDoc = ({ order, v, execSeq }: StoredOrder): OrderDoc => ({ ...order, _id: order.orderId, _v: v, _execSeq: execSeq });
 
 export type MongoRepositoryOptions = {
   url: string;
@@ -14,8 +24,8 @@ export type MongoRepositoryOptions = {
 };
 
 /**
- * Mongo adapter. Documents use `orderId` as `_id`. Indexes: `{traderId, createdAt: -1}` and
- * `{status}`. Writes are unordered `bulkWrite` upserts.
+ * Mongo adapter. Documents use `orderId` as `_id` and carry `_v` and `_execSeq` beside the 50 fields. Indexes:
+ * `{traderId, createdAt: -1}`, `{status}` and `{lastUpdateTime: -1}`. Writes are unordered `bulkWrite` upserts.
  */
 export class MongoOrderRepository implements OrderRepository {
   private constructor(
@@ -37,17 +47,26 @@ export class MongoOrderRepository implements OrderRepository {
   async ensureIndexes(): Promise<void> {
     await this.orders.createIndex({ traderId: 1, createdAt: -1 }, { name: 'traderId_createdAt' });
     await this.orders.createIndex({ status: 1 }, { name: 'status' });
+    await this.orders.createIndex({ lastUpdateTime: -1 }, { name: 'lastUpdateTime' });
   }
 
-  async *loadAll(batchSize: number = DEFAULT_BATCH_SIZE): AsyncGenerator<Order[]> {
+  loadAll(batchSize: number = DEFAULT_BATCH_SIZE): AsyncGenerator<StoredOrder[]> {
+    return this.stream({}, batchSize);
+  }
+
+  loadUpdatedSince(ts: number, batchSize: number = DEFAULT_BATCH_SIZE): AsyncGenerator<StoredOrder[]> {
+    return this.stream({ lastUpdateTime: { $gte: ts } }, batchSize);
+  }
+
+  private async *stream(filter: Filter<OrderDoc>, batchSize: number): AsyncGenerator<StoredOrder[]> {
     const cursor = this.orders
-      .find({}, { projection: { _id: 0 } })
+      .find(filter, { projection: { _id: 0 } })
       .sort({ _id: 1 })
       .batchSize(batchSize);
     try {
-      let batch: Order[] = [];
+      let batch: StoredOrder[] = [];
       for await (const doc of cursor) {
-        batch.push(doc as unknown as Order);
+        batch.push(fromDoc(doc));
         if (batch.length >= batchSize) {
           yield batch;
           batch = [];
@@ -59,22 +78,26 @@ export class MongoOrderRepository implements OrderRepository {
     }
   }
 
-  async upsertMany(orders: readonly Order[]): Promise<void> {
-    if (orders.length === 0) return;
+  async upsertMany(records: readonly StoredOrder[]): Promise<void> {
+    if (records.length === 0) return;
     await this.orders.bulkWrite(
-      orders.map((order) => ({
-        replaceOne: { filter: { _id: order.orderId }, replacement: order, upsert: true },
+      records.map((record) => ({
+        replaceOne: { filter: { _id: record.order.orderId }, replacement: toDoc(record), upsert: true },
       })),
       { ordered: false },
     );
   }
 
-  async loadCurrent(): Promise<Order[]> {
+  async loadOpen(): Promise<StoredOrder[]> {
     const docs = await this.orders
-      .find({ status: { $in: ['PENDING_START', 'LIVE', 'PAUSED'] } }, { projection: { _id: 0 } })
+      .find({ status: { $in: OPEN_STATUSES } }, { projection: { _id: 0 } })
       .sort({ _id: 1 })
       .toArray();
-    return docs as unknown as Order[];
+    return docs.map(fromDoc);
+  }
+
+  async latestMidsByPair(): Promise<Record<CurrencyPair, number>> {
+    return latestMidsOf((await this.loadOpen()).map((r) => r.order));
   }
 
   async maxOrderId(): Promise<string | null> {
