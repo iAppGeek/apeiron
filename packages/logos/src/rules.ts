@@ -105,30 +105,14 @@ export function applyExecReport(record: OrderStateRecord, report: ExecReport): E
   }
 }
 
-/**
- * Validates and applies an amend of `limitPrice`, `orderQty`, `endTime` and `urgency`. Recomputes the
- * quantity-derived fields (`remainingQty`, `pctComplete`, `notionalUsd` at the same USD rate per unit,
- * `filledNotionalUsd`), `durationMins` and `distanceToLimitBps`.
- */
-export function applyAmend(record: OrderStateRecord, changes: AmendChanges, now: number): AmendResult {
-  const { order } = record;
-  const invalid = (message: string): AmendResult => ({ ok: false, code: 'INVALID_AMEND', message });
-  if (!isAmendable(order.status)) {
-    return { ok: false, code: 'INVALID_TRANSITION', message: `Cannot amend an order that is ${order.status}` };
-  }
-  const { limitPrice, orderQty, endTime, urgency } = changes;
-  if (orderQty !== undefined && (!Number.isInteger(orderQty) || orderQty <= order.filledQty)) {
-    return invalid(`Quantity must be a whole number above the filled quantity (${order.filledQty})`);
-  }
-  if (limitPrice !== undefined && limitPrice !== null) {
-    const decimals = PAIR_BY_NAME.get(order.currencyPair)?.decimals ?? 5;
-    if (!(limitPrice > 0) || roundTo(limitPrice, decimals) !== limitPrice) {
-      return invalid(`Limit price must be positive with at most ${decimals} decimals`);
-    }
-  }
-  if (endTime !== undefined && !(endTime > Math.max(now, order.startTime))) return invalid('End time must be after now and the start time');
-  if (urgency !== undefined && !URGENCIES.includes(urgency)) return invalid(`Unknown urgency ${String(urgency)}`);
+export type AmendFailure = { code: 'INVALID_TRANSITION' | 'INVALID_AMEND'; message: string };
 
+/** Whether an order in this status can be amended (not yet FILLED or CANCELLED). */
+export const canAmend = (status: Order['status']): boolean => isAmendable(status);
+
+/** The fields an amend would change, with the quantity-derived ones recomputed. Empty when nothing would change. */
+function amendedFields(order: Order, changes: AmendChanges): Partial<Order> {
+  const { limitPrice, orderQty, endTime, urgency } = changes;
   const changed: Partial<Order> = {};
   if (limitPrice !== undefined && limitPrice !== order.limitPrice) {
     changed.limitPrice = limitPrice;
@@ -147,8 +131,41 @@ export function applyAmend(record: OrderStateRecord, changes: AmendChanges, now:
     changed.durationMins = Math.max(1, Math.round((endTime - order.startTime) / MIN_MS));
   }
   if (urgency !== undefined && urgency !== order.urgency) changed.urgency = urgency;
-  if (Object.keys(changed).length === 0) return invalid('Nothing to change');
-  return { ok: true, record: accept(record, record.execSeq, now, changed) };
+  return changed;
+}
+
+/**
+ * The first rule an amend of `order` breaks, or null when it may go ahead. The order service applies it; a client may run
+ * the same check to warn before sending (for the user's convenience only: the service decides).
+ */
+export function checkAmend(order: Order, changes: AmendChanges, now: number): AmendFailure | null {
+  const invalid = (message: string): AmendFailure => ({ code: 'INVALID_AMEND', message });
+  if (!isAmendable(order.status)) return { code: 'INVALID_TRANSITION', message: `Cannot amend an order that is ${order.status}` };
+  const { limitPrice, orderQty, endTime, urgency } = changes;
+  if (orderQty !== undefined && (!Number.isInteger(orderQty) || orderQty <= order.filledQty)) {
+    return invalid(`Quantity must be a whole number above the filled quantity (${order.filledQty})`);
+  }
+  if (limitPrice !== undefined && limitPrice !== null) {
+    const decimals = PAIR_BY_NAME.get(order.currencyPair)?.decimals ?? 5;
+    if (!(limitPrice > 0) || roundTo(limitPrice, decimals) !== limitPrice) {
+      return invalid(`Limit price must be positive with at most ${decimals} decimals`);
+    }
+  }
+  if (endTime !== undefined && !(endTime > Math.max(now, order.startTime))) return invalid('End time must be after now and the start time');
+  if (urgency !== undefined && !URGENCIES.includes(urgency)) return invalid(`Unknown urgency ${String(urgency)}`);
+  if (Object.keys(amendedFields(order, changes)).length === 0) return invalid('Nothing to change');
+  return null;
+}
+
+/**
+ * Validates and applies an amend of `limitPrice`, `orderQty`, `endTime` and `urgency`. Recomputes the
+ * quantity-derived fields (`remainingQty`, `pctComplete`, `notionalUsd` at the same USD rate per unit,
+ * `filledNotionalUsd`), `durationMins` and `distanceToLimitBps`.
+ */
+export function applyAmend(record: OrderStateRecord, changes: AmendChanges, now: number): AmendResult {
+  const failure = checkAmend(record.order, changes, now);
+  if (failure !== null) return { ok: false, ...failure };
+  return { ok: true, record: accept(record, record.execSeq, now, amendedFields(record.order, changes)) };
 }
 
 /**

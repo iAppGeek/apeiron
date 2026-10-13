@@ -204,6 +204,24 @@ describe('createBlotterClient', () => {
     await expect(pending).rejects.toMatchObject({ code: 'DISCONNECTED' });
   });
 
+  it('amend posts the changes and resolves on ack, and rejects with INVALID_AMEND and its message', async () => {
+    const w = makeWorker();
+    const client = createBlotterClient(w);
+    const ok = client.amend('ALG00000001', { orderQty: 2_000_000, urgency: 'HIGH' });
+    expect(w.posted.at(-1)).toMatchObject({ kind: 'request', msg: { t: 'amend', orderId: 'ALG00000001', changes: { orderQty: 2_000_000, urgency: 'HIGH' } } });
+    const first = lastRequestId(w);
+    w.reply({ kind: 'response', reqId: first, ok: true, msg: { t: 'ack', reqId: first } });
+    await expect(ok).resolves.toBeUndefined();
+    const bad = client.amend('ALG00000001', { orderQty: 1 });
+    const second = lastRequestId(w);
+    w.reply({ kind: 'response', reqId: second, ok: false, code: 'INVALID_AMEND', message: 'Quantity must be a whole number above the filled quantity (5)' });
+    await expect(bad).rejects.toMatchObject({ code: 'INVALID_AMEND', message: 'Quantity must be a whole number above the filled quantity (5)' });
+    const odd = client.amend('A', { urgency: 'LOW' });
+    const third = lastRequestId(w);
+    w.reply({ kind: 'response', reqId: third, ok: true, msg: { t: 'filterValues', reqId: third, values: [] } });
+    await expect(odd).rejects.toMatchObject({ code: 'INTERNAL' });
+  });
+
   it('delivers the close code of an unexpected close', () => {
     const w = makeWorker();
     const client = createBlotterClient(w);

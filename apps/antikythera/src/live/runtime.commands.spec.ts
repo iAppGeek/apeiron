@@ -110,6 +110,28 @@ describe('LiveRuntime commands', () => {
     await r.runtime.stop();
   });
 
+  it('sends an amend as a request of kind amend, and acks after the store holds the new version', async () => {
+    const r = await rig();
+    await r.serve(async (req) => ({ ok: true, v: await publishNext(r, req.orderId, { urgency: 'HIGH', orderQty: 2_000_000 }) }));
+    const c = client(r, 'a1');
+    c.send({ t: 'amend', reqId: 3, orderId: 'T0000001', changes: { urgency: 'HIGH', orderQty: 2_000_000 } });
+    await vi.waitFor(() => expect(types(c)).toEqual(['delta', 'ack']));
+    expect(r.requests).toEqual([
+      { commandId: 'a1:3', userId: 'SUPERVISOR', orderId: 'T0000001', kind: 'amend', changes: { urgency: 'HIGH', orderQty: 2_000_000 } },
+    ]);
+    expect(c.sent.at(-1)).toEqual({ t: 'ack', reqId: 3 });
+    await r.runtime.stop();
+  });
+
+  it('passes an INVALID_AMEND refusal through', async () => {
+    const r = await rig();
+    await r.serve(() => ({ ok: false, code: 'INVALID_AMEND', message: 'Quantity must be a whole number above the filled quantity (400000)' }));
+    const c = client(r);
+    c.send({ t: 'amend', reqId: 2, orderId: 'T0000001', changes: { orderQty: 100_000 } });
+    await vi.waitFor(() => expect(c.sent).toEqual([{ t: 'error', reqId: 2, code: 'INVALID_AMEND', message: 'Quantity must be a whole number above the filled quantity (400000)' }]));
+    await r.runtime.stop();
+  });
+
   it('holds the ack until the record arrives, then sends it', async () => {
     const r = await rig();
     await r.serve(() => ({ ok: true, v: 2 }));

@@ -456,10 +456,65 @@ describe('startThemis: commands', () => {
     await themis.stop();
   });
 
-  it('does not support amend yet, and rejects a request it cannot read', async () => {
-    const { bus, themis, id } = await running();
-    const amend = { commandId: 'c:9', userId: 'TRADER1', orderId: id, kind: 'amend', changes: { urgency: 'HIGH' } };
-    expect(await bus.request('orders.cmd', amend, 1_000)).toMatchObject({ ok: false, code: 'INVALID_AMEND' });
+  const roundedPct = (filled: number, qty: number): number => Math.round((filled / qty) * 10_000) / 100;
+  const amendRequest = (orderId: string, changes: Record<string, unknown>, n = 9): Record<string, unknown> => ({ commandId: `c:${n}`, userId: 'TRADER1', orderId, kind: 'amend', changes });
+
+  it('amends an order directly: a new version with the quantity-derived fields recomputed, stored and published before the reply', async () => {
+    const { bus, repo, themis, id } = await running();
+    const before = (await repo.loadOpen()).find((s) => s.order.orderId === id) as { v: number; order: Order };
+    const orderQty = before.order.orderQty * 2;
+    const reply = await bus.request('orders.cmd', amendRequest(id, { orderQty, urgency: 'HIGH' }), 1_000);
+    expect(reply).toEqual({ ok: true, v: before.v + 1 });
+    const stored = (await repo.loadOpen()).find((s) => s.order.orderId === id);
+    expect(stored).toMatchObject({ v: before.v + 1, order: { orderQty, urgency: 'HIGH', remainingQty: orderQty - before.order.filledQty } });
+    expect(stored?.order.pctComplete).toBe(roundedPct(before.order.filledQty, orderQty));
+    expect(stored?.order.notionalUsd).toBeCloseTo(before.order.notionalUsd * 2, 1);
+    expect(await kvRecord(bus.kv('ORDER_STATE'), id)).toMatchObject({ v: before.v + 1, order: { orderQty, urgency: 'HIGH' } });
+    expect(bus.streamLog('VENUE')).toHaveLength(0);
+    await themis.stop();
+  });
+
+  it('refuses an amend that breaks a rule, changing nothing', async () => {
+    const { bus, repo, themis, metrics, id } = await running();
+    await bus.publish('exec.reports', { type: 'FILL', orderId: id, execSeq: 1, qty: 250_000, price: 1.0802, ts: 1_000, ...QUOTE });
+    await themis.flush();
+    const before = (await repo.loadOpen()).find((s) => s.order.orderId === id) as { v: number; order: Order };
+    expect(before.order.filledQty).toBe(250_000);
+    const refusals = await Promise.all([
+      bus.request('orders.cmd', amendRequest(id, { orderQty: 100_000 }, 1), 1_000),
+      bus.request('orders.cmd', amendRequest(id, { limitPrice: 1.123456789 }, 2), 1_000),
+      bus.request('orders.cmd', amendRequest(id, { endTime: 1 }, 3), 1_000),
+      bus.request('orders.cmd', amendRequest(id, { urgency: before.order.urgency }, 4), 1_000),
+      bus.request('orders.cmd', amendRequest('NOPE', { urgency: 'LOW' }, 5), 1_000),
+    ]);
+    expect(refusals).toMatchObject([
+      { ok: false, code: 'INVALID_AMEND' },
+      { ok: false, code: 'INVALID_AMEND' },
+      { ok: false, code: 'INVALID_AMEND' },
+      { ok: false, code: 'INVALID_AMEND', message: 'Nothing to change' },
+      { ok: false, code: 'UNKNOWN_ORDER' },
+    ]);
+    expect((await repo.loadOpen()).find((s) => s.order.orderId === id)?.v).toBe(before.v);
+    const text = await metrics.render();
+    expect(text).toContain('themis_commands_total{kind="amend",result="INVALID_AMEND"} 4');
+    expect(text).toContain('themis_commands_total{kind="amend",result="UNKNOWN_ORDER"} 1');
+    await themis.stop();
+  });
+
+  it('refuses to amend an order that is no longer working', async () => {
+    const { bus, themis } = await running();
+    const done = historyOrders(1)[0] as Order;
+    expect(done.status === 'FILLED' || done.status === 'CANCELLED').toBe(true);
+    expect(await bus.request('orders.cmd', amendRequest(done.orderId, { urgency: 'LOW' }), 1_000)).toMatchObject({
+      ok: false,
+      code: 'INVALID_TRANSITION',
+      message: `Cannot amend an order that is ${done.status}`,
+    });
+    await themis.stop();
+  });
+
+  it('rejects a request it cannot read', async () => {
+    const { bus, themis } = await running();
     await expect(bus.request('orders.cmd', { nonsense: true }, 1_000)).rejects.toThrow(/unreadable command/);
     await themis.stop();
   });

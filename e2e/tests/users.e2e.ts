@@ -1,37 +1,5 @@
-import { expect, test, type Browser, type Page } from '@playwright/test';
-import { Blotter } from '../support/blotter';
-
-async function openAs(browser: Browser, user: string): Promise<{ page: Page; blotter: Blotter }> {
-  const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
-  const page = await context.newPage();
-  const blotter = new Blotter(page);
-  await blotter.open(user);
-  return { page, blotter };
-}
-
-/** Says hello as `userId` on a raw socket from the page, sends one command and returns the first error or ack. */
-async function forgeCommand(page: Page, userId: string, orderId: string): Promise<{ t: string; code?: string }> {
-  return page.evaluate(
-    ({ userId: user, orderId: order }) =>
-      new Promise<{ t: string; code?: string }>((resolve, reject) => {
-        const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
-        const timer = setTimeout(() => reject(new Error('no answer to the forged command')), 10_000);
-        socket.onopen = (): void => {
-          socket.send(JSON.stringify({ t: 'hello', userId: user, traderId: 'ALL', codec: 'json', clientId: `forge-${Math.random()}` }));
-        };
-        socket.onmessage = (event): void => {
-          const msg = JSON.parse(String(event.data)) as { t: string; code?: string };
-          if (msg.t === 'welcome') socket.send(JSON.stringify({ t: 'command', reqId: 1, orderId: order, action: 'CANCEL' }));
-          else if (msg.t === 'error' || msg.t === 'ack') {
-            clearTimeout(timer);
-            socket.close();
-            resolve(msg);
-          }
-        };
-      }),
-    { userId, orderId },
-  );
-}
+import { expect, test } from '@playwright/test';
+import { openAs, sendRaw } from '../support/users';
 
 test.describe('users and entitlements', () => {
   test('each trader sees only their own orders, a forged command is refused, and the supervisor sees all', async ({ browser }) => {
@@ -58,8 +26,8 @@ test.describe('users and entitlements', () => {
     // Ben's newest order, named by Alice's page over her own socket: refused before it reaches the order service.
     const benOrder = await ben.blotter.firstRowId();
     if (benOrder === null) throw new Error('Ben has no order on screen');
-    await expect(forgeCommand(alice.page, 'TRADER1', benOrder)).resolves.toMatchObject({ t: 'error', code: 'FORBIDDEN' });
-    await expect(forgeCommand(alice.page, 'NOBODY', benOrder)).resolves.toMatchObject({ t: 'error', code: 'UNKNOWN_USER' });
+    await expect(sendRaw(alice.page, 'TRADER1', { t: 'command', orderId: benOrder, action: 'CANCEL' })).resolves.toMatchObject({ t: 'error', code: 'FORBIDDEN' });
+    await expect(sendRaw(alice.page, 'NOBODY', { t: 'command', orderId: benOrder, action: 'CANCEL' })).resolves.toMatchObject({ t: 'error', code: 'UNKNOWN_USER' });
   });
 
   test('switching user in the header reloads the grid for the new user', async ({ browser }) => {

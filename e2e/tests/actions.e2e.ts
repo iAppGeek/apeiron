@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { Blotter } from '../support/blotter';
 import { parseNumber } from '../support/parse';
 
-const ACTIONS = ['Cancel order', 'Pause order', 'Resume order'];
+const ACTIONS = ['Cancel order', 'Pause order', 'Resume order', 'Amend order…'];
 
 /** The id of a LIVE order, found in a view of LIVE orders only (what is on top depends on what the stack has been doing). */
 async function findLiveOrder(blotter: Blotter): Promise<string> {
@@ -42,6 +42,8 @@ test.describe('order actions', () => {
       await expect(resumeMenu.getByRole('menuitem', { name: 'Pause order' })).toHaveAttribute('aria-disabled', 'true');
       await resumeMenu.getByRole('menuitem', { name: 'Resume order' }).click();
       await expect(blotter.statusOf(id)).toHaveText('LIVE', { timeout: 5_000 });
+      // The ack arrived too: a command whose reply could not be read would have toasted an error.
+      await expect(page.locator('.toast-error')).toHaveCount(0);
     }).toPass({ timeout: 60_000 });
   });
 
@@ -74,7 +76,7 @@ test.describe('order actions', () => {
     await expect
       .poll(async () => parseNumber((await page.getByTestId('summary-CANCELLED').innerText()).replace('CANCELLED', '')))
       .toBeGreaterThan(cancelledBefore);
-    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.locator('.toast-error')).toHaveCount(0);
   });
 
   test('a finished order offers no actions', async ({ page }) => {

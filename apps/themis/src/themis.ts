@@ -3,6 +3,7 @@ import {
   CONSUMERS,
   STREAMS,
   SUBJECTS,
+  applyAmend,
   applyExecReport,
   canApplyCommand,
   formatOrderId,
@@ -205,13 +206,28 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
         resolve({ ok: false, code, message });
       };
       void enqueue(async () => {
-        if (request.kind === 'amend') {
-          refuse('INVALID_AMEND', 'Amend is not available');
-          return;
-        }
         const current = await lookup(request.orderId, state);
         if (current === undefined) {
           refuse('UNKNOWN_ORDER', `Order ${request.orderId} does not exist`);
+          return;
+        }
+        if (request.kind === 'amend') {
+          // Applied directly: the order's parameters are not the venue's to accept. the venue reads the new ones from the KV update.
+          const startedAt = performance.now();
+          const now = clock();
+          const held: OrderStateRecord = { v: current.v, execSeq: current.execSeq, srcTs: current.order.lastUpdateTime, order: current.order };
+          const amended = applyAmend(held, request.changes, now);
+          if (!amended.ok) {
+            refuse(amended.code, amended.message);
+            return;
+          }
+          const next = amended.record;
+          const stored: StoredOrder = { order: next.order, v: next.v, execSeq: next.execSeq };
+          book.set(stored.order.orderId, stored);
+          committer.submit(stored, now, () => {
+            metrics?.command('amend', 'ok', (performance.now() - startedAt) / 1000);
+            resolve({ ok: true, v: stored.v });
+          });
           return;
         }
         if (!canApplyCommand(current.order.status, request.action)) {

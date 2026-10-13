@@ -1,4 +1,4 @@
-import { COMMAND_ACTIONS, ORDER_STATUSES, canApplyCommand, type CommandAction, type OrderStatus } from '@apeiron/logos';
+import { COMMAND_ACTIONS, ORDER_STATUSES, canAmend, canApplyCommand, type CommandAction, type OrderStatus } from '@apeiron/logos';
 import type { DefaultMenuItem, GetContextMenuItemsParams, MenuItemDef } from 'ag-grid-community';
 
 export const ACTION_LABEL: Readonly<Record<CommandAction, string>> = {
@@ -14,6 +14,10 @@ export const COPY_ITEMS: readonly DefaultMenuItem[] = ['copy', 'copyWithHeaders'
 export type OrderTarget = { orderId: string; status: OrderStatus };
 
 export type RunCommand = (orderId: string, action: CommandAction) => void;
+/** Opens the amend dialog for an order. */
+export type OpenAmend = (orderId: string) => void;
+
+export const AMEND_LABEL = 'Amend order…';
 
 const isStatus = (value: unknown): value is OrderStatus => (ORDER_STATUSES as readonly unknown[]).includes(value);
 
@@ -59,11 +63,22 @@ function actionItem(target: OrderTarget, action: CommandAction, run: RunCommand)
   };
 }
 
+function amendItem(target: OrderTarget, open: OpenAmend): MenuItemDef {
+  const enabled = canAmend(target.status);
+  const base: MenuItemDef = {
+    name: AMEND_LABEL,
+    disabled: !enabled,
+    tooltip: enabled ? undefined : `${AMEND_LABEL}: not available while the order is ${target.status}`,
+    cssClasses: ['order-action-amend'],
+  };
+  return enabled ? { ...base, action: (): void => open(target.orderId) } : base;
+}
+
 /**
- * The context menu: Cancel, Pause and Resume, each enabled only when the order's current status allows it,
- * then the standard copy items. Group rows and non-order areas get the copy items alone.
+ * The context menu: Cancel, Pause and Resume, each enabled only when the order's current status allows it, then Amend
+ * (enabled for a working order), then the standard copy items. Group rows and non-order areas get the copy items alone.
  */
-export function buildContextMenuItems(target: OrderTarget | null, run: RunCommand): (MenuItemDef | DefaultMenuItem)[] {
+export function buildContextMenuItems(target: OrderTarget | null, run: RunCommand, open: OpenAmend): (MenuItemDef | DefaultMenuItem)[] {
   if (target === null) return [...COPY_ITEMS];
-  return [...COMMAND_ACTIONS.map((action) => actionItem(target, action, run)), 'separator', ...COPY_ITEMS];
+  return [...COMMAND_ACTIONS.map((action) => actionItem(target, action, run)), amendItem(target, open), 'separator', ...COPY_ITEMS];
 }

@@ -10,6 +10,7 @@ import {
   parseClientMsg,
   resolveScope,
   type ClientMsg,
+  type AmendChanges,
   type CommandAction,
   type Codec,
   type EntitlementUser,
@@ -54,8 +55,11 @@ export type LiveHooks = {
   summaryIntervalMs: number;
 };
 
-/** A trader command on its way to the order service. `owner` ties it to the session so it is forgotten when that closes. */
-export type CommandRequest = { owner: object; clientId: string; userId: string; reqId: number; orderId: string; action: CommandAction };
+/** A trader command or amend on its way to the order service. `owner` ties it to the session so it is forgotten when that closes. */
+export type CommandRequest = { owner: object; clientId: string; userId: string; reqId: number; orderId: string } & (
+  | { action: CommandAction }
+  | { changes: AmendChanges }
+);
 
 /** One flush tick as seen by a session. */
 export type FlushContext = { cs: ChangeSet; byView: ReadonlyMap<View, ViewChanges>; now: number; store: ColumnarStore };
@@ -262,6 +266,9 @@ export class ClientSession {
       case 'command':
         this.onCommand(msg);
         return;
+      case 'amend':
+        this.onAmend(msg);
+        return;
     }
   }
 
@@ -326,23 +333,29 @@ export class ClientSession {
   }
 
   private onCommand(msg: Extract<ClientMsg, { t: 'command' }>): void {
+    this.sendToOrderService(msg.reqId, msg.orderId, { action: msg.action });
+  }
+
+  private onAmend(msg: Extract<ClientMsg, { t: 'amend' }>): void {
+    this.sendToOrderService(msg.reqId, msg.orderId, { changes: msg.changes });
+  }
+
+  /** Checks the user may act for the order's trader, then hands the command or amend to the order service. */
+  private sendToOrderService(reqId: number, orderId: string, what: { action: CommandAction } | { changes: AmendChanges }): void {
     const live = this.deps.live?.();
     if (live === null || live === undefined) {
-      this.sendError(msg.reqId, 'NOT_IMPLEMENTED', 'commands are not available without a message bus');
+      this.sendError(reqId, 'NOT_IMPLEMENTED', 'commands are not available without a message bus');
       return;
     }
-    const owner = live.traderOf(msg.orderId);
+    const owner = live.traderOf(orderId);
     if (this.user === null || (owner !== undefined && !mayAct(this.user, owner))) {
-      this.sendError(msg.reqId, 'FORBIDDEN', `Order ${msg.orderId} belongs to a trader you may not act for`);
+      this.sendError(reqId, 'FORBIDDEN', `Order ${orderId} belongs to a trader you may not act for`);
       return;
     }
-    live.command(
-      { owner: this, clientId: this.clientId, userId: this.user.userId, reqId: msg.reqId, orderId: msg.orderId, action: msg.action },
-      (outcome) => {
-        if (outcome.ok) this.send({ t: 'ack', reqId: msg.reqId });
-        else this.sendError(msg.reqId, outcome.code, outcome.message);
-      },
-    );
+    live.command({ owner: this, clientId: this.clientId, userId: this.user.userId, reqId, orderId, ...what }, (outcome) => {
+      if (outcome.ok) this.send({ t: 'ack', reqId });
+      else this.sendError(reqId, outcome.code, outcome.message);
+    });
   }
 
   private onControl(msg: Extract<ClientMsg, { t: 'control' }>): void {

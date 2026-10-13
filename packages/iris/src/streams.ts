@@ -64,7 +64,13 @@ export type StreamManager = {
   };
 };
 
-export type EnsureResult = { name: string; action: 'created' | 'updated' | 'recreated' | 'unchanged' };
+/**
+ * Streams earlier versions created and nothing uses now. `ORDERS` captured `orders.*`, which includes `orders.cmd`:
+ * left in place, JetStream would acknowledge every command request before the order service could answer it.
+ */
+export const RETIRED_STREAMS: readonly string[] = ['ORDERS'];
+
+export type EnsureResult = { name: string; action: 'created' | 'updated' | 'recreated' | 'unchanged' | 'removed' };
 
 const isMissing = (error: unknown): boolean =>
   error instanceof Error && (error.name === 'StreamNotFoundError' || /stream not found/i.test(error.message));
@@ -76,13 +82,24 @@ const differs = (have: Record<string, unknown>, want: StreamSpec): boolean =>
 
 /**
  * Creates the streams when missing and updates their configuration when it differs from
- * {@link streamSpecs}. Idempotent; safe to call on every start. Hermes owns stream creation.
+ * {@link streamSpecs}, and removes the {@link RETIRED_STREAMS}. Idempotent; safe to call on every start.
  */
 export async function ensureStreams(
   manager: StreamManager,
   specs: readonly StreamSpec[] = streamSpecs(),
+  retired: readonly string[] = RETIRED_STREAMS,
 ): Promise<EnsureResult[]> {
   const results: EnsureResult[] = [];
+  for (const name of retired) {
+    try {
+      await manager.streams.info(name);
+    } catch (error) {
+      if (isMissing(error)) continue;
+      throw error;
+    }
+    await manager.streams.delete(name);
+    results.push({ name, action: 'removed' });
+  }
   for (const spec of specs) {
     let existing: Record<string, unknown> | null = null;
     try {

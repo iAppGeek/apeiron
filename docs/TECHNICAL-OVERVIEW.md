@@ -109,7 +109,7 @@ flowchart LR
   end
   NG["nginx :8080<br/>static + /ws proxy"]
   HE["hermes<br/>prices + lifecycle"]
-  NA[("NATS JetStream<br/>ORDERS, PRICES")]
+  NA[("NATS JetStream<br/>PRICES, EXEC, VENUE, KV ORDER_STATE")]
   MO[("MongoDB")]
   GA["gaia (seed)"]
   PR["Prometheus + Grafana"]
@@ -449,6 +449,7 @@ Authoritative: [`packages/logos/src/protocol.ts`](../packages/logos/src/protocol
 | Client → server | Purpose |
 |---|---|
 | `hello{userId, traderId, codec, clientId}` | (re)start a session: user, trader scope (within the user's entitlements) and codec; always JSON text; resets tracking |
+| `amend{reqId, orderId, changes}` | change the limit price, quantity, end time or urgency of a working order (`PENDING_START`, `LIVE`, `PAUSED`); answered like `command` with `ack` or `error` (`INVALID_AMEND`, `INVALID_TRANSITION`, `UNKNOWN_ORDER`, `FORBIDDEN`) |
 | `getRows{reqId, req}` | one SSRM block (`startRow`, `endRow`, `rowGroupCols`, `groupKeys`, `valueCols`, `sortModel`, `filterModel`) |
 | `setFilterValues{reqId, colId}` | distinct values for a set filter, trader-scoped, ≤ 5,000 |
 | `command{reqId, orderId, action}` | `CANCEL` / `PAUSE` / `RESUME` |
@@ -502,6 +503,10 @@ Client messages are validated with zod; server messages are not, for speed.
 3. The server acks the client **once its store holds version `v`** (the flush that applied the record has sent its
    deltas), so the client sees the status change before the ack; if the record has not arrived after 2 s it acks anyway.
    A command with no reply in 5 s is an error.
+
+An **amend** takes the same route (`orders.cmd` with `kind: 'amend'`, same `commandId` and ack rule). `themis` applies it with
+`applyAmend` (rules in `packages/logos/src/rules.ts`, shared with the dialog's `checkAmend`): no venue instruction, a new
+version, `remainingQty`, `pctComplete`, `notionalUsd`, `filledNotionalUsd` and `durationMins` recomputed.
 
 Measured (phase 6, [`PHASE-6.md`](checkpoints/PHASE-6.md)): click to status on screen **p50 58 ms / p95 89 ms**; under 50
 clients (CP-4 final) command ack **p50 38 ms / p95 66–67 ms**.

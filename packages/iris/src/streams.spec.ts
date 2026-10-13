@@ -1,6 +1,6 @@
 import { RetentionPolicy, StorageType } from '@nats-io/jetstream';
 import { describe, expect, it, vi } from 'vitest';
-import { ensureStreams, streamSpecs, type StreamManager } from './streams.js';
+import { RETIRED_STREAMS, ensureStreams, streamSpecs, type StreamManager } from './streams.js';
 
 const DAY_NS = 24 * 3_600_000 * 1_000_000;
 
@@ -88,6 +88,20 @@ describe('ensureStreams', () => {
     expect(m.streams.delete).toHaveBeenCalledWith('PRICES');
     expect(m.streams.add).toHaveBeenCalledWith(expect.objectContaining({ name: 'PRICES', storage: StorageType.File }));
     expect(m.streams.update).not.toHaveBeenCalled();
+  });
+
+  it('removes a retired stream that is still on the server, and leaves one that is gone', async () => {
+    const m = manager({ ...existing(), ORDERS: { name: 'ORDERS', subjects: ['orders.*'] } });
+    const results = await ensureStreams(m);
+    expect(results[0]).toEqual({ name: 'ORDERS', action: 'removed' });
+    expect(m.streams.delete).toHaveBeenCalledExactlyOnceWith('ORDERS');
+    const clean = manager(existing());
+    expect((await ensureStreams(clean)).some((r) => r.action === 'removed')).toBe(false);
+    expect(clean.streams.delete).not.toHaveBeenCalled();
+  });
+
+  it('knows which streams are retired', () => {
+    expect(RETIRED_STREAMS).toEqual(['ORDERS']);
   });
 
   it('rethrows unexpected errors', async () => {

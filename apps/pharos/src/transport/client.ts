@@ -1,4 +1,4 @@
-import type { CodecName, CommandAction, LoadPreset, Row, ServerMsg, SsrmRequest } from '@apeiron/logos';
+import type { AmendChanges, CodecName, CommandAction, LoadPreset, Row, ServerMsg, SsrmRequest } from '@apeiron/logos';
 import type {
   ConnectionStatus,
   Failure,
@@ -63,6 +63,8 @@ export type BlotterClient = {
    * UNKNOWN_ORDER, INTERNAL for a timeout) or a transport code.
    */
   command(orderId: string, action: CommandAction): Promise<void>;
+  /** Changes the limit price, quantity, end time or urgency of a working order. Resolves when the server has applied it. */
+  amend(orderId: string, changes: AmendChanges): Promise<void>;
   on<E extends keyof ClientEvents>(event: E, handler: (payload: ClientEvents[E]) => void): () => void;
   /** Requests and hellos still waiting for an answer; zero once every one has been answered or failed. */
   pending(): number;
@@ -166,6 +168,11 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
 
     async command(orderId: string, action: CommandAction): Promise<void> {
       const msg = await request((reqId) => ({ t: 'command', reqId, orderId, action }));
+      if (msg.t !== 'ack') throw new RequestError({ code: 'INTERNAL', message: `Unexpected reply: ${msg.t}` });
+    },
+
+    async amend(orderId: string, changes: AmendChanges): Promise<void> {
+      const msg = await request((reqId) => ({ t: 'amend', reqId, orderId, changes }));
       if (msg.t !== 'ack') throw new RequestError({ code: 'INTERNAL', message: `Unexpected reply: ${msg.t}` });
     },
 

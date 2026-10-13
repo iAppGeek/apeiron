@@ -220,7 +220,10 @@ export class LiveRuntime implements LiveHooks {
       metrics?.command(outcome.ok ? 'ok' : outcome.code, (performance.now() - started) / 1000);
       settle(outcome);
     };
-    const body: OrderCommandRequest = { commandId, userId: request.userId, orderId: request.orderId, kind: 'action', action: request.action };
+    const body: OrderCommandRequest =
+      'action' in request
+        ? { commandId, userId: request.userId, orderId: request.orderId, kind: 'action', action: request.action }
+        : { commandId, userId: request.userId, orderId: request.orderId, kind: 'amend', changes: request.changes };
     metrics?.ingest('command');
     this.options.bus.request(SUBJECTS.ordersCmd, body, this.options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS).then(
       (raw) => {

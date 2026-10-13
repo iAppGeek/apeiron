@@ -26,7 +26,7 @@ flowchart LR
     TH["themis<br/>order service of record"]
     HL["helios<br/>price feed"]
     HE["hermes<br/>mock middleware"]
-    NA[("NATS JetStream<br/>ORDERS, PRICES, KV ORDER_STATE")]
+    NA[("NATS JetStream<br/>PRICES, EXEC, VENUE, KV ORDER_STATE")]
     MO[("MongoDB")]
     GA["gaia<br/>seeder (one-shot)"]
     PR["Prometheus + Grafana"]
@@ -131,6 +131,11 @@ and sends it to `themis` as a request on `orders.cmd`. `themis` checks it agains
 (`exec.commands`) and replies once `hermes`'s execution report is stored and published, with the order's new version. The
 status change reaches every client as an ordinary update; the server acknowledges the command once its own store holds
 that version (or after 2 s), or answers `error` (shown as a toast) with the code `themis` gave.
+
+**Amend** follows the same path with `kind: 'amend'`: the context menu's "Amend order…" opens a dialog (limit price, quantity,
+end time, urgency) that runs the order service's own `checkAmend` to warn before sending. `themis` applies an amend directly
+(no venue instruction): it validates the four fields, recomputes the quantity-derived fields, writes a new version and
+replies with it. `hermes` picks the new parameters up from the `ORDER_STATE` update.
 
 ## Key algorithms
 
@@ -254,7 +259,7 @@ Authoritative: `docs/PLAN.md` Appendix C and `packages/logos/src/protocol.ts`.
 
 | Direction | Messages |
 |---|---|
-| client to server | `hello` (user, trader, codec), `getRows`, `setFilterValues`, `command`, `control` (load preset), `ping` |
+| client to server | `hello` (user, trader, codec), `getRows`, `setFilterValues`, `command`, `amend`, `control` (load preset), `ping` |
 | server to client | `welcome`, `rows`, `filterValues`, `delta`, `summary`, `ack`, `error`, `pong` |
 
 ### Users and entitlements

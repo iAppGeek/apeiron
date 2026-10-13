@@ -103,7 +103,7 @@ apeiron/
 **Metrics (`prom-client`, `/metrics`):** process CPU, RSS/heap, event-loop lag, WS connections, messages and bytes in/out per second, flush duration, getRows latency histogram, ingest rate.
 
 ## Protocol (packages/logos/protocol)
-- **Client → server:** `hello{userId, traderId, codec}`, `getRows{reqId, request: IServerSideGetRowsRequest}`, `setFilterValues{reqId, colId}`, `command{reqId, orderId, action}`.
+- **Client → server:** `hello{userId, traderId, codec}`, `getRows{reqId, request: IServerSideGetRowsRequest}`, `setFilterValues{reqId, colId}`, `command{reqId, orderId, action}`, `amend{reqId, orderId, changes}` (PLAN1 phase 1.7).
 - **Server → client:** `rows{reqId, rowData, rowCount}`, `delta{seq, serverTs, updates[], adds[], dirtyRoutes[], rowCounts[], newAbove}`, `summary{...}`, `ack`, `error`. Appendix C is authoritative.
 - **Codec interface:** `encode/decode`, with `json` and `msgpack` (`@msgpack/msgpack`) implementations, negotiated in `hello`.
 

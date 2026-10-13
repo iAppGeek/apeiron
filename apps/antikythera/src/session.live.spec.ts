@@ -119,6 +119,33 @@ describe('ClientSession commands', () => {
     expect(w.live.command).toHaveBeenCalledOnce();
   });
 
+  it('hands an amend to the runtime like a command, with the changes, and acks or errors by the outcome', () => {
+    const w = world();
+    w.session.handleFrame(json({ t: 'amend', reqId: 5, orderId: 'T0000001', changes: { orderQty: 2_000_000, urgency: 'HIGH' } }));
+    expect(w.live.command).toHaveBeenCalledWith(
+      { owner: w.session, clientId: 'c1', userId: 'SUPERVISOR', reqId: 5, orderId: 'T0000001', changes: { orderQty: 2_000_000, urgency: 'HIGH' } },
+      expect.any(Function),
+    );
+    vi.mocked(w.live.command).mockImplementationOnce((_req, settle) => settle({ ok: true }));
+    w.session.handleFrame(json({ t: 'amend', reqId: 6, orderId: 'T0000001', changes: { urgency: 'LOW' } }));
+    vi.mocked(w.live.command).mockImplementationOnce((_req, settle) => settle({ ok: false, code: 'INVALID_AMEND', message: 'Nothing to change' }));
+    w.session.handleFrame(json({ t: 'amend', reqId: 7, orderId: 'T0000001', changes: { urgency: 'LOW' } }));
+    expect(w.sent).toEqual([
+      { t: 'ack', reqId: 6 },
+      { t: 'error', reqId: 7, code: 'INVALID_AMEND', message: 'Nothing to change' },
+    ]);
+  });
+
+  it('refuses an amend on another trader`s order with FORBIDDEN before anything is sent', () => {
+    const w = world();
+    vi.mocked(w.live.traderOf).mockReturnValue('T2');
+    w.session.handleFrame(json({ t: 'hello', userId: 'TRADER1', traderId: 'ALL', codec: 'json', clientId: 'c2' }));
+    w.sent.length = 0;
+    w.session.handleFrame(json({ t: 'amend', reqId: 1, orderId: 'T0000001', changes: { urgency: 'LOW' } }));
+    expect(w.sent).toEqual([{ t: 'error', reqId: 1, code: 'FORBIDDEN', message: 'Order T0000001 belongs to a trader you may not act for' }]);
+    expect(w.live.command).not.toHaveBeenCalled();
+  });
+
   it('sends ack{reqId} when the command is applied', () => {
     const w = world();
     vi.mocked(w.live.command).mockImplementation((_req, settle) => settle({ ok: true }));
