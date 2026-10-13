@@ -20,7 +20,7 @@ test('S5 high latency with drops', async ({ browser }) => {
       for (const drop of p.dropsAtMs) {
         await waitUntilElapsed(h, drop.atMs);
         h.note(drop.kind);
-        await performDrop(h.faults, drop.kind);
+        await performDrop(h.faults, drop.kind, undefined, await h.closedSinceNow());
         await h.allConnected(90_000);
       }
       await waitUntilElapsed(h, p.totalMs);

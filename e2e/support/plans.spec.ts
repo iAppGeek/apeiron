@@ -31,6 +31,15 @@ describe('performDrop', () => {
     await performDrop(faults, 'down10', SMOKE_DOWN_MS);
     expect(vi.mocked(faults.down).mock.calls.at(-1)).toEqual([5000]);
   });
+
+  it('passes the landed check to a clean drop only', async () => {
+    const faults = fakeFaults();
+    const landed = (): Promise<boolean> => Promise.resolve(true);
+    await performDrop(faults, 'clean', SMOKE_DOWN_MS, landed);
+    await performDrop(faults, 'down3', SMOKE_DOWN_MS, landed);
+    expect(vi.mocked(faults.dropClean).mock.calls).toEqual([[landed]]);
+    expect(vi.mocked(faults.down).mock.calls).toEqual([[2000]]);
+  });
 });
 
 describe('pickBetween', () => {

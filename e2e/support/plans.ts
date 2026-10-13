@@ -18,9 +18,9 @@ export const DOWN_MS: DownDurations = { down3: 3000, down10: 10_000 };
 /** The smoke run's cadence is 10 s, so its outages are shorter. */
 export const SMOKE_DOWN_MS: DownDurations = { down3: 2000, down10: 5000 };
 
-/** Performs one drop and returns when the proxy is passing traffic again. */
-export async function performDrop(faults: Faults, kind: DropKind, down: DownDurations = DOWN_MS): Promise<void> {
-  if (kind === 'clean') await faults.dropClean();
+/** Performs one drop and returns when the proxy is passing traffic again. `landed` is passed to a clean drop (see {@link Faults.dropClean}). */
+export async function performDrop(faults: Faults, kind: DropKind, down: DownDurations = DOWN_MS, landed?: () => Promise<boolean>): Promise<void> {
+  if (kind === 'clean') await faults.dropClean(landed);
   else await faults.down(down[kind]);
 }
 

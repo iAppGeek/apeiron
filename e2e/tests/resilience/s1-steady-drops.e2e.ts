@@ -21,7 +21,7 @@ test('S1 steady updates with periodic drops @smoke', async ({ browser }) => {
         // Every drop must hit every page, so wait for all of them to be connected and settled, not just most.
         expect(await h.allConnected(60_000), 'every page connected before the drop').toBe(true);
         h.note(drop.kind);
-        await performDrop(h.faults, drop.kind, p.shortOutages ? SMOKE_DOWN_MS : DOWN_MS);
+        await performDrop(h.faults, drop.kind, p.shortOutages ? SMOKE_DOWN_MS : DOWN_MS, await h.closedSinceNow());
       }
       await waitUntilElapsed(h, p.firstAtMs + p.drops * p.intervalMs);
     },

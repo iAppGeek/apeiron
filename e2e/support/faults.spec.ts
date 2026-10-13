@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createFaults, RESET_WINDOW_MS } from './faults';
+import { createFaults, RESET_MAX_MS, RESET_WINDOW_MS } from './faults';
 
 type Call = { method: string; url: string; body: unknown };
 
@@ -30,6 +30,31 @@ describe('createFaults', () => {
     expect(summary(calls)).toEqual(['DELETE /proxies/ws/toxics/reset', 'POST /proxies/ws/toxics', 'DELETE /proxies/ws/toxics/reset']);
     expect(calls[1]?.body).toEqual({ name: 'reset', type: 'reset_peer', stream: 'downstream', toxicity: 1, attributes: { timeout: 0 } });
     expect(sleeps).toEqual([RESET_WINDOW_MS]);
+  });
+
+  it('dropClean keeps the toxic on past the window until every connection has been reset', async () => {
+    const { calls, faults, sleeps } = rig();
+    let checks = 0;
+    await faults.dropClean(() => {
+      checks += 1;
+      return Promise.resolve(checks > 3);
+    });
+    expect(checks).toBe(4);
+    expect(sleeps).toEqual([RESET_WINDOW_MS, 100, 100, 100]);
+    expect(summary(calls).at(-1)).toBe('DELETE /proxies/ws/toxics/reset');
+  });
+
+  it('dropClean gives up waiting for the reset to land after the cap, and still removes the toxic', async () => {
+    const { calls, faults, sleeps } = rig();
+    await faults.dropClean(() => Promise.resolve(false));
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(RESET_MAX_MS);
+    expect(summary(calls).at(-1)).toBe('DELETE /proxies/ws/toxics/reset');
+  });
+
+  it('dropClean removes the toxic when the landed check throws', async () => {
+    const { calls, faults } = rig();
+    await expect(faults.dropClean(() => Promise.reject(new Error('page gone')))).rejects.toThrow('page gone');
+    expect(summary(calls).at(-1)).toBe('DELETE /proxies/ws/toxics/reset');
   });
 
   it('down disables the proxy, waits, and enables it again even when the wait throws', async () => {
