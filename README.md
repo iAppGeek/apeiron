@@ -62,7 +62,7 @@ mutate a few orders; `scripts/loadtest-reset.sh` restores the dataset.
 |---|---|
 | [`docs/TECHNICAL-OVERVIEW.md`](docs/TECHNICAL-OVERVIEW.md) | **start here**: the engineering overview: problem, architecture, server and client internals, protocol, performance results, the CP-4 death spiral, testing strategy, decisions and trade-offs, limitations |
 | [`docs/USER-GUIDE.md`](docs/USER-GUIDE.md) | how to run it, use the blotter, run every test tier and the load test, and troubleshoot |
-| [`docs/TESTING.md`](docs/TESTING.md) | the six test layers and the resilience suite: scenarios, tiers, the three checks, latest results |
+| [`docs/TESTING.md`](docs/TESTING.md) | the six test layers and the resilience suite: scenarios, tiers, the four checks, latest results |
 | [`docs/DEMO-SCRIPT.md`](docs/DEMO-SCRIPT.md) | speaker notes for the deck and the live-demo run-sheet (commands, clicks, expected numbers, fallbacks) |
 | [Engineering deck](https://claude.ai/artifact/DkgeXrrCpFVoxPcY3WsPrh) | the 18-slide presentation for the development team (private until shared by its owner) |
 | [`docs/screenshots/demo/`](docs/screenshots/demo) | screenshots from the phase 10 browser pass and Grafana under load |

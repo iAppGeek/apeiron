@@ -31,7 +31,7 @@ docker compose --profile core --profile monitoring up -d   # web :8080, API :400
 scripts/loadtest-reset.sh                                  # re-seed to 1M rows, empty JetStream, restart on Medium (~45s)
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
 pnpm e2e                                                   # Playwright, against :8080
-pnpm e2e:resilience:quick                                  # ~14 min, all 8 scenarios (standard)
+pnpm e2e:resilience:quick                                  # ~16 min, all 11 scenarios (standard)
 pnpm e2e:resilience                                        # ~27 min, full suite (release/demo)
 pnpm e2e:resilience:smoke                                  # CI tier
 pnpm --filter @apeiron/talos start -- --clients 50 --duration 300 --codec json

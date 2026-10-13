@@ -1,5 +1,6 @@
 import type { Browser } from '@playwright/test';
 import { NatsBus } from '@apeiron/iris';
+import { BUCKETS } from '@apeiron/logos';
 import { MongoOrderRepository } from '@apeiron/mnemosyne';
 import { createDriver, startHeliosContainer, startHermesContainer, stopHeliosContainer, stopHermesContainer, type Driver, type DriverRate } from './driver';
 import { createFaults, type Faults } from './faults';
@@ -8,6 +9,7 @@ import {
   checkMinimums,
   checkModelVsServer,
   checkServerVsScreen,
+  checkVenueVsService,
   type Check,
   type Minimums,
 } from './oracle';
@@ -263,6 +265,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
         }),
       );
       checks.push(await modelCheck);
+      if (bus !== null) checks.push(await checkVenueVsService({ log: runningDriver.venueLog(), kv: bus.kv(BUCKETS.orderState) }));
       const views = await viewReports;
       const finishedAt = new Date();
       const failures = failuresOf(views, checks);

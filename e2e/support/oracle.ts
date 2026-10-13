@@ -1,6 +1,6 @@
-import { parseOrderSeq, type Row, type SsrmRequest } from '@apeiron/logos';
+import { applyExecReport, parseOrderSeq, parseOrderStateRecord, type KvBucket, type Row, type SsrmRequest } from '@apeiron/logos';
 import { contiguousRuns, describeDiffs, diffRecords } from './compare';
-import type { Driver } from './driver';
+import type { Driver, VenueLog } from './driver';
 import type { SamplerReport } from './sampler';
 import type { Reader } from './ws-client';
 
@@ -169,6 +169,60 @@ export async function checkModelVsServer(input: ModelCheckInput): Promise<Check>
     rowCount: rootCount,
     modelEvents: model.events,
   });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Check 1b: what the venue sent against what the order service stored
+
+export type VenueCheckInput = {
+  log: VenueLog;
+  /** The `ORDER_STATE` bucket. */
+  kv: KvBucket;
+  concurrency?: number;
+};
+
+/**
+ * Replays every execution report the venue got onto the bus, in the order it sent them, through the order service's own
+ * rules, starting from the order's record before the first, and compares the result with the record the service stored
+ * (version, `execSeq` and every field). A report the service lost, applied twice or applied out of order, across a
+ * restart or not, leaves a different record. The rules are shared code; what this checks is the delivery, the ordering,
+ * the duplicate filter and the persist-then-publish path around them.
+ */
+export async function checkVenueVsService(input: VenueCheckInput): Promise<Check> {
+  const { log, kv } = input;
+  const failures = new Failures();
+  let compared = 0;
+  let reports = 0;
+  await pool([...log.reports.keys()], input.concurrency ?? 16, async (orderId) => {
+    const list = log.reports.get(orderId) ?? [];
+    reports += list.length;
+    const start = log.startOf(orderId);
+    if (start === undefined) {
+      failures.add(`${orderId}: no record before its first report, so it cannot be replayed`);
+      return;
+    }
+    let expected = start;
+    for (const report of list) {
+      const result = applyExecReport(expected, report);
+      if (result.kind !== 'duplicate') expected = result.record;
+    }
+    const entry = await kv.get(orderId);
+    const stored = entry === null ? null : parseOrderStateRecord(entry.value);
+    if (stored === null || !stored.ok) {
+      failures.add(`${orderId}: no readable record in ORDER_STATE`);
+      return;
+    }
+    compared += 1;
+    const actual = stored.value;
+    const diffs = diffRecords(
+      { v: actual.v, execSeq: actual.execSeq, ...actual.order },
+      { v: expected.v, execSeq: expected.execSeq, ...expected.order },
+      {},
+      true,
+    );
+    if (diffs.length > 0) failures.add(describeDiffs(`${orderId} after ${list.length} reports`, diffs));
+  });
+  return finish('venue-vs-service', failures, { ordersCompared: compared, reports });
 }
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import {
 } from '@apeiron/logos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDriver, type Driver } from './driver';
+import { checkVenueVsService } from './oracle';
 
 const SEED_NOW = Date.UTC(2026, 9, 6, 12, 0, 0);
 const referenceMids = (): Record<CurrencyPair, number> => Object.fromEntries(PAIRS.map((p) => [p.pair, p.mid])) as Record<CurrencyPair, number>;
@@ -121,6 +122,46 @@ describe('createDriver', () => {
     expect(created.length).toBeGreaterThan(0);
     expect(created.length).toBe(stats.created);
     expect(created.every((id, i) => id > (created[i - 1] ?? w.maxId ?? ''))).toBe(true);
+  });
+
+  it('keeps a log of what the venue sent, and replaying it reproduces what the order service stored', async () => {
+    const w = await world();
+    const seen = await capture(w.bus);
+    const d = make(w, { pauseEveryMs: 50, resumeAfterMs: 100 });
+    await d.start();
+    await wait(1_000);
+    await d.stop();
+    await w.themis.flush();
+    await d.settled(200, 5_000);
+    const log = d.venueLog();
+    expect([...log.reports.values()].flat()).toHaveLength(seen.reports.length);
+    expect(log.reports.size).toBeGreaterThan(5);
+    for (const [orderId, list] of log.reports) {
+      expect(log.startOf(orderId), orderId).toBeDefined();
+      expect(list.map((r) => r.execSeq)).toEqual([...list.map((r) => r.execSeq)].sort((a, b) => a - b));
+    }
+    const check = await checkVenueVsService({ log, kv: w.bus.kv(BUCKETS.orderState) });
+    expect(check.failures).toEqual([]);
+    expect(check.stats['ordersCompared']).toBe(log.reports.size);
+  });
+
+  it('stops publishing prices while paused (the model sees none either) and carries on when resumed', async () => {
+    const w = await world();
+    const seen = await capture(w.bus);
+    const d = make(w);
+    await d.start();
+    await wait(300);
+    d.pausePrices(true);
+    const ticksBefore = seen.ticks.length;
+    const modelTicksBefore = d.stats().ticks;
+    await wait(500);
+    expect(seen.ticks.length).toBe(ticksBefore);
+    expect(d.stats().ticks).toBe(modelTicksBefore);
+    expect(seen.reports.length).toBeGreaterThan(0);
+    d.pausePrices(false);
+    await wait(400);
+    await d.stop();
+    expect(seen.ticks.length).toBeGreaterThan(ticksBefore);
   });
 
   it('runs hermes and helios for real: ticks come from the price feed, and reports are numbered per order', async () => {

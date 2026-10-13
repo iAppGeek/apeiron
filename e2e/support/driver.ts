@@ -19,6 +19,7 @@ import {
   type LoadPreset,
   type Order,
   type OrderCommandRequest,
+  type OrderStateRecord,
   type ExecReport,
   type PriceTick,
   type RequestHandler,
@@ -70,7 +71,7 @@ export type DriverStats = {
 };
 
 export type DriverRepo = {
-  loadOpen(): Promise<{ order: Order }[]>;
+  loadOpen(): Promise<{ order: Order; v: number; execSeq: number }[]>;
   /** Where the price walk starts: the latest market mid per pair among the open orders. */
   latestMidsByPair(): Promise<Record<CurrencyPair, number>>;
   maxOrderId(): Promise<string | null>;
@@ -103,12 +104,21 @@ export type Driver = {
   /** Stops, and closes the record stream. */
   dispose(): Promise<void>;
   setRate(rate: DriverRate): void;
+  /** Silences the price feed (nothing is published and the model sees no ticks), as if helios were down; false brings it back. */
+  pausePrices(paused: boolean): void;
   model(): OrderModel;
   stats(): DriverStats;
   /** The highest order id before the stream started (every created order is above it), or null for an empty database. */
   startMaxOrderId(): string | null;
   /** The time the stream started, on the driver's (server-aligned) clock. */
   startedAt(): number;
+  /** What the venue sent: every execution report that reached the bus, per order in publish order, and each order's record before its first. */
+  venueLog(): VenueLog;
+};
+
+export type VenueLog = {
+  reports: ReadonlyMap<string, readonly ExecReport[]>;
+  startOf(orderId: string): OrderStateRecord | undefined;
 };
 
 const SILENT = {
@@ -140,6 +150,10 @@ export function createDriver(options: DriverOptions): Driver {
   let lastRecordAt = 0;
   let commandSeq = 0;
   const resumes: { orderId: string; at: number }[] = [];
+  let pricesPaused = false;
+  const reportLog = new Map<string, ExecReport[]>();
+  /** The record of each order before the stream's first report for it: the database's at the start, or the order service's first for a new order. */
+  const startRecords = new Map<string, OrderStateRecord>();
 
   const track = (promise: Promise<void>): void => {
     const settled = promise.catch((error: unknown) => {
@@ -199,10 +213,17 @@ export function createDriver(options: DriverOptions): Driver {
   const tee: Bus = {
     publish(subject: string, payload: unknown): Promise<void> {
       if (subject.startsWith('prices.')) {
+        if (pricesPaused) return Promise.resolve();
         model.current.applyTick(payload as PriceTick);
         stats.ticks += 1;
       }
       const published = publishWithRetry(subject, payload);
+      if (subject === SUBJECTS.execReports) {
+        const report = payload as ExecReport;
+        void published.then(() => {
+          reportLog.set(report.orderId, [...(reportLog.get(report.orderId) ?? []), report]);
+        }, () => undefined);
+      }
       if (subject === SUBJECTS.execReports || subject.startsWith('prices.')) track(published);
       return published;
     },
@@ -241,7 +262,9 @@ export function createDriver(options: DriverOptions): Driver {
 
   return {
     async start(): Promise<void> {
-      const current = (await options.repo.loadOpen()).map((record) => record.order);
+      const open = await options.repo.loadOpen();
+      const current = open.map((record) => record.order);
+      for (const stored of open) startRecords.set(stored.order.orderId, { v: stored.v, execSeq: stored.execSeq, srcTs: stored.order.lastUpdateTime, order: stored.order });
       startMax = await options.repo.maxOrderId();
       model.current = new OrderModel(current);
       startedAt = now();
@@ -254,6 +277,7 @@ export function createDriver(options: DriverOptions): Driver {
           const parsed = parseOrderStateRecord(entry.value);
           if (!parsed.ok) continue;
           const created = model.current.createdIds.length;
+          if (!startRecords.has(parsed.value.order.orderId) && parsed.value.v === 1) startRecords.set(parsed.value.order.orderId, parsed.value);
           model.current.applyRecord(parsed.value);
           lastRecordAt = Date.now();
           stats.events = model.current.events;
@@ -318,6 +342,10 @@ export function createDriver(options: DriverOptions): Driver {
       watch = null;
     },
 
+    pausePrices(paused: boolean): void {
+      pricesPaused = paused;
+    },
+
     setRate(rate: DriverRate): void {
       hermes?.simulator.setPreset(RATE_PRESET[rate], now());
     },
@@ -326,5 +354,6 @@ export function createDriver(options: DriverOptions): Driver {
     stats: () => ({ ...stats, publishErrorSamples: [...stats.publishErrorSamples], commands: { ...stats.commands } }),
     startMaxOrderId: () => startMax,
     startedAt: () => startedAt,
+    venueLog: () => ({ reports: reportLog, startOf: (orderId) => startRecords.get(orderId) }),
   };
 }

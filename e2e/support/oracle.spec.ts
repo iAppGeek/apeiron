@@ -1,8 +1,8 @@
-import type { Order, OrderStateRecord, Row, SsrmRequest } from '@apeiron/logos';
+import { MemoryBus, sampleOrders, type ExecReport, type Order, type OrderStateRecord, type Row, type SsrmRequest } from '@apeiron/logos';
 import { describe, expect, it } from 'vitest';
-import type { Driver } from './driver';
+import type { Driver, VenueLog } from './driver';
 import { OrderModel } from './model';
-import { checkInvariants, checkMinimums, checkModelVsServer, checkServerVsScreen, pool, type PageSnapshot } from './oracle';
+import { checkInvariants, checkMinimums, checkModelVsServer, checkServerVsScreen, checkVenueVsService, pool, type PageSnapshot } from './oracle';
 import type { Reader } from './ws-client';
 
 const order = (id: string, over: Partial<Order> = {}): Order =>
@@ -207,5 +207,66 @@ describe('pool', () => {
     });
     expect(done.sort()).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(peak).toBeLessThanOrEqual(3);
+  });
+});
+
+describe('checkVenueVsService', () => {
+  const start = (id: string): OrderStateRecord => ({
+    v: 1,
+    execSeq: 0,
+    srcTs: 1,
+    order: { ...(sampleOrders(1)[0] as Order), orderId: id, status: 'LIVE', orderQty: 1_000, remainingQty: 1_000, filledQty: 0, numFills: 0, notionalUsd: 1_000, filledNotionalUsd: 0, avgFillPrice: null, lastFillPrice: null, lastFillQty: 0 },
+  });
+  const quote = { bid: 1, ask: 1 };
+  const fill = (orderId: string, execSeq: number, qty: number): ExecReport => ({ type: 'FILL', orderId, execSeq, qty, price: 1, ts: 10 + execSeq, ...quote });
+  const logOf = (reports: ExecReport[], starts: OrderStateRecord[]): VenueLog => {
+    const byOrder = new Map<string, ExecReport[]>();
+    for (const r of reports) byOrder.set(r.orderId, [...(byOrder.get(r.orderId) ?? []), r]);
+    return { reports: byOrder, startOf: (id) => starts.find((s) => s.order.orderId === id) };
+  };
+  /** Puts the record the service would store after `applied` fills into a bucket. */
+  async function storedAfter(bus: MemoryBus, base: OrderStateRecord, fills: ExecReport[]): Promise<void> {
+    const { applyExecReport } = await import('@apeiron/logos');
+    let record = base;
+    for (const f of fills) {
+      const result = applyExecReport(record, f);
+      if (result.kind !== 'duplicate') record = result.record;
+    }
+    await bus.kv('ORDER_STATE').put(base.order.orderId, record);
+  }
+
+  it('passes when the stored record is what replaying the venue`s reports gives, duplicates and all', async () => {
+    const bus = new MemoryBus();
+    await bus.kv('ORDER_STATE').ensure({ history: 1, storage: 'memory' });
+    const a = start('A');
+    const reports = [fill('A', 1, 100), fill('A', 2, 150), fill('A', 2, 150)];
+    await storedAfter(bus, a, reports);
+    const check = await checkVenueVsService({ log: logOf(reports, [a]), kv: bus.kv('ORDER_STATE') });
+    expect(check.failures).toEqual([]);
+    expect(check.ok).toBe(true);
+    expect(check.stats).toMatchObject({ ordersCompared: 1, reports: 3 });
+  });
+
+  it('fails when the service lost a fill, applied one twice, or never stored the order', async () => {
+    const bus = new MemoryBus();
+    await bus.kv('ORDER_STATE').ensure({ history: 1, storage: 'memory' });
+    const [a, b, c] = [start('A'), start('B'), start('C')] as [OrderStateRecord, OrderStateRecord, OrderStateRecord];
+    const sent = [fill('A', 1, 100), fill('A', 2, 150), fill('B', 1, 100), fill('C', 1, 10)];
+    await storedAfter(bus, a, [fill('A', 1, 100)]);
+    await storedAfter(bus, b, [fill('B', 1, 100), fill('B', 2, 100)]);
+    const check = await checkVenueVsService({ log: logOf(sent, [a, b, c]), kv: bus.kv('ORDER_STATE') });
+    expect(check.ok).toBe(false);
+    const text = check.failures.join('\n');
+    expect(text).toContain('A after 2 reports');
+    expect(text).toContain('filledQty');
+    expect(text).toContain('B after 1 reports');
+    expect(text).toContain('C: no readable record in ORDER_STATE');
+  });
+
+  it('fails an order it cannot replay because the start record is missing', async () => {
+    const bus = new MemoryBus();
+    await bus.kv('ORDER_STATE').ensure({ history: 1, storage: 'memory' });
+    const check = await checkVenueVsService({ log: logOf([fill('Z', 1, 1)], []), kv: bus.kv('ORDER_STATE') });
+    expect(check.failures).toEqual(['Z: no record before its first report, so it cannot be replayed']);
   });
 });
