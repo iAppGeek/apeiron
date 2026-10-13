@@ -25,8 +25,10 @@ export type ServerOptions = {
   backpressure?: BackpressureOptions;
   /** Seconds between summaries are 1s unless a test says otherwise. */
   summaryIntervalMs?: number;
-  /** How long a command waits for hermes before the client gets an error (default 5000). */
+  /** How long a command waits for the order service's reply before the client gets INTERNAL (default 5000). */
   commandTimeoutMs?: number;
+  /** After the order service accepts a command, the longest the ack waits for the store to hold the new version (default 2000). */
+  ackWaitVMs?: number;
   logLevel?: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
   storeCapacity?: number;
   viewCacheMaxViews?: number;
@@ -273,6 +275,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
         backpressure: options.backpressure,
         summaryIntervalMs: options.summaryIntervalMs,
         commandTimeoutMs: options.commandTimeoutMs,
+        ackWaitVMs: options.ackWaitVMs,
         metrics,
         flushBudgetMs: options.flushBudgetMs,
         snapshot: snapshot,

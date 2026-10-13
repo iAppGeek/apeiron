@@ -57,6 +57,8 @@ services:
       WARM_VIEWS: ${WARM_VIEWS:-default}
       WARM_ROUNDS: ${WARM_ROUNDS:-3}
       DRAIN_MS: ${DRAIN_MS:-2000}
+      COMMAND_TIMEOUT_MS: ${COMMAND_TIMEOUT_MS:-5000}
+      ACK_WAIT_V_MS: ${ACK_WAIT_V_MS:-2000}
       FLUSH_MS: ${FLUSH_MS:-50}
       FLUSH_BUDGET_MS: ${FLUSH_BUDGET_MS:-40}
       MAX_TRACKED_BLOCKS: ${MAX_TRACKED_BLOCKS:-100}
@@ -134,6 +136,7 @@ services:
       NATS_URL: nats://nats:4222
       LOG_LEVEL: ${LOG_LEVEL:-info}
       HEALTH_PORT: "4300"
+      HELIOS_SEED: ${HELIOS_SEED:-}
     ports:
       - "127.0.0.1:4300:4300"
     # After themis, so a first start (no last price on the stream yet) can ask it for the open orders' levels

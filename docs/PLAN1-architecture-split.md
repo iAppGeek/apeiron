@@ -1,7 +1,12 @@
 # PLAN1: Architecture split (view server, order service, separate pricing)
 
-Status: **in progress** (agreed 2026-10-11): phases 1.1 to 1.3a merged; 1.3b to 1.8 done on one branch (see checkpoints/PHASE-1.8.md); CP-7 and CP-8 reviews skipped by instruction, a commit per phase.
-merged. The working process (Sonnet implements one phase per branch and opens a PR; Opus reviews at checkpoints), the
+Status: **complete** (agreed 2026-10-11, finished 2026-10-13). Phases 1.1 to 1.3a merged one PR each; 1.3b to 1.8
+went in one PR, a commit per phase (see [`checkpoints/PHASE-1.8.md`](checkpoints/PHASE-1.8.md)). The CP-7 and CP-8
+Opus reviews were skipped by instruction. A review of that PR against this plan covered CP-8's boundary rules, rule
+coverage, entitlement leaks and load results, and its fixes are listed in PHASE-1.8.md; CP-7's watch-ordering and
+memory-peak audit and CP-8's persist-then-publish recovery audit were not done.
+
+The working process (Sonnet implements one phase per branch and opens a PR; Opus reviews at checkpoints), the
 rules for the implementing agent and the coding conventions in `PLAN.md` apply unchanged. **The appendices here are
 authoritative for the new contracts.** Where they change a `PLAN.md` appendix (C: protocol, A: config), update that
 appendix in the same PR. [`PLAN2-java-blotter.md`](PLAN2-java-blotter.md) and

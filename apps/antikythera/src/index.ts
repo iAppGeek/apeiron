@@ -22,6 +22,8 @@ const server = await buildServer({
   warmViews: loadWarmViews(config.warmViews),
   warmRounds: config.warmRounds,
   catchupMaxPending: config.catchupMaxPending,
+  commandTimeoutMs: config.commandTimeoutMs,
+  ackWaitVMs: config.ackWaitVMs,
   heartbeat: { intervalMs: Math.max(250, Math.floor(config.heartbeatTimeoutMs / 3)), timeoutMs: config.heartbeatTimeoutMs },
   // The store can no longer be kept current: exit so the container restarts and loads a fresh snapshot.
   onFatal: () => process.exit(1),

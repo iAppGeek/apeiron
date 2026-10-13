@@ -57,3 +57,29 @@ Things to know:
 - **S1 at smoke length** failed twice with page V3 one reconnect short, and once before phase 1.6 with the same symptom,
   during those sleep-disturbed hours; it passes at full length. Not seen when the machine stayed awake, so it is probably the same cause, but it
   was not isolated; watch for it in CI's smoke step.
+
+## Warm-up (phase 1.3b target: 5 s or less)
+
+Read from `/health` on the same stack at 1,039,444 and 1,039,572 rows (the second after `docker compose restart
+antikythera`): **`warmupMs` 111 and 121 ms** (default views, 3 rounds), snapshot 7.4 and 8.8 s.
+
+## Review against the plan (2026-10-13)
+
+A review of the branch against this plan, standing in for part of CP-8, found and fixed:
+
+- **Entitlement gap:** the blotter sent a command or amend on an order its store did not hold to `themis` unchecked, so
+  a scoped user could act on a just-created order of another trader (ids are sequential). Such a command now gets
+  `UNKNOWN_ORDER` and nothing reaches `themis`; only a user entitled to `*` is passed through.
+- **`clientOrderId` expiry** scanned the whole map on every submission (about 9M checks a second after an hour of
+  stress), and ran after the duplicate lookup, so an expired id still matched. It now runs first and stops at the first
+  live entry.
+- **Stale venue instructions:** `hermes` carried out instructions up to 30 s old, though `themis` answers `TIMEOUT`
+  after 5 s, so a command the user was told had failed could still happen. `hermes` now drops anything older than
+  `VENUE_TIMEOUT_MS`, which compose sets for both.
+- **Amend while paused:** the amend moved `lastUpdateTime`, from which `RESUMED` measures the pause, so the order lost
+  the time paused before the amend. The amend now credits it to `endTime` (Appendix 1C).
+- Spec gaps closed: a helios boundary test, `COMMAND_TIMEOUT_MS` and `ACK_WAIT_V_MS` as settings, `HELIOS_SEED`
+  passed by compose, `themis` logs the `userId` of each command, and `PLAN.md` Appendix A brought up to date.
+
+Not done: CP-7's watch-ordering and memory-peak audit, and CP-8's persist-then-publish recovery audit. The default
+warm-up views still come from the trader list rather than the entitlements file (the same views for the file as shipped).

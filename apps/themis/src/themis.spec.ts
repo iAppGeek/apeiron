@@ -527,6 +527,19 @@ describe('startThemis: commands', () => {
     await themis.stop();
   });
 
+  it('logs who asked for each command', async () => {
+    const lines: string[] = [];
+    const bus = new MemoryBus();
+    const repo = await seeded();
+    const themis = await startThemis({ ...options(bus, repo), log: createLogger('info', (line) => void lines.push(line)) });
+    const [first] = await repo.loadOpen();
+    const id = first?.order.orderId as string;
+    await bus.request('orders.cmd', { commandId: 'c:9', userId: 'TRADER1', orderId: id, kind: 'amend', changes: { urgency: 'LOW' } }, 1_000);
+    const entry = lines.map((l) => JSON.parse(l) as Record<string, unknown>).find((e) => e['msg'] === 'command received');
+    expect(entry).toMatchObject({ commandId: 'c:9', userId: 'TRADER1', orderId: id, amend: { urgency: 'LOW' } });
+    await themis.stop();
+  });
+
   it('rejects a request it cannot read', async () => {
     const { bus, themis } = await running();
     await expect(bus.request('orders.cmd', { nonsense: true }, 1_000)).rejects.toThrow(/unreadable command/);

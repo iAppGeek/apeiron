@@ -37,6 +37,10 @@ const envSchema = z.object({
   HEARTBEAT_TIMEOUT_MS: posInt('15000'),
   /** Who may sign in and which traders each may see (the same file for every blotter). */
   ENTITLEMENTS_FILE: z.string().min(1).default('/config/entitlements.json'),
+  /** How long a command waits for the order service's reply before the client gets INTERNAL. */
+  COMMAND_TIMEOUT_MS: posInt('5000'),
+  /** After the order service accepts a command, the longest the ack waits for the store to hold the new version. */
+  ACK_WAIT_V_MS: posInt('2000'),
 });
 
 export type AntikytheraConfig = {
@@ -59,6 +63,8 @@ export type AntikytheraConfig = {
   warmRounds: number;
   drainMs: number;
   entitlementsFile: string;
+  commandTimeoutMs: number;
+  ackWaitVMs: number;
 };
 
 export function loadConfig(env: Record<string, string | undefined>): AntikytheraConfig {
@@ -88,5 +94,7 @@ export function loadConfig(env: Record<string, string | undefined>): Antikythera
     warmRounds: e.WARM_ROUNDS,
     drainMs: e.DRAIN_MS,
     entitlementsFile: e.ENTITLEMENTS_FILE,
+    commandTimeoutMs: e.COMMAND_TIMEOUT_MS,
+    ackWaitVMs: e.ACK_WAIT_V_MS,
   };
 }

@@ -206,6 +206,11 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
     const parsed = parseOrderCommandRequest(payload);
     if (!parsed.ok) throw new Error(`unreadable command: ${parsed.error}`);
     const request = parsed.value;
+    // The blotter has checked the user's entitlement (an internal hop themis trusts); who asked is logged for the record.
+    log.info(
+      { commandId: request.commandId, userId: request.userId, orderId: request.orderId, ...(request.kind === 'action' ? { action: request.action } : { amend: request.changes }) },
+      'command received',
+    );
     return new Promise<OrderCommandReply>((resolve) => {
       const refuse = (code: Extract<OrderCommandReply, { ok: false }>['code'], message: string): void => {
         metrics?.command(request.kind, code, 0);
