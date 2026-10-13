@@ -24,6 +24,3 @@ export const LOAD_PRESETS: Readonly<Record<LoadPreset, PresetRates>> = {
   medium: { updatesPerSec: 100, newOrdersPerSec: 5, liveTarget: 500, liveMin: 400, liveCap: 600, pendingCap: 300, fillsPerOrder: 32 },
   stress: { updatesPerSec: 2_000, newOrdersPerSec: 50, liveTarget: 3_000, liveMin: 2_000, liveCap: 5_000, pendingCap: 2_000, fillsPerOrder: 64 },
 };
-
-/** Price ticks per second per pair (all presets). */
-export const TICKS_PER_SECOND = 3;

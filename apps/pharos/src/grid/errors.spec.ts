@@ -1,7 +1,7 @@
 import { ERROR_CODES } from '@apeiron/logos';
 import { describe, expect, it } from 'vitest';
 import type { FailureCode } from '../transport/messages';
-import { describeCommandFailure, describeFailure, isRetryable } from './errors';
+import { describeAmendFailure, describeCommandFailure, describeFailure, isRetryable } from './errors';
 
 describe('describeFailure', () => {
   it('has a non-empty message for every server error code and transport code', () => {
@@ -50,5 +50,22 @@ describe('describeCommandFailure', () => {
     expect(describeCommandFailure('INTERNAL', 'RESUME', 'ALG1', 'boom')).toContain('internal error');
     expect(describeCommandFailure('DISCONNECTED', 'PAUSE', 'ALG1')).toContain('connection');
     expect(describeCommandFailure('NOT_IMPLEMENTED', 'PAUSE', 'ALG1')).toContain('does not implement');
+  });
+});
+
+describe('describeAmendFailure', () => {
+  it('quotes the server`s reason for a refused amend or state', () => {
+    expect(describeAmendFailure('INVALID_AMEND', 'ALG1', 'Nothing to change')).toBe('Amend failed for ALG1: Nothing to change.');
+    expect(describeAmendFailure('INVALID_TRANSITION', 'ALG1', 'Cannot amend an order that is FILLED')).toBe(
+      'Amend failed for ALG1: Cannot amend an order that is FILLED.',
+    );
+    expect(describeAmendFailure('INVALID_AMEND', 'ALG1')).toBe('Amend failed for ALG1: That amendment is not valid.');
+  });
+
+  it('explains an unknown order, a timeout and anything else', () => {
+    expect(describeAmendFailure('UNKNOWN_ORDER', 'ALG1')).toContain('no longer active');
+    expect(describeAmendFailure('INTERNAL', 'ALG1', 'command timed out')).toContain('did not answer in time');
+    expect(describeAmendFailure('FORBIDDEN', 'ALG1')).toBe('Amend failed for ALG1: You are not entitled to do that.');
+    expect(describeAmendFailure('DISCONNECTED', 'ALG1')).toContain('connection');
   });
 });

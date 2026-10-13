@@ -40,7 +40,7 @@ export type NatsBusOptions = {
 const decoder = new TextDecoder();
 
 /** Subjects published through JetStream so the caller learns the stream stored them. */
-const ACKED_SUBJECTS = ['orders.*', 'exec.*'];
+const ACKED_SUBJECTS = ['exec.*'];
 
 /** Marks a reply that carries a handler error, so `request` can reject with it. */
 const ERROR_KEY = '__busError';
@@ -77,7 +77,7 @@ export class NatsBus implements Bus {
 
   async publish(subject: string, payload: unknown): Promise<void> {
     const data = JSON.stringify(payload);
-    // Order and execution traffic gets a JetStream ack; price ticks are fire-and-forget (the PRICES stream still stores them).
+    // Execution traffic gets a JetStream ack; price ticks are fire-and-forget (the PRICES stream still stores them).
     if (ACKED_SUBJECTS.some((pattern) => subjectMatches(pattern, subject))) {
       await this.js.publish(subject, data);
       return;

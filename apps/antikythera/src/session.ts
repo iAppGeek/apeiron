@@ -1,13 +1,21 @@
 import {
+  ALL_TRADERS,
   COLUMNS_VERSION,
   TRADERS,
+  findUser,
+  entitledTraders,
   getCodec,
+  mayAct,
   jsonCodec,
   msgpackCodec,
   parseClientMsg,
+  resolveScope,
   type ClientMsg,
+  type AmendChanges,
   type CommandAction,
   type Codec,
+  type EntitlementUser,
+  type Entitlements,
   type ErrorCode,
   type LoadPreset,
   type ServerMsg,
@@ -35,19 +43,24 @@ export type LiveHooks = {
   register(session: ClientSession): void;
   unregister(session: ClientSession): void;
   setPreset(preset: LoadPreset): Promise<void>;
-  /** Pre-checks and publishes a command; `settle` is called once with how it ended. */
+  /** Sends a command to the order service; `settle` is called once with how it ended. */
   command(request: CommandRequest, settle: (outcome: CommandOutcome) => void): void;
   /** The preset hermes last reported on `control.state`, or null before it has. */
   preset(): LoadPreset | null;
   summary(traderId: string): StatusSummary;
+  /** The trader who owns the order, or undefined when the store does not hold it. */
+  traderOf(orderId: string): string | undefined;
   stats(): ServerStats;
   maxTrackedBlocks: number;
   backpressure: BackpressureOptions;
   summaryIntervalMs: number;
 };
 
-/** A trader command on its way to hermes. `owner` ties it to the session so it is forgotten when that closes. */
-export type CommandRequest = { owner: object; clientId: string; reqId: number; orderId: string; action: CommandAction };
+/** A trader command or amend on its way to the order service. `owner` ties it to the session so it is forgotten when that closes. */
+export type CommandRequest = { owner: object; clientId: string; userId: string; reqId: number; orderId: string } & (
+  | { action: CommandAction }
+  | { changes: AmendChanges }
+);
 
 /** One flush tick as seen by a session. */
 export type FlushContext = { cs: ChangeSet; byView: ReadonlyMap<View, ViewChanges>; now: number; store: ColumnarStore };
@@ -58,6 +71,8 @@ export type SessionDeps = {
   /** Null until the store has finished loading. */
   engine: () => QueryEngine | null;
   log: SessionLogger;
+  /** Who may sign in and which traders each may see and act on. */
+  entitlements: Entitlements;
   traders?: readonly TraderInfo[];
   now?: () => number;
   /** Called after every successful getRows (used to log slow cold builds). */
@@ -83,7 +98,9 @@ function reqIdOf(input: unknown): number | undefined {
 export class ClientSession {
   private codec: Codec = jsonCodec;
   private helloDone = false;
+  /** The trader scope this client's views are built for: one trader, or `ALL` for a user entitled to everyone. */
   private traderId = 'ALL';
+  private user: EntitlementUser | null = null;
   private clientId = '';
   private closed = false;
   private tracker: ClientTracker | null = null;
@@ -250,16 +267,26 @@ export class ClientSession {
       case 'command':
         this.onCommand(msg);
         return;
+      case 'amend':
+        this.onAmend(msg);
+        return;
     }
   }
 
   private onHello(msg: Extract<ClientMsg, { t: 'hello' }>): void {
-    if (msg.traderId !== 'ALL' && !this.traders.some((t) => t.traderId === msg.traderId)) {
-      this.sendError(undefined, 'UNKNOWN_TRADER', `Unknown trader: ${msg.traderId}`);
+    const user = findUser(this.deps.entitlements, msg.userId);
+    if (user === undefined) {
+      this.sendError(undefined, 'UNKNOWN_USER', `Unknown user: ${msg.userId}`);
+      return;
+    }
+    const scope = resolveScope(user, msg.traderId, this.traders);
+    if (!scope.ok) {
+      this.sendError(undefined, scope.code, scope.message);
       return;
     }
     this.codec = getCodec(msg.codec);
-    this.traderId = msg.traderId;
+    this.user = user;
+    this.traderId = scope.scope;
     this.clientId = msg.clientId;
     this.helloDone = true;
     this.tracker?.reset();
@@ -268,7 +295,8 @@ export class ClientSession {
     this.send({
       t: 'welcome',
       serverTime: this.now(),
-      traders: [...this.traders],
+      user: { userId: user.userId, name: user.name },
+      traders: entitledTraders(user, this.traders),
       columnsVersion: COLUMNS_VERSION,
       preset: this.deps.live?.()?.preset() ?? null,
     });
@@ -306,18 +334,39 @@ export class ClientSession {
   }
 
   private onCommand(msg: Extract<ClientMsg, { t: 'command' }>): void {
+    this.sendToOrderService(msg.reqId, msg.orderId, { action: msg.action });
+  }
+
+  private onAmend(msg: Extract<ClientMsg, { t: 'amend' }>): void {
+    this.sendToOrderService(msg.reqId, msg.orderId, { changes: msg.changes });
+  }
+
+  /** Checks the user may act for the order's trader, then hands the command or amend to the order service. */
+  private sendToOrderService(reqId: number, orderId: string, what: { action: CommandAction } | { changes: AmendChanges }): void {
     const live = this.deps.live?.();
     if (live === null || live === undefined) {
-      this.sendError(msg.reqId, 'NOT_IMPLEMENTED', 'commands are not available without a message bus');
+      this.sendError(reqId, 'NOT_IMPLEMENTED', 'commands are not available without a message bus');
       return;
     }
-    live.command(
-      { owner: this, clientId: this.clientId, reqId: msg.reqId, orderId: msg.orderId, action: msg.action },
-      (outcome) => {
-        if (outcome.ok) this.send({ t: 'ack', reqId: msg.reqId });
-        else this.sendError(msg.reqId, outcome.code, outcome.message);
-      },
-    );
+    if (this.user === null) {
+      this.sendError(reqId, 'FORBIDDEN', 'Say hello before sending commands');
+      return;
+    }
+    const owner = live.traderOf(orderId);
+    // An order the store does not hold cannot be checked, so only a user entitled to everyone may send it on (the order
+    // service then answers for it); anyone else is told it is unknown, and nothing reaches the order service.
+    if (owner === undefined && !this.user.traders.includes(ALL_TRADERS)) {
+      this.sendError(reqId, 'UNKNOWN_ORDER', `Order ${orderId} does not exist`);
+      return;
+    }
+    if (owner !== undefined && !mayAct(this.user, owner)) {
+      this.sendError(reqId, 'FORBIDDEN', `Order ${orderId} belongs to a trader you may not act for`);
+      return;
+    }
+    live.command({ owner: this, clientId: this.clientId, userId: this.user.userId, reqId, orderId, ...what }, (outcome) => {
+      if (outcome.ok) this.send({ t: 'ack', reqId });
+      else this.sendError(reqId, outcome.code, outcome.message);
+    });
   }
 
   private onControl(msg: Extract<ClientMsg, { t: 'control' }>): void {

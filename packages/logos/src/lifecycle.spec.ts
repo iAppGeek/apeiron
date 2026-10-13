@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  derivePriceFields,
   deriveOverlay,
   OVERLAY_FIELDS,
   applyFill,
@@ -184,65 +183,6 @@ describe('transition', () => {
   });
 });
 
-describe('derivePriceFields', () => {
-  it('derives the market snapshot, spread and distance to limit', () => {
-    const changes = derivePriceFields(liveOrder({ side: 'BUY', limitPrice: 1.0822 }), { bid: 1.0799, ask: 1.0801 }, NOW);
-    expect(changes).toMatchObject({
-      marketBid: 1.0799,
-      marketAsk: 1.0801,
-      marketMid: 1.08,
-      spreadBps: 1.85,
-      distanceToLimitBps: 20.37,
-      lastUpdateTime: NOW,
-    });
-  });
-
-  it('flips the distance to limit sign for sells', () => {
-    const buy = derivePriceFields(liveOrder({ side: 'BUY', limitPrice: 1.0822 }), { bid: 1.0799, ask: 1.0801 }, NOW);
-    const sell = derivePriceFields(liveOrder({ side: 'SELL', limitPrice: 1.0822 }), { bid: 1.0799, ask: 1.0801 }, NOW);
-    expect(buy.distanceToLimitBps).toBeGreaterThan(0);
-    expect(sell.distanceToLimitBps).toBeLessThan(0);
-  });
-
-  it('has a null distance without a limit price and no slippage without fills', () => {
-    const changes = derivePriceFields(liveOrder({ limitPrice: null }), { bid: 1.0799, ask: 1.0801 }, NOW);
-    expect(changes.distanceToLimitBps).toBeNull();
-    expect('slippageBps' in changes).toBe(false);
-    expect(changes.unrealisedPnlUsd).toBe(0);
-  });
-
-  it('computes slippage and unrealised P&L for orders with fills, signed by side', () => {
-    const base = { filledQty: 500_000, remainingQty: 500_000, avgFillPrice: 1.0802 };
-    const buy = derivePriceFields(liveOrder({ ...base, side: 'BUY' }), { bid: 1.0809, ask: 1.0811 }, NOW);
-    const sell = derivePriceFields(liveOrder({ ...base, side: 'SELL' }), { bid: 1.0809, ask: 1.0811 }, NOW);
-    expect(buy.slippageBps).toBeCloseTo(1.85, 2);
-    expect(buy.unrealisedPnlUsd).toBeCloseTo(500_000 * 0.0008 * 1, 0);
-    expect(sell.unrealisedPnlUsd).toBeCloseTo(-(buy.unrealisedPnlUsd as number), 1);
-    expect(sell.slippageBps).toBeCloseTo(-1.85, 2);
-  });
-
-  it('only sets unrealised P&L for LIVE and PAUSED orders', () => {
-    const base = { filledQty: 500_000, remainingQty: 500_000, avgFillPrice: 1.0802 };
-    const quote = { bid: 1.0809, ask: 1.0811 };
-    expect(derivePriceFields(liveOrder({ ...base, status: 'PAUSED' }), quote, NOW).unrealisedPnlUsd).not.toBe(0);
-    expect('unrealisedPnlUsd' in derivePriceFields(liveOrder({ ...base, status: 'FILLED' }), quote, NOW)).toBe(false);
-    expect('unrealisedPnlUsd' in derivePriceFields(liveOrder({ ...base, status: 'PENDING_START' }), quote, NOW)).toBe(false);
-  });
-
-  it('rounds to the pair decimals', () => {
-    const jpy = liveOrder({ currencyPair: 'USDJPY', arrivalPrice: 150, limitPrice: null });
-    const changes = derivePriceFields(jpy, { bid: 150.12349, ask: 150.12551 }, NOW);
-    expect(changes.marketBid).toBe(150.123);
-    expect(changes.marketAsk).toBe(150.126);
-    expect(changes.marketMid).toBe(150.125);
-  });
-
-  it('agrees with pnlUsdOf', () => {
-    const order = liveOrder({ filledQty: 200_000, remainingQty: 800_000, avgFillPrice: 1.0801 });
-    expect(derivePriceFields(order, { bid: 1.0809, ask: 1.0811 }, NOW).unrealisedPnlUsd).toBe(pnlUsdOf(order, 1.081));
-  });
-});
-
 describe('commands', () => {
   const STATUSES = ['PENDING_START', 'LIVE', 'PAUSED', 'FILLED', 'CANCELLED'] as const;
   const ACTIONS = ['CANCEL', 'PAUSE', 'RESUME'] as const;
@@ -297,17 +237,45 @@ describe('deriveOverlay', () => {
     expect(Object.keys(deriveOverlay(liveOrder(), quote)).sort()).toEqual([...OVERLAY_FIELDS].sort());
   });
 
-  it('matches derivePriceFields for a LIVE order, minus lastUpdateTime and slippage', () => {
-    const order = liveOrder({ filledQty: 500_000, remainingQty: 500_000, avgFillPrice: 1.0802 });
-    const full = derivePriceFields(order, quote, NOW);
-    expect(deriveOverlay(order, quote)).toEqual({
-      marketBid: full.marketBid,
-      marketAsk: full.marketAsk,
-      marketMid: full.marketMid,
-      spreadBps: full.spreadBps,
-      distanceToLimitBps: full.distanceToLimitBps,
-      unrealisedPnlUsd: full.unrealisedPnlUsd,
+  it('derives the market snapshot, spread and distance to limit', () => {
+    expect(deriveOverlay(liveOrder({ side: 'BUY', limitPrice: 1.0822 }), { bid: 1.0799, ask: 1.0801 })).toMatchObject({
+      marketBid: 1.0799,
+      marketAsk: 1.0801,
+      marketMid: 1.08,
+      spreadBps: 1.85,
+      distanceToLimitBps: 20.37,
     });
+  });
+
+  it('flips the distance to limit sign for sells', () => {
+    const buy = deriveOverlay(liveOrder({ side: 'BUY', limitPrice: 1.0822 }), { bid: 1.0799, ask: 1.0801 });
+    const sell = deriveOverlay(liveOrder({ side: 'SELL', limitPrice: 1.0822 }), { bid: 1.0799, ask: 1.0801 });
+    expect(buy.distanceToLimitBps).toBeGreaterThan(0);
+    expect(sell.distanceToLimitBps).toBeLessThan(0);
+  });
+
+  it('has a null distance without a limit price and no P&L without fills', () => {
+    const overlay = deriveOverlay(liveOrder({ limitPrice: null }), { bid: 1.0799, ask: 1.0801 });
+    expect(overlay.distanceToLimitBps).toBeNull();
+    expect(overlay.unrealisedPnlUsd).toBe(0);
+  });
+
+  it('computes unrealised P&L for orders with fills, signed by side, and agrees with pnlUsdOf', () => {
+    const base = { filledQty: 500_000, remainingQty: 500_000, avgFillPrice: 1.0802 };
+    const buy = deriveOverlay(liveOrder({ ...base, side: 'BUY' }), quote);
+    const sell = deriveOverlay(liveOrder({ ...base, side: 'SELL' }), quote);
+    expect(buy.unrealisedPnlUsd).toBeCloseTo(500_000 * 0.0008 * 1, 0);
+    expect(sell.unrealisedPnlUsd).toBeCloseTo(-buy.unrealisedPnlUsd, 1);
+    const order = liveOrder({ filledQty: 200_000, remainingQty: 800_000, avgFillPrice: 1.0801 });
+    expect(deriveOverlay(order, quote).unrealisedPnlUsd).toBe(pnlUsdOf(order, deriveOverlay(order, quote).marketMid));
+  });
+
+  it('rounds to the pair decimals', () => {
+    const jpy = liveOrder({ currencyPair: 'USDJPY', arrivalPrice: 150, limitPrice: null });
+    const overlay = deriveOverlay(jpy, { bid: 150.12349, ask: 150.12551 });
+    expect(overlay.marketBid).toBe(150.123);
+    expect(overlay.marketAsk).toBe(150.126);
+    expect(overlay.marketMid).toBe(150.125);
   });
 
   it('is deterministic and does not read the clock or mutate its input', () => {

@@ -41,7 +41,7 @@ export class LiveClient {
       socket.once('error', reject);
     });
     const client = new LiveClient(socket);
-    client.send({ t: 'hello', traderId, codec, clientId });
+    client.send({ t: 'hello', userId: 'SUPERVISOR', traderId, codec, clientId });
     await client.until((m) => m.t === 'welcome');
     return client;
   }

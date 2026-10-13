@@ -4,8 +4,8 @@ import {
   MemoryBus,
   PROJECTION_KEY,
   applyCommand,
+  parseOrderCommandRequest,
   getCodec,
-  parseOrderCommand,
   jsonCodec,
   type ClientMsg,
   type CodecName,
@@ -17,6 +17,7 @@ import WebSocket, { type RawData } from 'ws';
 import { buildServer, type BlotterServer, type ServerOptions } from './server.js';
 import { ensureBuckets, publishRecord, seedBucket } from './testing/bucket.js';
 import { makeOrders } from './testing/orders.js';
+import { testEntitlements } from './testing/users.js';
 
 const ROWS = makeOrders(
   Array.from({ length: 20 }, (_, i) => ({
@@ -56,6 +57,7 @@ async function prepare(bus: MemoryBus): Promise<void> {
 async function start(bus: MemoryBus, options: Partial<ServerOptions> = {}): Promise<{ server: BlotterServer; wsUrl: string; base: string }> {
   await prepare(bus);
   const s = await buildServer({
+    entitlements: testEntitlements,
     bus,
     logLevel: 'silent',
     storeCapacity: 64,
@@ -126,7 +128,7 @@ describe('live server over a real socket', () => {
   it('does not subscribe to the bus until the snapshot is loaded, and reports ok only when it is ready', async () => {
     const bus = new MemoryBus();
     const subscribe = vi.spyOn(bus, 'subscribe');
-    const s = await buildServer({ bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, ...FAST });
+    const s = await buildServer({ entitlements: testEntitlements, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, ...FAST });
     server = s;
     await s.app.listen({ port: 0, host: '127.0.0.1' });
     const addr = s.app.server.address();
@@ -150,7 +152,7 @@ describe('live server over a real socket', () => {
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const c = await connect(wsUrl, codec);
-    c.send({ t: 'hello', traderId: 'ALL', codec, clientId: 'live-1' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec, clientId: 'live-1' });
     await c.until((m) => m.t === 'welcome');
     c.send({ t: 'getRows', reqId: 1, req: rowsReq });
     const rows = await c.until((m) => m.t === 'rows');
@@ -161,7 +163,7 @@ describe('live server over a real socket', () => {
     if (delta.t !== 'delta') throw new Error('unreachable');
     const priced = delta.updates[0]?.rows.find((r) => r.marketMid === 1.09);
     expect(priced).toBeDefined();
-    expect(Object.keys(priced ?? {})).toEqual(expect.arrayContaining(['orderId', 'marketMid', 'unrealisedPnlUsd', 'lastUpdateTime']));
+    expect(Object.keys(priced ?? {})).toEqual(expect.arrayContaining(['orderId', 'marketMid', 'unrealisedPnlUsd']));
 
     const fresh: Order = { ...(ROWS[0] as Order), orderId: 'T0001000', createdAt: 99_999, status: 'LIVE' };
     await publishRecord(bus, fresh);
@@ -178,10 +180,55 @@ describe('live server over a real socket', () => {
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'T1', codec: 'json', clientId: 't1' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'T1', codec: 'json', clientId: 't1' });
     await c.until((m) => m.t === 'welcome');
     const summary = await c.until((m) => m.t === 'summary');
     expect(summary).toMatchObject({ byStatus: { LIVE: 3, FILLED: 7 }, totalRows: 10 });
+  });
+
+  it('shows a trader user only their own orders: rows, summary, filter values, deltas and adds', async () => {
+    const bus = new MemoryBus();
+    const { server: s, wsUrl } = await start(bus);
+    await s.load();
+    const alice = await connect(wsUrl);
+    alice.send({ t: 'hello', userId: 'TRADER1', traderId: 'ALL', codec: 'json', clientId: 'alice' });
+    await expect(alice.until((m) => m.t === 'welcome')).resolves.toMatchObject({ user: { userId: 'TRADER1' }, traders: [{ traderId: 'T1' }] });
+    alice.send({ t: 'getRows', reqId: 1, req: rowsReq });
+    const rows = await alice.until((m) => m.t === 'rows');
+    if (rows.t !== 'rows') throw new Error('unreachable');
+    expect(rows.rowCount).toBe(10);
+    expect(rows.rows.every((r) => r['traderId'] === 'T1')).toBe(true);
+    await expect(alice.until((m) => m.t === 'summary')).resolves.toMatchObject({ totalRows: 10 });
+    alice.send({ t: 'setFilterValues', reqId: 2, colId: 'traderId' });
+    await expect(alice.until((m) => m.t === 'filterValues')).resolves.toEqual({ t: 'filterValues', reqId: 2, values: ['T1'] });
+
+    // Another trader's new order never reaches her; her own does.
+    await publishRecord(bus, { ...(ROWS[1] as Order), orderId: 'T0001001', traderId: 'T2', createdAt: 99_990, status: 'LIVE' });
+    await publishRecord(bus, { ...(ROWS[0] as Order), orderId: 'T0001002', traderId: 'T1', createdAt: 99_991, status: 'LIVE' });
+    await alice.until((m) => m.t === 'delta' && m.adds.some((a) => a.rows.some((r) => r.orderId === 'T0001002')));
+    const leaked = alice.all.some((m) => m.t === 'delta' && JSON.stringify(m).includes('T0001001'));
+    expect(leaked).toBe(false);
+  });
+
+  it('refuses a trader the user may not see, an unknown user, and a command on another trader`s order', async () => {
+    const bus = new MemoryBus();
+    const themis = await fakeThemis(bus, ROWS.map((o) => ({ ...o })));
+    const { server: s, wsUrl } = await start(bus);
+    await s.load();
+    const stranger = await connect(wsUrl);
+    stranger.send({ t: 'hello', userId: 'NOBODY', traderId: 'ALL', codec: 'json', clientId: 'x' });
+    await expect(stranger.until((m) => m.t === 'error')).resolves.toMatchObject({ code: 'UNKNOWN_USER' });
+
+    const alice = await connect(wsUrl);
+    alice.send({ t: 'hello', userId: 'TRADER1', traderId: 'T2', codec: 'json', clientId: 'a' });
+    await expect(alice.until((m) => m.t === 'error')).resolves.toMatchObject({ code: 'FORBIDDEN' });
+
+    alice.send({ t: 'hello', userId: 'TRADER1', traderId: 'ALL', codec: 'json', clientId: 'a' });
+    await alice.until((m) => m.t === 'welcome');
+    // T0000002 belongs to T2 (odd rows are T2): forged across users.
+    alice.send({ t: 'command', reqId: 1, orderId: 'T0000002', action: 'PAUSE' });
+    await expect(alice.until((m) => m.t === 'error' && m.reqId === 1)).resolves.toMatchObject({ code: 'FORBIDDEN' });
+    expect(themis.seen).toEqual([]);
   });
 
   it('forwards a control message to control.load and acknowledges it', async () => {
@@ -191,7 +238,7 @@ describe('live server over a real socket', () => {
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'c' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'c' });
     await c.until((m) => m.t === 'welcome');
     c.send({ t: 'control', reqId: 5, preset: 'stress' });
     await expect(c.until((m) => m.t === 'ack')).resolves.toEqual({ t: 'ack', reqId: 5 });
@@ -212,34 +259,27 @@ describe('live server over a real socket', () => {
 });
 
 /**
- * Stands in for hermes and the order service: consumes `orders.commands`, applies them with the shared lifecycle,
- * answers on `orders.events` and publishes the order's next record to the bucket.
+ * Stands in for the order service: serves `orders.cmd`, applies each action with the shared lifecycle, publishes the
+ * order's next record to the bucket and replies with its version.
  */
-async function fakeHermes(bus: MemoryBus, held: Order[], options: { silent?: boolean } = {}): Promise<{ seen: string[] }> {
+async function fakeThemis(bus: MemoryBus, held: Order[], options: { silent?: boolean } = {}): Promise<{ seen: string[] }> {
   const seen: string[] = [];
   const versions = new Map<string, number>();
-  await bus.consume({ stream: 'ORDERS', durable: 'hermes-commands', subject: 'orders.commands' }, (payload, _subject, ack) => {
-    const parsed = parseOrderCommand(payload);
-    if (!parsed.ok) return ack();
+  await bus.serve('orders.cmd', async (payload) => {
+    const parsed = parseOrderCommandRequest(payload);
+    if (!parsed.ok || parsed.value.kind !== 'action') return { ok: false, code: 'INVALID_AMEND', message: 'unsupported' };
     const cmd = parsed.value;
     seen.push(cmd.commandId);
-    ack();
-    if (options.silent === true) return;
+    if (options.silent === true) return new Promise(() => undefined);
     const order = held.find((o) => o.orderId === cmd.orderId);
-    if (order === undefined) {
-      void bus.publish('orders.events', { type: 'REJECT', commandId: cmd.commandId, orderId: cmd.orderId, code: 'UNKNOWN_ORDER', message: 'not held', ts: Date.now() });
-      return;
-    }
+    if (order === undefined) return { ok: false, code: 'UNKNOWN_ORDER', message: `Order ${cmd.orderId} does not exist` };
     const result = applyCommand(order, cmd.action, Date.now());
-    if (!result.ok) {
-      void bus.publish('orders.events', { type: 'REJECT', commandId: cmd.commandId, orderId: cmd.orderId, code: result.code, message: result.message, ts: Date.now() });
-      return;
-    }
+    if (!result.ok) return { ok: false, code: result.code, message: result.message };
     Object.assign(order, result.changes);
     const v = (versions.get(order.orderId) ?? 1) + 1;
     versions.set(order.orderId, v);
-    void bus.publish('orders.events', { type: 'UPDATE', order: { orderId: cmd.orderId, ...result.changes }, ts: Date.now(), commandId: cmd.commandId });
-    void publishRecord(bus, { ...order }, v);
+    await publishRecord(bus, { ...order }, v);
+    return { ok: true, v };
   });
   return { seen };
 }
@@ -249,13 +289,13 @@ describe('command path over a real socket', () => {
 
   it.each<CodecName>(['json', 'msgpack'])('pauses and resumes an order: the delta reaches every client, the ack only the sender (%s)', async (codec) => {
     const bus = new MemoryBus();
-    await fakeHermes(bus, held());
+    await fakeThemis(bus, held());
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const sender = await connect(wsUrl, codec);
     const watcher = await connect(wsUrl, codec);
     for (const [c, id] of [[sender, 'sender'], [watcher, 'watcher']] as const) {
-      c.send({ t: 'hello', traderId: 'ALL', codec, clientId: id });
+      c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec, clientId: id });
       await c.until((m) => m.t === 'welcome');
       c.send({ t: 'getRows', reqId: 1, req: rowsReq });
       await c.until((m) => m.t === 'rows');
@@ -275,41 +315,28 @@ describe('command path over a real socket', () => {
     await watcher.until((m) => m.t === 'delta' && m.updates.some((u) => u.rows.some((r) => r.orderId === 'T0000001' && r.status === 'LIVE')));
   });
 
-  it('answers the fast pre-check without a round trip', async () => {
+  it('passes the order service refusals through as errors with their code', async () => {
     const bus = new MemoryBus();
-    const hermes = await fakeHermes(bus, held());
+    const themis = await fakeThemis(bus, held().filter((o) => o.orderId !== 'T0000002'));
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'pre' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'rej' });
     await c.until((m) => m.t === 'welcome');
     c.send({ t: 'command', reqId: 1, orderId: 'T0000010', action: 'CANCEL' });
-    await expect(c.until((m) => m.t === 'error' && m.reqId === 1)).resolves.toMatchObject({ code: 'INVALID_TRANSITION' });
-    c.send({ t: 'command', reqId: 2, orderId: 'NOPE', action: 'CANCEL' });
-    await expect(c.until((m) => m.t === 'error' && m.reqId === 2)).resolves.toMatchObject({ code: 'UNKNOWN_ORDER' });
-    expect(hermes.seen).toEqual([]);
+    await expect(c.until((m) => m.t === 'error' && m.reqId === 1)).resolves.toMatchObject({ code: 'UNKNOWN_ORDER' });
+    c.send({ t: 'command', reqId: 2, orderId: 'T0000002', action: 'CANCEL' });
+    await expect(c.until((m) => m.t === 'error' && m.reqId === 2)).resolves.toMatchObject({ code: 'UNKNOWN_ORDER', message: 'Order T0000002 does not exist' });
+    expect(themis.seen).toEqual(['rej:1', 'rej:2']);
   });
 
-  it('passes hermes REJECT through as an error with its code', async () => {
+  it('cancels an order and then has a second cancel refused by the order service', async () => {
     const bus = new MemoryBus();
-    // Hermes does not hold T0000002, though the server's store does, so the server's pre-check passes and hermes rejects.
-    await fakeHermes(bus, held().filter((o) => o.orderId !== 'T0000002'));
+    await fakeThemis(bus, held());
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'rej' });
-    await c.until((m) => m.t === 'welcome');
-    c.send({ t: 'command', reqId: 3, orderId: 'T0000002', action: 'CANCEL' });
-    await expect(c.until((m) => m.t === 'error' && m.reqId === 3)).resolves.toMatchObject({ code: 'UNKNOWN_ORDER', message: 'not held' });
-  });
-
-  it('cancels an order and then refuses a second cancel from the pre-check', async () => {
-    const bus = new MemoryBus();
-    await fakeHermes(bus, held());
-    const { server: s, wsUrl } = await start(bus);
-    await s.load();
-    const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'cx' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'cx' });
     await c.until((m) => m.t === 'welcome');
     c.send({ t: 'command', reqId: 1, orderId: 'T0000003', action: 'CANCEL' });
     await c.until((m) => m.t === 'ack' && m.reqId === 1);
@@ -317,13 +344,13 @@ describe('command path over a real socket', () => {
     await expect(c.until((m) => m.t === 'error' && m.reqId === 2)).resolves.toMatchObject({ code: 'INVALID_TRANSITION' });
   });
 
-  it('errors with INTERNAL when hermes never answers', async () => {
+  it('errors with INTERNAL when the order service never answers', async () => {
     const bus = new MemoryBus();
-    await fakeHermes(bus, held(), { silent: true });
+    await fakeThemis(bus, held(), { silent: true });
     const { server: s, wsUrl } = await start(bus, { commandTimeoutMs: 150 });
     await s.load();
     const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'slow' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'slow' });
     await c.until((m) => m.t === 'welcome');
     c.send({ t: 'command', reqId: 1, orderId: 'T0000001', action: 'PAUSE' });
     await expect(c.until((m) => m.t === 'error' && m.reqId === 1)).resolves.toMatchObject({ code: 'INTERNAL', message: 'command timed out' });
@@ -331,11 +358,11 @@ describe('command path over a real socket', () => {
 
   it('forgets a pending command when the client disconnects', async () => {
     const bus = new MemoryBus();
-    await fakeHermes(bus, held(), { silent: true });
+    await fakeThemis(bus, held(), { silent: true });
     const { server: s, wsUrl } = await start(bus);
     await s.load();
     const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'gone' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'gone' });
     await c.until((m) => m.t === 'welcome');
     c.send({ t: 'command', reqId: 1, orderId: 'T0000001', action: 'PAUSE' });
     await vi.waitFor(() => expect(s.runtime()?.commands.size).toBe(1));
@@ -352,11 +379,11 @@ describe('GET /metrics', () => {
 
   it('serves Prometheus text with the live measurements of a client session and a command', async () => {
     const bus = new MemoryBus();
-    await fakeHermes(bus, ROWS.filter((o) => o.status === 'LIVE').map((o) => ({ ...o })));
+    await fakeThemis(bus, ROWS.filter((o) => o.status === 'LIVE').map((o) => ({ ...o })));
     const { server: s, wsUrl, base } = await start(bus);
     await s.load();
     const c = await connect(wsUrl, 'msgpack');
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'msgpack', clientId: 'metrics-1' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'msgpack', clientId: 'metrics-1' });
     await c.until((m) => m.t === 'welcome');
     c.send({ t: 'getRows', reqId: 1, req: rowsReq });
     await c.until((m) => m.t === 'rows');

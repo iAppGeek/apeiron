@@ -50,6 +50,9 @@ export type CoreOptions = {
   staleAfterMs: number;
 };
 
+/** WebSocket close code 1012: the server is restarting. */
+export const SERVER_RESTARTING = 1012;
+
 export const DEFAULT_CORE_OPTIONS: CoreOptions = {
   pingIntervalMs: 2000,
   statsIntervalMs: 1000,
@@ -70,7 +73,7 @@ export type CoreDeps = {
 
 export type ConnectionCore = {
   connect(url: string): void;
-  hello(id: number, traderId: string, codec: CodecName): void;
+  hello(id: number, userId: string, traderId: string, codec: CodecName): void;
   request(msg: RequestMsg): void;
   close(): void;
 };
@@ -88,7 +91,7 @@ function decodeFrame(data: unknown): unknown {
 }
 
 type Pending = { timer: unknown };
-type InflightHello = { ids: number[]; traderId: string; codec: CodecName };
+type InflightHello = { ids: number[]; userId: string; traderId: string; codec: CodecName };
 
 /**
  * All the transport logic that lives inside the Web Worker, free of `Worker` and `WebSocket` so it is
@@ -116,6 +119,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
   /** Drops the current socket as dead and reconnects; null while there is no socket. */
   let abandon: ((reason: string) => void) | null = null;
 
+  let userId = '';
   let traderId = 'ALL';
   let codecName: CodecName = 'json';
   /** Hello ids issued while no socket was open; one hello on open resolves them all. */
@@ -123,7 +127,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
   /** One entry per hello sent and not yet answered: the ids it resolves and the settings it asked for. */
   let inflightHellos: InflightHello[] = [];
   /** The last settings the server confirmed with a welcome; a rejected hello falls back to these. */
-  let confirmed: { traderId: string; codec: CodecName } = { traderId: 'ALL', codec: 'json' };
+  let confirmed: { userId: string; traderId: string; codec: CodecName } = { userId: '', traderId: 'ALL', codec: 'json' };
   const pending = new Map<number, Pending>();
 
   let msgsIn = 0;
@@ -158,7 +162,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
   };
 
   const sendHello = (): void => {
-    const msg: ClientMsg = { t: 'hello', traderId, codec: codecName, clientId: deps.clientId };
+    const msg: ClientMsg = { t: 'hello', userId, traderId, codec: codecName, clientId: deps.clientId };
     // The first frame, and every hello, is JSON text whatever codec is being negotiated.
     sendRaw(jsonCodec.encode(msg));
   };
@@ -213,12 +217,13 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
     }, options.statsIntervalMs);
   };
 
-  const scheduleReconnect = (): void => {
+  /** `immediate` is for a server that said it is restarting (close code 1012): try again now, without counting a failed attempt. */
+  const scheduleReconnect = (immediate = false): void => {
     if (closedByUser || reconnectTimer !== null) return;
     const base = Math.min(options.backoffMaxMs, options.backoffBaseMs * 2 ** attempt);
     const jitter = options.backoffJitter === 0 ? 0 : (clock.random() * 2 - 1) * options.backoffJitter;
-    const delay = Math.round(base * (1 + jitter));
-    attempt += 1;
+    const delay = immediate ? 0 : Math.round(base * (1 + jitter));
+    if (!immediate) attempt += 1;
     emitStatus('reconnecting');
     reconnectTimer = clock.setTimeout(() => {
       reconnectTimer = null;
@@ -240,7 +245,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
         }
         const hello = inflightHellos.shift();
         const ids = hello?.ids ?? [];
-        if (hello !== undefined) confirmed = { traderId: hello.traderId, codec: hello.codec };
+        if (hello !== undefined) confirmed = { userId: hello.userId, traderId: hello.traderId, codec: hello.codec };
         emitStatus('connected');
         // Measure the round trip straight away rather than waiting for the first interval tick.
         sendMsg({ t: 'ping', ts: clock.now() });
@@ -272,6 +277,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
         }
         const hello = inflightHellos.shift();
         if (hello !== undefined) {
+          userId = confirmed.userId;
           traderId = confirmed.traderId;
           codecName = confirmed.codec;
           for (const id of hello.ids) emit({ kind: 'hello-result', id, ok: false, ...failure(msg.code, msg.message) });
@@ -330,7 +336,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
       if (connectTimer !== null) clock.clearTimeout(connectTimer);
       connectTimer = null;
       lastFrameAt = clock.now();
-      inflightHellos = [{ ids: queuedHelloIds, traderId, codec: codecName }];
+      inflightHellos = [{ ids: queuedHelloIds, userId, traderId, codec: codecName }];
       queuedHelloIds = [];
       sendHello();
       startTimers();
@@ -338,7 +344,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
     ws.onmessage = (event): void => {
       if (socket === ws) onFrame(event.data);
     };
-    const onGone = (): void => {
+    const onGone = (restarting = false): void => {
       if (socket !== ws) return;
       socket = null;
       abandon = null;
@@ -351,7 +357,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
         emitStatus('closed');
         return;
       }
-      scheduleReconnect();
+      scheduleReconnect(restarting);
     };
     ws.onclose = (event): void => {
       if (socket !== ws) return;
@@ -359,7 +365,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
       batcher.flush();
       const code = event?.code ?? null;
       if (!closedByUser) emit({ kind: 'closed', code, reason: code === null ? 'closed' : `code:${code}` });
-      onGone();
+      onGone(code === SERVER_RESTARTING);
     };
     abandon = (reason): void => {
       if (socket !== ws) return;
@@ -391,7 +397,8 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
       open();
     },
 
-    hello(id: number, nextTraderId: string, nextCodec: CodecName): void {
+    hello(id: number, nextUserId: string, nextTraderId: string, nextCodec: CodecName): void {
+      userId = nextUserId;
       traderId = nextTraderId;
       if (!isOpen()) {
         codecName = nextCodec;
@@ -399,7 +406,7 @@ export function createConnectionCore(deps: CoreDeps): ConnectionCore {
         return;
       }
       codecName = nextCodec;
-      inflightHellos.push({ ids: [id], traderId, codec: nextCodec });
+      inflightHellos.push({ ids: [id], userId, traderId, codec: nextCodec });
       sendHello();
     },
 

@@ -27,8 +27,20 @@ const envSchema = z.object({
   MAX_BLOCK_ROWS: posInt('5000'),
   /** Most ms one flush spends patching views; views not reached carry their changes into the next tick. */
   FLUSH_BUDGET_MS: posInt('40'),
+  /** `default`, or the path of a JSON file of `{traders, req}` entries: the views built before the blotter is ready. */
+  WARM_VIEWS: z.string().min(1).default('default'),
+  /** Synthetic passes of blocks 0 to 4 over each warm view. */
+  WARM_ROUNDS: posInt('3'),
+  /** After SIGTERM, how long to say "not ready" before the sockets are closed with code 1012. */
+  DRAIN_MS: posInt('2000'),
   /** A client silent this long (no frame, no pong) is terminated. */
   HEARTBEAT_TIMEOUT_MS: posInt('15000'),
+  /** Who may sign in and which traders each may see (the same file for every blotter). */
+  ENTITLEMENTS_FILE: z.string().min(1).default('/config/entitlements.json'),
+  /** How long a command waits for the order service's reply before the client gets INTERNAL. */
+  COMMAND_TIMEOUT_MS: posInt('5000'),
+  /** After the order service accepts a command, the longest the ack waits for the store to hold the new version. */
+  ACK_WAIT_V_MS: posInt('2000'),
 });
 
 export type AntikytheraConfig = {
@@ -47,6 +59,12 @@ export type AntikytheraConfig = {
   maxBlockRows: number;
   flushBudgetMs: number;
   heartbeatTimeoutMs: number;
+  warmViews: string;
+  warmRounds: number;
+  drainMs: number;
+  entitlementsFile: string;
+  commandTimeoutMs: number;
+  ackWaitVMs: number;
 };
 
 export function loadConfig(env: Record<string, string | undefined>): AntikytheraConfig {
@@ -72,5 +90,11 @@ export function loadConfig(env: Record<string, string | undefined>): Antikythera
     maxBlockRows: e.MAX_BLOCK_ROWS,
     flushBudgetMs: e.FLUSH_BUDGET_MS,
     heartbeatTimeoutMs: e.HEARTBEAT_TIMEOUT_MS,
+    warmViews: e.WARM_VIEWS,
+    warmRounds: e.WARM_ROUNDS,
+    drainMs: e.DRAIN_MS,
+    entitlementsFile: e.ENTITLEMENTS_FILE,
+    commandTimeoutMs: e.COMMAND_TIMEOUT_MS,
+    ackWaitVMs: e.ACK_WAIT_V_MS,
   };
 }

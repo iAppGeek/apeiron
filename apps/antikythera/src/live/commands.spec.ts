@@ -1,79 +1,59 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CommandCorrelator, DEFAULT_COMMAND_TIMEOUT_MS, type CommandOutcome } from './commands.js';
-
-afterEach(() => {
-  vi.useRealTimers();
-});
+import { describe, expect, it, vi } from 'vitest';
+import { CommandTracker } from './commands.js';
 
 const owner = (): object => ({});
 
-describe('CommandCorrelator', () => {
-  it('settles a pending command once, on resolve', () => {
-    const c = new CommandCorrelator();
-    const settle = vi.fn<(o: CommandOutcome) => void>();
-    expect(c.register('a:1', owner(), settle)).toBe(true);
-    expect(c.has('a:1')).toBe(true);
-    expect(c.resolve('a:1', { ok: true })).toBe(true);
-    expect(settle).toHaveBeenCalledExactlyOnceWith({ ok: true });
-    expect(c.resolve('a:1', { ok: true })).toBe(false);
-    expect(c.size).toBe(0);
-    c.clear();
+describe('CommandTracker', () => {
+  it('tracks a command from start to finish, once', () => {
+    const t = new CommandTracker();
+    expect(t.start('a:1', owner())).toBe(true);
+    expect(t.start('a:1', owner())).toBe(false);
+    expect(t.size).toBe(1);
+    expect(t.finish('a:1')).toBe(true);
+    expect(t.finish('a:1')).toBe(false);
+    expect(t.size).toBe(0);
   });
 
-  it('refuses a duplicate command id and ignores unknown ones', () => {
-    const c = new CommandCorrelator();
-    expect(c.register('a:1', owner(), vi.fn())).toBe(true);
-    expect(c.register('a:1', owner(), vi.fn())).toBe(false);
-    expect(c.resolve('other:9', { ok: true })).toBe(false);
-    c.clear();
+  it('runs an ack when the store reaches the version, and not before', () => {
+    const t = new CommandTracker();
+    const ack = vi.fn();
+    t.waitForVersion('a:1', 'O1', 5, 1_000, ack);
+    expect(t.release(() => 4, 10)).toBe(0);
+    expect(t.release(() => undefined, 10)).toBe(0);
+    expect(ack).not.toHaveBeenCalled();
+    expect(t.release((id) => (id === 'O1' ? 5 : 0), 10)).toBe(1);
+    expect(ack).toHaveBeenCalledOnce();
+    expect(t.release(() => 9, 10)).toBe(0);
   });
 
-  it('times out with INTERNAL "command timed out"', () => {
-    vi.useFakeTimers();
-    const c = new CommandCorrelator();
-    const settle = vi.fn<(o: CommandOutcome) => void>();
-    c.register('a:1', owner(), settle);
-    vi.advanceTimersByTime(DEFAULT_COMMAND_TIMEOUT_MS - 1);
-    expect(settle).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
-    expect(settle).toHaveBeenCalledExactlyOnceWith({ ok: false, code: 'INTERNAL', message: 'command timed out' });
-    expect(c.size).toBe(0);
+  it('runs an ack whose deadline has passed even if the version never arrived', () => {
+    const t = new CommandTracker();
+    const ack = vi.fn();
+    t.waitForVersion('a:1', 'O1', 5, 100, ack);
+    expect(t.release(() => 0, 99)).toBe(0);
+    expect(t.release(() => 0, 100)).toBe(1);
+    expect(ack).toHaveBeenCalledOnce();
   });
 
-  it('honours a custom timeout and does not time out once settled', () => {
-    vi.useFakeTimers();
-    const c = new CommandCorrelator(100);
-    const settle = vi.fn<(o: CommandOutcome) => void>();
-    c.register('a:1', owner(), settle);
-    c.resolve('a:1', { ok: false, code: 'UNKNOWN_ORDER', message: 'gone' });
-    vi.advanceTimersByTime(1_000);
-    expect(settle).toHaveBeenCalledTimes(1);
+  it('drops the commands of one owner without touching the others', () => {
+    const t = new CommandTracker();
+    const a = owner();
+    const b = owner();
+    t.start('a:1', a);
+    t.start('a:2', a);
+    t.start('b:1', b);
+    expect(t.dropOwner(a)).toBe(2);
+    expect(t.size).toBe(1);
+    expect(t.finish('b:1')).toBe(true);
   });
 
-  it('drops everything an owner has pending without settling it', () => {
-    vi.useFakeTimers();
-    const c = new CommandCorrelator(100);
-    const mine = owner();
-    const theirs = owner();
-    const settleMine = vi.fn();
-    const settleTheirs = vi.fn();
-    c.register('a:1', mine, settleMine);
-    c.register('a:2', mine, settleMine);
-    c.register('b:1', theirs, settleTheirs);
-    expect(c.dropOwner(mine)).toBe(2);
-    vi.advanceTimersByTime(1_000);
-    expect(settleMine).not.toHaveBeenCalled();
-    expect(settleTheirs).toHaveBeenCalledTimes(1);
-  });
-
-  it('clear forgets all pending commands and their timers', () => {
-    vi.useFakeTimers();
-    const c = new CommandCorrelator(100);
-    const settle = vi.fn();
-    c.register('a:1', owner(), settle);
-    c.clear();
-    vi.advanceTimersByTime(1_000);
-    expect(settle).not.toHaveBeenCalled();
-    expect(c.size).toBe(0);
+  it('clears everything', () => {
+    const t = new CommandTracker();
+    const ack = vi.fn();
+    t.start('a:1', owner());
+    t.waitForVersion('a:1', 'O1', 1, 0, ack);
+    t.clear();
+    expect(t.size).toBe(0);
+    expect(t.release(() => 9, 1)).toBe(0);
   });
 });

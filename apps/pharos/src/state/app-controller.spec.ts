@@ -43,6 +43,7 @@ const emitMessage = (c: FakeClient, msg: ServerMsg): void => {
 describe('createAppController', () => {
   beforeEach(() => {
     resetAppStore();
+    useAppStore.getState().setRequestedUser('SUPERVISOR');
   });
 
   it('connects and says hello, wiring status, stats and welcome into the store', async () => {
@@ -50,7 +51,7 @@ describe('createAppController', () => {
     const controller = createAppController(client);
     controller.start('ws://x/ws');
     expect(client.connect).toHaveBeenCalledWith('ws://x/ws');
-    expect(client.hello).toHaveBeenCalledWith('ALL', 'json');
+    expect(client.hello).toHaveBeenCalledWith('SUPERVISOR', 'ALL', 'json');
 
     client.handlers.status?.({ status: 'connected', attempt: 0, codec: 'json', reconnects: 0 });
     client.handlers.stats?.({ msgsIn: 3, msgsOut: 2, deltasIn: 0, rttMs: 9, clockOffsetMs: null });
@@ -87,6 +88,71 @@ describe('createAppController', () => {
     });
   });
 
+  it('waits for a user before it connects, then connects and says hello as that user', async () => {
+    useAppStore.getState().setRequestedUser(null);
+    const client = makeClient();
+    const storage = { getItem: vi.fn(), setItem: vi.fn() };
+    const controller = createAppController(client, { storage });
+    controller.start('ws://x/ws');
+    expect(client.connect).not.toHaveBeenCalled();
+    expect(client.hello).not.toHaveBeenCalled();
+    await controller.changeUser('TRADER2');
+    expect(client.connect).toHaveBeenCalledWith('ws://x/ws');
+    expect(client.hello).toHaveBeenCalledWith('TRADER2', 'ALL', 'json');
+    expect(storage.setItem).toHaveBeenCalledWith('apeiron.user', 'TRADER2');
+    expect(useAppStore.getState().requestedUser).toBe('TRADER2');
+  });
+
+  it('asks for a user again when the server refuses the first hello', async () => {
+    const client = makeClient();
+    client.hello.mockRejectedValueOnce(new RequestError({ code: 'UNKNOWN_USER', message: 'Unknown user: SUPERVISOR' }));
+    createAppController(client).start('ws://x/ws');
+    await vi.waitFor(() => expect(useAppStore.getState().requestedUser).toBeNull());
+    expect(useAppStore.getState().toasts).toHaveLength(1);
+  });
+
+  it('switches user by re-sending hello with the trader reset to ALL, then purges', async () => {
+    const client = makeClient();
+    const controller = createAppController(client);
+    const purge = vi.fn();
+    controller.setPurge(purge);
+    controller.start('ws://x/ws');
+    emitMessage(client, { ...welcome, user: { userId: 'SUPERVISOR', name: 'Desk Supervisor' } });
+    await controller.changeTrader('T2');
+    purge.mockClear();
+    await controller.changeUser('TRADER1');
+    expect(client.hello).toHaveBeenLastCalledWith('TRADER1', 'ALL', 'json');
+    expect(useAppStore.getState()).toMatchObject({ requestedUser: 'TRADER1', requestedTrader: 'ALL', confirmedTrader: 'ALL' });
+    expect(purge).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it('keeps the old user and toasts when the server refuses the switch', async () => {
+    const client = makeClient();
+    const storage = { getItem: vi.fn(), setItem: vi.fn() };
+    const controller = createAppController(client, { storage });
+    const purge = vi.fn();
+    controller.setPurge(purge);
+    controller.start('ws://x/ws');
+    await controller.changeTrader('T2');
+    purge.mockClear();
+    client.hello.mockRejectedValueOnce(new RequestError({ code: 'UNKNOWN_USER', message: 'Unknown user: GHOST' }));
+    await controller.changeUser('GHOST');
+    expect(useAppStore.getState()).toMatchObject({ requestedUser: 'SUPERVISOR', requestedTrader: 'T2' });
+    expect(storage.setItem).toHaveBeenLastCalledWith('apeiron.user', 'SUPERVISOR');
+    expect(purge).not.toHaveBeenCalled();
+    expect(useAppStore.getState().toasts).toHaveLength(1);
+  });
+
+  it('shows the user the server confirmed, and sends a trader change as that user', async () => {
+    const client = makeClient();
+    const controller = createAppController(client);
+    controller.start('ws://x/ws');
+    emitMessage(client, { ...welcome, user: { userId: 'SUPERVISOR', name: 'Desk Supervisor' } });
+    expect(useAppStore.getState().confirmedUser).toEqual({ userId: 'SUPERVISOR', name: 'Desk Supervisor' });
+    await controller.changeTrader('T1');
+    expect(client.hello).toHaveBeenLastCalledWith('SUPERVISOR', 'T1', 'json');
+  });
+
   it('changes trader: hello, store update, then purge', async () => {
     const client = makeClient();
     const controller = createAppController(client);
@@ -94,7 +160,7 @@ describe('createAppController', () => {
     controller.setPurge(purge);
     useAppStore.getState().setRowCount(1000);
     await controller.changeTrader('T1');
-    expect(client.hello).toHaveBeenCalledWith('T1', 'json');
+    expect(client.hello).toHaveBeenCalledWith('SUPERVISOR', 'T1', 'json');
     expect(useAppStore.getState().requestedTrader).toBe('T1');
     expect(useAppStore.getState().confirmedTrader).toBe('T1');
     expect(useAppStore.getState().rowCount).toBeNull();
@@ -122,7 +188,7 @@ describe('createAppController', () => {
     controller.setPurge(purge);
     useAppStore.getState().setRequestedTrader('T1');
     await controller.changeCodec('msgpack');
-    expect(client.hello).toHaveBeenCalledWith('T1', 'msgpack');
+    expect(client.hello).toHaveBeenCalledWith('SUPERVISOR', 'T1', 'msgpack');
     expect(useAppStore.getState().codec).toBe('msgpack');
     expect(purge).toHaveBeenCalledTimes(1);
     expect(purge).toHaveBeenCalledWith(true);
@@ -180,7 +246,7 @@ describe('createAppController', () => {
     const client = makeClient();
     useAppStore.getState().setRequestedTrader('T4');
     createAppController(client).start('ws://x/ws');
-    expect(client.hello).toHaveBeenCalledWith('T4', 'json');
+    expect(client.hello).toHaveBeenCalledWith('SUPERVISOR', 'T4', 'json');
   });
 
   it('stores server stats from summary, toasts stray errors and hands deltas to the delta handler', () => {
@@ -490,7 +556,7 @@ describe('createAppController', () => {
     await controller.changeCodec('msgpack');
     await controller.changeCodec('json');
     await controller.changeCodec('msgpack');
-    expect(client.hello.mock.calls.map((c) => c[1])).toEqual(['msgpack', 'json', 'msgpack']);
+    expect(client.hello.mock.calls.map((c) => c[2])).toEqual(['msgpack', 'json', 'msgpack']);
     expect(useAppStore.getState().codec).toBe('msgpack');
     expect(purge).toHaveBeenCalledTimes(3);
   });

@@ -24,6 +24,10 @@ describe('PLANS', () => {
       expect(p.s5.dropsAtMs.every((d) => d.atMs < p.s5.totalMs)).toBe(true);
       expect(p.s1.drops).toBeGreaterThan(0);
       expect(p.s7.restarts).toBeGreaterThan(0);
+      expect(p.s10.restarts).toBeGreaterThan(0);
+      expect(p.s12.restarts).toBeGreaterThan(0);
+      expect(p.s11.outageMs).toBeGreaterThan(0);
+      expect(p.s11.leadMs + p.s11.outageMs + p.s11.tailMs).toBeGreaterThan(p.s11.outageMs);
       expect(p.s6.phase2Ms).toBeGreaterThan(0);
     }
   });

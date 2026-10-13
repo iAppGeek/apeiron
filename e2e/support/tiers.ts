@@ -21,6 +21,12 @@ export type S4Plan = { downMs: number; leadMs: number; tailMs: number };
 export type S5Plan = { latencyMs: number; dropsAtMs: readonly { atMs: number; kind: 'clean' | 'down3' }[]; totalMs: number };
 export type S6Plan = { phase1Ms: number; phase2Ms: number };
 export type S7Plan = { restarts: number; gapMs: number };
+/** S10: the order service restarts mid-stream. */
+export type S10Plan = { restarts: number; gapMs: number };
+/** S11: the price feed is silent for `outageMs`, with `leadMs` before it and `tailMs` after. */
+export type S11Plan = { outageMs: number; leadMs: number; tailMs: number };
+/** S12: the blotter restarts, and a probe asks it for rows all the while. */
+export type S12Plan = { restarts: number; gapMs: number };
 
 export type Plans = {
   s1: S1Plan;
@@ -30,6 +36,9 @@ export type Plans = {
   s5: S5Plan;
   s6: S6Plan;
   s7: S7Plan;
+  s10: S10Plan;
+  s11: S11Plan;
+  s12: S12Plan;
 };
 
 export const PLANS: Readonly<Record<Tier, Plans>> = {
@@ -41,6 +50,9 @@ export const PLANS: Readonly<Record<Tier, Plans>> = {
     s5: { latencyMs: 300, totalMs: 180_000, dropsAtMs: [{ atMs: 60_000, kind: 'clean' }, { atMs: 120_000, kind: 'down3' }] },
     s6: { phase1Ms: 180_000, phase2Ms: 60_000 },
     s7: { restarts: 2, gapMs: 25_000 },
+    s10: { restarts: 2, gapMs: 25_000 },
+    s11: { outageMs: 60_000, leadMs: 15_000, tailMs: 25_000 },
+    s12: { restarts: 2, gapMs: 25_000 },
   },
   quick: {
     s1: { drops: 6, intervalMs: 20_000, firstAtMs: 12_000, shortOutages: false },
@@ -50,6 +62,9 @@ export const PLANS: Readonly<Record<Tier, Plans>> = {
     s5: { latencyMs: 300, totalMs: 60_000, dropsAtMs: [{ atMs: 30_000, kind: 'clean' }] },
     s6: { phase1Ms: 60_000, phase2Ms: 30_000 },
     s7: { restarts: 1, gapMs: 20_000 },
+    s10: { restarts: 1, gapMs: 20_000 },
+    s11: { outageMs: 30_000, leadMs: 10_000, tailMs: 15_000 },
+    s12: { restarts: 1, gapMs: 20_000 },
   },
   smoke: {
     s1: { drops: 5, intervalMs: 10_000, firstAtMs: 8000, shortOutages: true },
@@ -59,6 +74,9 @@ export const PLANS: Readonly<Record<Tier, Plans>> = {
     s5: { latencyMs: 300, totalMs: 60_000, dropsAtMs: [{ atMs: 30_000, kind: 'clean' }] },
     s6: { phase1Ms: 60_000, phase2Ms: 30_000 },
     s7: { restarts: 1, gapMs: 20_000 },
+    s10: { restarts: 1, gapMs: 15_000 },
+    s11: { outageMs: 20_000, leadMs: 8_000, tailMs: 12_000 },
+    s12: { restarts: 1, gapMs: 15_000 },
   },
 };
 

@@ -20,7 +20,7 @@ export type ServerSnapshot = {
   appliedRev: number;
   /** The last sequence in the `KV_ORDER_STATE` stream: the newest change the order service has published. */
   kvLastSeq: number;
-  /** Messages in the order service's `themis` consumer not yet delivered, and delivered but not acknowledged (it acks after it has stored and published them). */
+  /** Messages in the order service's `themis-exec` consumer not yet delivered, and delivered but not acknowledged (it acks after it has stored and published them). */
   consumerPending: number;
   consumerAckPending: number;
   flushLagMs: number;
@@ -42,7 +42,7 @@ export function parseSnapshot(health: unknown, lag: unknown, jsz: unknown): Serv
       if (obj(stream)['name'] === 'KV_ORDER_STATE') kvLastSeq = num(obj(obj(stream)['state'])['last_seq']);
       for (const consumer of (obj(stream)['consumer_detail'] as unknown[] | undefined) ?? []) {
         const c = obj(consumer);
-        if (c['name'] !== 'themis') continue;
+        if (c['name'] !== 'themis-exec') continue;
         pending += num(c['num_pending']);
         ackPending += num(c['num_ack_pending']);
       }

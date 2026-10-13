@@ -1,14 +1,15 @@
-import { ORDER_STATUSES, canApplyCommand, type CommandAction, type OrderStatus } from '@apeiron/logos';
+import { ORDER_STATUSES, canAmend, canApplyCommand, type CommandAction, type OrderStatus } from '@apeiron/logos';
 import type { GetContextMenuItemsParams, MenuItemDef } from 'ag-grid-community';
 import { describe, expect, it, vi } from 'vitest';
-import { ACTION_LABEL, buildContextMenuItems, orderTargetOf, type OrderTarget } from './order-actions';
+import { ACTION_LABEL, AMEND_LABEL, buildContextMenuItems, orderTargetOf, type OrderTarget } from './order-actions';
 
 type Node = GetContextMenuItemsParams['node'];
 const nodeOf = (props: Record<string, unknown>): Node => props as unknown as Node;
 
-const itemsFor = (status: OrderStatus, run = vi.fn()): { items: (MenuItemDef | string)[]; run: ReturnType<typeof vi.fn> } => ({
-  items: buildContextMenuItems({ orderId: 'ALG00000001', status }, run),
+const itemsFor = (status: OrderStatus, run = vi.fn(), amend = vi.fn()): { items: (MenuItemDef | string)[]; run: ReturnType<typeof vi.fn>; amend: ReturnType<typeof vi.fn> } => ({
+  items: buildContextMenuItems({ orderId: 'ALG00000001', status }, run, amend),
   run,
+  amend,
 });
 const named = (items: (MenuItemDef | string)[], name: string): MenuItemDef => {
   const found = items.find((i): i is MenuItemDef => typeof i !== 'string' && i.name === name);
@@ -49,6 +50,7 @@ describe('buildContextMenuItems', () => {
       'Cancel order',
       'Pause order',
       'Resume order',
+      'Amend order…',
       'separator',
       'copy',
       'copyWithHeaders',
@@ -99,12 +101,31 @@ describe('buildContextMenuItems', () => {
   });
 
   it('gives a group row or an empty area the copy items only', () => {
-    expect(buildContextMenuItems(null, vi.fn())).toEqual(['copy', 'copyWithHeaders']);
+    expect(buildContextMenuItems(null, vi.fn(), vi.fn())).toEqual(['copy', 'copyWithHeaders']);
   });
 
   it('builds fresh items from the status at the time the menu opens', () => {
     const target: OrderTarget = { orderId: 'A', status: 'LIVE' };
-    expect(named(buildContextMenuItems(target, vi.fn()), 'Pause order').disabled).toBe(false);
-    expect(named(buildContextMenuItems({ ...target, status: 'PAUSED' }, vi.fn()), 'Pause order').disabled).toBe(true);
+    expect(named(buildContextMenuItems(target, vi.fn(), vi.fn()), 'Pause order').disabled).toBe(false);
+    expect(named(buildContextMenuItems({ ...target, status: 'PAUSED' }, vi.fn(), vi.fn()), 'Pause order').disabled).toBe(true);
+  });
+});
+
+describe('the Amend item', () => {
+  it.each(ORDER_STATUSES)('for a %s order is enabled exactly when it can be amended', (status) => {
+    expect(named(itemsFor(status).items, AMEND_LABEL).disabled).toBe(!canAmend(status));
+  });
+
+  it('opens the dialog for the order, and explains itself when disabled', () => {
+    const live = itemsFor('LIVE');
+    named(live.items, AMEND_LABEL).action?.({} as never);
+    expect(live.amend).toHaveBeenCalledExactlyOnceWith('ALG00000001');
+    const filled = named(itemsFor('FILLED').items, AMEND_LABEL);
+    expect(filled.action).toBeUndefined();
+    expect(filled.tooltip).toBe('Amend order…: not available while the order is FILLED');
+  });
+
+  it('is absent from the menu of a group row', () => {
+    expect(buildContextMenuItems(null, vi.fn(), vi.fn())).toEqual(['copy', 'copyWithHeaders']);
   });
 });

@@ -53,16 +53,30 @@ const makeClient = (): {
 describe('App', () => {
   beforeEach(() => {
     resetAppStore();
+    useAppStore.getState().setRequestedUser('SUPERVISOR');
   });
 
   it('connects to the websocket endpoint and says hello', () => {
     const { client, connect, hello } = makeClient();
     render(<App client={client} wsUrl="ws://host/ws" />);
     expect(connect).toHaveBeenCalledWith('ws://host/ws');
-    expect(hello).toHaveBeenCalledWith('ALL', 'json');
+    expect(hello).toHaveBeenCalledWith('SUPERVISOR', 'ALL', 'json');
     expect(screen.getByText('Apeiron')).toBeInTheDocument();
     expect(screen.getByTestId('blotter')).toBeInTheDocument();
     expect(screen.getByRole('status', { name: 'Status bar' })).toBeInTheDocument();
+  });
+
+  it('asks who is looking before it connects, then connects as the user picked', async () => {
+    useAppStore.getState().setRequestedUser(null);
+    const { client, connect, hello } = makeClient();
+    render(<App client={client} wsUrl="ws://host/ws" />);
+    expect(screen.getByRole('dialog', { name: 'Who is looking?' })).toBeInTheDocument();
+    expect(connect).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: /Chloe Tanaka/ }));
+    expect(connect).toHaveBeenCalledWith('ws://host/ws');
+    expect(hello).toHaveBeenCalledWith('TRADER3', 'ALL', 'json');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /user/i })).toHaveValue('TRADER3');
   });
 
   it('fills the trader list from the welcome and changes trader through hello', async () => {
@@ -72,9 +86,9 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.getByRole('option', { name: 'Alice' })).toBeInTheDocument();
     });
-    await userEvent.selectOptions(screen.getByRole('combobox'), 'T2');
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /trader/i }), 'T2');
     await waitFor(() => {
-      expect(hello).toHaveBeenLastCalledWith('T2', 'json');
+      expect(hello).toHaveBeenLastCalledWith('SUPERVISOR', 'T2', 'json');
     });
     await waitFor(() => {
       expect(useAppStore.getState().confirmedTrader).toBe('T2');
@@ -88,7 +102,7 @@ describe('App', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Dev' }));
     await userEvent.click(await screen.findByRole('radio', { name: 'MessagePack' }));
     await waitFor(() => {
-      expect(hello).toHaveBeenLastCalledWith('ALL', 'msgpack');
+      expect(hello).toHaveBeenLastCalledWith('SUPERVISOR', 'ALL', 'msgpack');
     });
     await waitFor(() => {
       expect(screen.getByTestId('status-codec')).toHaveTextContent('msgpack');
@@ -182,6 +196,6 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.getByRole('radio', { name: 'JSON' })).toBeChecked();
     });
-    expect(hello).toHaveBeenLastCalledWith('ALL', 'json');
+    expect(hello).toHaveBeenLastCalledWith('SUPERVISOR', 'ALL', 'json');
   });
 });

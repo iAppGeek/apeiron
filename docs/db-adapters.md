@@ -275,8 +275,8 @@ back. `count[]` is `count orders` over the partitions, `maxOrderId[]` is `max` o
 antikythera would **subscribe** with `.u.sub[`orderEvents;`]`, receiving each update as a callback on its IPC handle,
 with the tickerplant's log file providing replay from a point (the equivalent of JetStream's durable consumer). The `Bus`
 port in `packages/logos/src/bus.ts` is the seam: a `TickerplantBus` implementing it replaces `NatsBus` (`@apeiron/iris`)
-and nothing above it changes. The `prices.*` and `orders.events` subjects map to two tickerplant tables, and
-`orders.commands` to a synchronous call on the gateway.
+and nothing above it changes. The `prices.*` and `exec.reports` subjects map to two tickerplant tables, and
+`orders.cmd` to a synchronous call on the gateway.
 
 **Operational notes.** kdb+ is single threaded per process unless started with `-s`; keep the historical database and
 the realtime table in separate processes behind a gateway if queries ever land on it directly. Here, the server reads

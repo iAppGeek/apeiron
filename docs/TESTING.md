@@ -13,6 +13,12 @@ Apeiron is tested in six layers. Each answers a different question, and the chea
 
 Conventions that apply to all of it: Vitest for unit tests (`vi.mock`, `vi.spyOn`, `vi.fn`, never `jest.mock`), React Testing Library for components, Playwright for the browser, no fixed sleeps in the browser tests (`expect.poll` and `waitForFunction`; a `sleep` is only used to wait out a fault of known length), and every new module ships with a `*.spec.ts`.
 
+**Who the tests sign in as.** The blotter needs a user. The end-to-end page object opens the app with `?user=SUPERVISOR`
+(`Blotter.open(user)`), the protocol clients (the resilience reader, talos, the restart test) send `userId: 'SUPERVISOR'`,
+and `e2e/tests/users.e2e.ts` opens `TRADER1`, `TRADER2` and the supervisor side by side: each trader sees only their own
+orders, a command forged across users gets `FORBIDDEN`, an unknown user `UNKNOWN_USER`, and switching user in the header
+reloads the grid.
+
 ## Running each layer
 
 ```bash
@@ -52,25 +58,24 @@ After any connection disruption the grid shows **complete, current data**: it do
         | /ws                                   |
    toxiproxy :4100  <-- fault controller :8474  |
         |                                       v
-   antikythera :4000  <------------- NATS (orders.events, prices.*, orders.commands)
+   antikythera :4000  <------------- NATS (ORDER_STATE, prices.*, orders.cmd)
 ```
 
 - **Toxiproxy** (`ghcr.io/shopify/toxiproxy:2.12.0`, the latest release) sits between the browser's web container and antikythera. The `resilience` compose profile adds it and `pharos-e2e`, the same web image built with `VITE_TEST_HOOKS=1` whose nginx sends `/ws` to `WS_UPSTREAM=toxiproxy:4100`. The normal `pharos` image is unchanged (the upstream defaults to `antikythera:4000`).
 - **Test hooks** (`window.__apeironTest`, read-only, only in that build): every loaded leaf and group row from `api.forEachNode`, the root row count, the summary, the connection state (reconnects, close reasons, pending requests), delta, row and purge counters, the view state, the latest `getRows` request, and the tick-to-screen figures. A unit test builds the production bundle and asserts none of it is there (`apps/pharos/src/testing/hooks-gate.spec.ts`).
 - **Fault controller** (`e2e/support/faults.ts`): `dropClean()` (a `reset_peer` toxic for 600 ms), `down(ms)` (disable the proxy), `stall()` (a `timeout` toxic of 0 in both directions: data stops, nothing closes), `latency(ms, jitter)`, `bandwidth(kbps, direction)`, `clear()`.
-- **Update driver** (`e2e/support/driver.ts`): hermes's own `startHermes` running in the test process on a seeded generator, so the stream is hermes's (price ticks at 3 per second per pair, fills, PENDING to LIVE, LIVE to FILLED or CANCELLED, new orders with ascending ids, and everything that moves rows between status groups and in and out of filters), plus PAUSE and RESUME commands injected through the normal command path. Rates are hermes's own presets: `normal` is Medium, `stress` is Stress. Nothing is reimplemented. Every event and tick passes through a tee bus that applies it to the model before forwarding it.
-- **The model** (`e2e/support/model.ts`): the orders as they were when the stream started, with each published event applied (NEW upserts, UPDATE merges its absolute fields) and the latest tick per pair kept. It uses nothing from the server. For orders still open (LIVE or PAUSED) it applies the shared logos `derivePriceFields` to the final tick, which is what the server does. Two kinds of field are not compared, and the reason is part of the contract:
-  - `lastUpdateTime`, which the server stamps from its own clock;
-  - for a closed or pending order, the five quote-derived fields (`marketBid`, `marketAsk`, `marketMid`, `spreadBps`, `distanceToLimitBps`). Whether a tick landed on the server just before or just after the closing event within one flush cannot be known to a model.
+- **Update driver** (`e2e/support/driver.ts`): hermes's own `startHermes` and helios's own `startHelios` running in the test process on a seeded generator (the real containers of both are stopped for the run), so the stream is theirs (price ticks at 3 per second per pair, fills, PENDING to LIVE, LIVE to FILLED or CANCELLED, new orders with ascending ids, and everything that moves rows between status groups and in and out of filters), plus PAUSE and RESUME commands injected through the normal command path. Rates are hermes's own presets: `normal` is Medium, `stress` is Stress. Nothing is reimplemented. Every event and tick passes through a tee bus that applies it to the model before forwarding it.
+- **The model** (`e2e/support/model.ts`): the orders as they were when the stream started, with each record the order service publishes to `ORDER_STATE` applied (the newest version of each order wins; an order never seen before is a new one) and the latest tick per pair kept. hermes's reports reach the order service as in the stack, so the check covers the path from the bucket through the blotter to the screen. It uses nothing from the blotter. For orders still open (LIVE or PAUSED) it applies the shared logos `deriveOverlay` to the final tick, which is what the server does. Nothing is excluded from the comparison: since the blotter stopped stamping `lastUpdateTime` and stopped computing the market snapshot of orders that complete (the simulator sends it with the completing event), every field of every order is deterministic.
 
   The driver finishes with one last tick per pair, so the server's final price join and the model's use the same quote.
 - **The five views** open at once, each in its own browser context: V1 the default flat view at the top; V2 flat, scrolled to about row 300,000 (30% of the table, so about row 60,000 in CI's 200,000-row dataset); V3 grouped by status with the LIVE group open (a deviation from Appendix G's "by pair": the LIVE group is the one whose membership churns, so drilling into it exercises group moves); V4 status = LIVE sorted by `unrealisedPnlUsd` descending, so the sort key ticks; V5 trader T2 only over msgpack.
 
-### The three checks
+### The four checks
 
 After the stream stops, the harness waits until the system is idle: two consecutive looks at `/health`, `/debug/lag` and NATS's `/jsz` show the blotter at stage `ready` with nothing queued, `themis`'s consumer with nothing pending or unacknowledged, and the blotter's `appliedRev` equal to the `KV_ORDER_STATE` stream's `last_seq` and unchanged between the two and every page has been connected, not busy and delta-free for 2 seconds. Then:
 
 1. **Model against server.** A fresh protocol client (the logos codecs over a plain WebSocket, straight to antikythera, not through the proxy) reads every order the stream created (they are the top of the table by id, read as one block), checks the total row count equals the starting count plus the orders created, and reads every other order an event touched or a tick repriced, one at a time. Each must equal the model on every field except the exclusions above.
+1b. **Venue against service** (`venue-vs-service`). The driver logs every execution report that reached the bus, per order in the order it was sent, and the record of each order before its first report (the database's at the start, or the first `ORDER_STATE` record of a new order). The check replays each order's reports through the order service's own rules (`applyExecReport`) and compares the result with the record the service stored in `ORDER_STATE`: version, `execSeq` and every field. A report that `themis` lost, applied twice or applied out of order, across a restart or not, leaves a different record. The rules are shared code, so what this proves is the delivery, the ordering, the duplicate filter and the persist-then-publish path around them (S10 relies on it; it runs in every scenario).
 2. **Server against screen.** For each page, the checker takes the page's view (trader, sort, filter, grouping, columns) from the last `getRows` request, then reads from a fresh client, at the same positions, every row the grid holds. Each loaded row must equal the server's field for field, including `lastUpdateTime`, and sit at the same index (the order of the loaded blocks). The root row count and the status-bar count must equal the server's; each loaded group row's `childCount` and aggregates must equal the server's group row (matched by key; aggregates within a relative 1e-9, since the incremental and the from-scratch sums may differ in the last bit); and the status-chip summary must equal the summary the fresh client receives for the same view. If this check fails, it looks again 4 seconds later and records whether the page was still wrong, to tell a late page from a stuck one.
 3. **Invariants during the run.** A sampler inside each page reads `loadedRows()` every 500 ms. For every order, `filledQty`, `numFills` and `lastUpdateTime` must never go backwards, and an order seen FILLED or CANCELLED must never be seen LIVE or PAUSED again. A scenario also fails unless every page saw at least the expected number of reconnects and deltas, so it cannot pass by doing nothing.
 
@@ -93,8 +98,8 @@ One table (`e2e/support/tiers.ts`) parameterises every scenario, so the three ti
 
 | Tier | Command | Use it | Scenarios | Wall time |
 |---|---|---|---|---|
-| quick | `pnpm e2e:resilience:quick` | the standard run, before a merge or after a change to the transport, the tracker or the grid | all eight, shortened (plus the canary) | about 12 minutes (713 s on the final code; 834 to 875 s before the CP-6 fixes) |
-| full | `pnpm e2e:resilience` | releases and demos | all eight at the Appendix G lengths (plus the canary) | about 24 minutes (1,417 s on the final code; 1,619 s before the CP-6 fixes) |
+| quick | `pnpm e2e:resilience:quick` | the standard run, before a merge or after a change to the transport, the tracker or the grid | all eleven, shortened (plus the canary) | about 12 minutes (713 s on the final code; 834 to 875 s before the CP-6 fixes) |
+| full | `pnpm e2e:resilience` | releases and demos | all eleven at the Appendix G lengths (plus the canary) | about 24 minutes (1,417 s on the final code; 1,619 s before the CP-6 fixes) |
 | smoke | `pnpm e2e:resilience:smoke` | CI | S1 for 60 s with drops every 10 s, and S3 once | about 3 minutes (the CI step takes under 4) |
 
 | Scenario | quick | full | smoke |
@@ -107,6 +112,9 @@ One table (`e2e/support/tiers.ts`) parameterises every scenario, so the three ti
 | S6 low bandwidth | 60 s at 64 KB/s, then 30 s at 16 KB/s | 180 s then 60 s | not run |
 | S7 server restart | 1 restart | 2 restarts | not run |
 | S8 command across a drop | as full | 4 commands | not run |
+| S10 themis restart | 1 restart | 2 restarts | not run |
+| S11 helios outage | 30 s without prices | 60 s | not run |
+| S12 blotter restart, probed | 1 restart | 2 restarts | not run |
 
 Verification is the same in all tiers and is not shortened: the checks read the same fields at the same strictness. It is fast because the five pages' checks and the model check run side by side, and the orders an event touched near the top of the table are read in 5,000-row blocks instead of one request each (the ones further away still go one at a time).
 
@@ -128,17 +136,21 @@ Each scenario below gives what it simulates, why, how sync is proven, the pass c
 
 **S8: a command across a drop.** *Simulates* four Pause and Cancel commands from the grid, each followed within 150 ms by the proxy going down while the ack is held back by a 1.5 s downstream delay. *Why:* a request that can never be answered must not hang the UI or leave a spinner. *Proof:* an error toast must appear while the link is down; afterwards no row shows the pending spinner, no request is outstanding, and the three checks pass whether or not the server applied the command (the model includes the command's effect either way, because the driver's hermes handled it). *Passes when* every page reconnects once per round.
 
+**S10: the order service restarts mid-stream.** *Simulates* `docker compose restart themis` while the driver keeps sending execution reports (they wait in the `EXEC` stream) and new orders (refused while the service is down), twice. *Why:* `themis` is the system of record; a restart must lose no fill and apply none twice. *Proof:* `venue-vs-service` (every order's stored record equals the replay of the venue's reports), `model-vs-server`, the screen checks, and no publish error in the driver. *Passes when* all checks pass; the pages see only records, so they need not reconnect (the minimum is zero reconnects and 50 deltas).
+
+**S11: the price feed goes quiet.** *Simulates* no `prices.*` message for 60 s (the driver stops publishing prices, as if helios were down; the real helios container is stopped for every run) while orders keep filling, pausing and arriving. *Why:* the blotter must keep serving order changes with the last prices it had, and catch up when prices return. *Proof:* during the outage the model received thousands of records and page V1 applied deltas for them; afterwards the checks pass, which includes the overlay of every open order against the last tick. *Passes when* no page reconnects, order records kept flowing during the outage, and the checks pass.
+
+**S12: the blotter restarts and is probed.** *Simulates* `docker compose restart antikythera` (SIGTERM, drain with close code 1012, start, load, warm up), twice, while a probe opens a fresh socket every 150 ms, says hello and asks for rows, and reads `/health/live` and `/health/ready`. *Why:* a client must never be served before the blotter is ready, and the drain must say "not ready" before it cuts anyone off. *Proof:* the probe's tallies. *Passes when* it was served no rows while `/health/ready` did not say ready, saw the blotter not ready (alive, or between processes), saw it ready and was served rows once it was, every open page reconnected, and the checks pass.
+
 **Canary.** Not a scenario: it proves the screen check can fail (see above).
 
 ### Caveats about what the checks prove
 
-- **The model is independent of the server's data path but shares one function with it.** The stream, the order lifecycle and the event application come from hermes and logos and are applied by the model on its own, but for an open order the model computes the quote-derived fields with logos's `derivePriceFields`, the same function the server uses. A bug inside that function would give the same wrong answer on both sides and pass check 1. It is covered by its own unit tests, and check 2 still compares the screen with the server, but check 1 cannot catch it.
-- **The S7 `lastUpdateTime` relaxation.** After a server restart an open order's `lastUpdateTime` goes back to its last durable value (price-driven changes are never stored) until the next tick reprices it, under a second later. The user sees an update-time cell a few seconds older for under a second, and nothing else. S7 lets that one field step back from the restart until five seconds after the pages reconnect; `filledQty`, `numFills` and the terminal-to-LIVE check stay on. Everywhere else `lastUpdateTime` must never go backwards.
+- **The model is independent of the server's data path but shares one function with it.** The stream, the order lifecycle and the event application come from hermes and logos and are applied by the model on its own, but for an open order the model computes the overlay fields with logos's `deriveOverlay`, the same function the server uses. A bug inside that function would give the same wrong answer on both sides and pass check 1. It is covered by its own unit tests, and check 2 still compares the screen with the server, but check 1 cannot catch it.
 - **V3 is grouped by status**, with the LIVE group open (Appendix G originally said by pair), because the LIVE group is the one whose membership churns.
 
 ### Known limitations the suite surfaced
 
-- **A restart steps `lastUpdateTime` back for a moment.** Price-driven changes are never persisted (by design), so after a restart an open order's `lastUpdateTime` is its last durable one until the next tick (under a second) reprices it. A user sees an update time a few seconds older for under a second, and nothing else. S7 allows this one field to step back from the restart until five seconds after the pages are connected again.
 - **Under a saturated link the page may give up before the server does.** At 16 KB/s the client sees no frame for 6 s and reconnects; its tick-to-screen p95 in S6 reaches 20 s or more while the link is throttled.
 - **The quick tier takes about 12 minutes.** Ten minutes of it is the fault durations themselves; the rest is the three-check verification, run at full strictness, and two server load times.
 - **The server follows at most 2,000 rows below the top of a route.** That is what the grid's cache can hold (20 blocks of 100). A reload that answers after more than about 1,000 new orders arrived (a throttled link) keeps following the old rows; past 2,000 it asks the client to reload the route instead. Rows beyond that in a cache the client has not refreshed would go stale, which the suite has not seen.

@@ -1,7 +1,12 @@
 # PLAN1: Architecture split (view server, order service, separate pricing)
 
-Status: **in progress** (agreed 2026-10-11): phases 1.1 and 1.2 merged, 1.3a (NATS-only blotter) in review. It builds on `docs/PLAN.md`, phases 1–9, which are
-merged. The working process (Sonnet implements one phase per branch and opens a PR; Opus reviews at checkpoints), the
+Status: **complete** (agreed 2026-10-11, finished 2026-10-13). Phases 1.1 to 1.3a merged one PR each; 1.3b to 1.8
+went in one PR, a commit per phase (see [`checkpoints/PHASE-1.8.md`](checkpoints/PHASE-1.8.md)). The CP-7 and CP-8
+Opus reviews were skipped by instruction. A review of that PR against this plan covered CP-8's boundary rules, rule
+coverage, entitlement leaks and load results, and its fixes are listed in PHASE-1.8.md; CP-7's watch-ordering and
+memory-peak audit and CP-8's persist-then-publish recovery audit were not done.
+
+The working process (Sonnet implements one phase per branch and opens a PR; Opus reviews at checkpoints), the
 rules for the implementing agent and the coding conventions in `PLAN.md` apply unchanged. **The appendices here are
 authoritative for the new contracts.** Where they change a `PLAN.md` appendix (C: protocol, A: config), update that
 appendix in the same PR. [`PLAN2-java-blotter.md`](PLAN2-java-blotter.md) and
@@ -199,7 +204,7 @@ Rejections change nothing, and execution-report rejections are logged and counte
 | `PAUSED` / `RESUMED` | `canTransition` from the current status | Status change; on `RESUMED`, `endTime` is extended by the time spent paused (now − `lastUpdateTime`), as today |
 | `VENUE_REJECT` | a pending instruction with that `instrId` | No order change; the waiting command is answered `VENUE_REJECT` |
 | Command `CANCEL` / `PAUSE` / `RESUME` | the order exists (in memory, or a KV `get`); `canApplyCommand(status, action)`; no other instruction pending for that order | Sends a `VenueInstruction` and waits for the venue's report (≤ `VENUE_TIMEOUT_MS`, then `TIMEOUT`). Replies after that report is applied |
-| Amend | status `PENDING_START`, `LIVE` or `PAUSED`; only the four fields; `orderQty` an integer `> filledQty`; `limitPrice` null or `> 0` with no more than the pair's decimals; `endTime > max(now, startTime)`; `urgency` in the enum; at least one field actually changes | `remainingQty`, `pctComplete`, `notionalUsd` (same USD rate per unit) and `durationMins` recomputed. Applied directly; hermes picks up the new parameters from the KV update |
+| Amend | status `PENDING_START`, `LIVE` or `PAUSED`; only the four fields; `orderQty` an integer `> filledQty`; `limitPrice` null or `> 0` with no more than the pair's decimals; `endTime > max(now, startTime)`; `urgency` in the enum; at least one field actually changes | `remainingQty`, `pctComplete`, `notionalUsd` (same USD rate per unit) and `durationMins` recomputed. On a `PAUSED` order whose `endTime` is not amended, the time paused so far is added to `endTime` (the amend moves `lastUpdateTime`, from which `RESUMED` measures the pause). Applied directly; hermes picks up the new parameters from the KV update |
 
 ## Appendix 1D: Users and entitlements
 

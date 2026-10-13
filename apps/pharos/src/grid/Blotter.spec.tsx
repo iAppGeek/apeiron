@@ -2,6 +2,7 @@ import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement, ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { sampleOrders, type Order } from '@apeiron/logos';
 import type { AppController } from '../state/app-controller';
 import { resetAppStore, useAppStore } from '../state/app-store';
 import type { BlotterClient, ClientEvents } from '../transport/client';
@@ -328,6 +329,42 @@ describe('Blotter', () => {
       expect(isPending()).toBe(false);
       expect(api.refreshCells).toHaveBeenCalledTimes(1);
       expect(useAppStore.getState().toasts).toEqual([]);
+    });
+
+    it('opens the amend dialog on the row as it is, sends the changes, and toasts the outcome', async () => {
+      const { client } = makeClient();
+      client.amend = vi.fn(() => Promise.resolve());
+      const row = { ...(sampleOrders(1)[0] as Order), orderId: 'ALG1', status: 'LIVE', orderQty: 1_000_000, filledQty: 0, limitPrice: null, urgency: 'MEDIUM', startTime: 1, endTime: Date.now() + 3_600_000 };
+      api.getRowNode.mockImplementation((id: string) => (id === 'ALG1' ? { id, data: row } : undefined));
+      render(<Blotter client={client} controller={makeController().controller} />);
+      act(() => item(menuFor(leaf('LIVE')), 'Amend order…').action?.());
+      expect(screen.getByRole('dialog', { name: 'Amend ALG1' })).toBeInTheDocument();
+      await userEvent.selectOptions(screen.getByTestId('amend-urgency'), 'HIGH');
+      await userEvent.click(screen.getByTestId('amend-submit'));
+      expect(client.amend).toHaveBeenCalledExactlyOnceWith('ALG1', { urgency: 'HIGH' });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      await vi.waitFor(() => expect(useAppStore.getState().toasts.map((t) => t.text)).toEqual(['Amended ALG1']));
+      expect(isPending()).toBe(false);
+    });
+
+    it('toasts the server`s reason when an amend is refused', async () => {
+      const { client } = makeClient();
+      client.amend = vi.fn(() => Promise.reject(new RequestError({ code: 'INVALID_AMEND', message: 'Nothing to change' })));
+      const row = { ...(sampleOrders(1)[0] as Order), orderId: 'ALG1', status: 'LIVE', filledQty: 0, startTime: 1, endTime: Date.now() + 3_600_000, urgency: 'MEDIUM' };
+      api.getRowNode.mockReturnValue({ id: 'ALG1', data: row });
+      render(<Blotter client={client} controller={makeController().controller} />);
+      act(() => item(menuFor(leaf('LIVE')), 'Amend order…').action?.());
+      await userEvent.selectOptions(screen.getByTestId('amend-urgency'), 'LOW');
+      await userEvent.click(screen.getByTestId('amend-submit'));
+      await vi.waitFor(() => expect(useAppStore.getState().toasts.map((t) => t.text)).toEqual(['Amend failed for ALG1: Nothing to change.']));
+    });
+
+    it('opens no dialog for a row the grid does not hold', () => {
+      const { client } = makeClient();
+      api.getRowNode.mockReturnValue(undefined);
+      render(<Blotter client={client} controller={makeController().controller} />);
+      act(() => item(menuFor(leaf('LIVE')), 'Amend order…').action?.());
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
 
     it('does not send Cancel until the confirmation is chosen', () => {

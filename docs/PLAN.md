@@ -103,7 +103,7 @@ apeiron/
 **Metrics (`prom-client`, `/metrics`):** process CPU, RSS/heap, event-loop lag, WS connections, messages and bytes in/out per second, flush duration, getRows latency histogram, ingest rate.
 
 ## Protocol (packages/logos/protocol)
-- **Client → server:** `hello{traderId, codec}`, `getRows{reqId, request: IServerSideGetRowsRequest}`, `setFilterValues{reqId, colId}`, `command{reqId, orderId, action}`.
+- **Client → server:** `hello{userId, traderId, codec}`, `getRows{reqId, request: IServerSideGetRowsRequest}`, `setFilterValues{reqId, colId}`, `command{reqId, orderId, action}`, `amend{reqId, orderId, changes}` (PLAN1 phase 1.7).
 - **Server → client:** `rows{reqId, rowData, rowCount}`, `delta{seq, serverTs, updates[], adds[], dirtyRoutes[], rowCounts[], newAbove}`, `summary{...}`, `ack`, `error`. Appendix C is authoritative.
 - **Codec interface:** `encode/decode`, with `json` and `msgpack` (`@msgpack/msgpack`) implementations, negotiated in `hello`.
 
@@ -264,38 +264,63 @@ Atlas M0 (512MB storage) can't hold 1M × 50 columns, and DocumentDB isn't fully
 ---
 
 ## Appendix A: Config, ports, versions
-**Ports:**
+*Updated for PLAN1 (the split architecture); the PLAN1 Appendix 1H is the source for what each phase added or removed.*
+
+**Ports** (host ports bind to `127.0.0.1`):
 | Service | Port |
 |---|---|
 | web (nginx) | 8080 |
-| server (HTTP: `/health`, `/metrics`; WS at `/ws`) | 4000 |
+| antikythera, the blotter (HTTP: `/health`, `/health/live`, `/health/ready`, `/metrics`, `/debug/lag`; WS at `/ws`) | 4000 |
+| hermes, the venue simulator (`/health`, `/metrics`) | 4100 |
+| themis, the order service (`/health`, `/metrics`, `/debug`) | 4200 |
+| helios, the price feed (`/health`, `/metrics`) | 4300 |
 | mongo | 27017 |
 | nats | 4222 (client), 8222 (monitor) |
 | prometheus | 9090 |
 | grafana | 3001 |
 | vite dev | 5173 (dev only) |
 
-**Env vars** (validated with zod at startup; each app has its own `config.ts`; `.env.example` is committed):
-| Variable | Default |
-|---|---|
-| `MONGO_URL` | — |
-| `MONGO_DB` | `blotter` |
-| `NATS_URL` | — |
-| `DB_ADAPTER` | `mongo` |
-| `SEED_ROWS` | `1000000` |
-| `SEED` | `42` |
-| `FLUSH_MS` | `50` (CP-4: was 100. At 50ms, event age at flush p95 fell from 192ms to 78ms under 50 clients plus stress, for about 4 points more median CPU) |
-| `FLUSH_BUDGET_MS` | `40` (phase 7, the time budget per flush) |
-| `MONGO_CACHE_GB` | `1` (WiredTiger cache cap, so a shared 6GB Docker VM doesn't swap; raise it on the 16GB remote box) |
-| `WRITE_BEHIND_MS` | `500` |
-| `MAX_TRACKED_BLOCKS` | `100` |
-| `LOAD_PRESET` | `medium` (or `stress`) |
-| `LOG_LEVEL` | — |
-| `REGISTRY` | — |
-| `TAG` | — |
-| `SEED_NOW` (gaia) | unset = wall clock; ISO timestamp pins the dataset for exact reproducibility |
-| `BATCH_SIZE` (gaia) | `10000` |
-| `SEED_RESET` (gaia) | `false`; `true` drops the orders collection and re-seeds, which refreshes the 6-month window to the current date |
+**Env vars** (validated with zod at startup; each app has its own `config.ts`; `.env.example` is committed). Only themis
+and gaia touch the database; the blotter, hermes and helios have no `MONGO_*` settings.
+
+| Variable | Used by | Default |
+|---|---|---|
+| `NATS_URL` | antikythera, themis, hermes, helios | — |
+| `MONGO_URL` | themis, gaia | — |
+| `MONGO_DB` | themis, gaia | `blotter` |
+| `LOG_LEVEL` | all | `info` |
+| `LOAD_PRESET` | hermes, antikythera | `medium` (or `stress`) |
+| `FLUSH_MS` | antikythera | `50` (CP-4: was 100. At 50ms, event age at flush p95 fell from 192ms to 78ms under 50 clients plus stress, for about 4 points more median CPU) |
+| `FLUSH_BUDGET_MS` | antikythera | `40` (phase 7, the time budget per flush) |
+| `MAX_TRACKED_BLOCKS` | antikythera | `100` |
+| `STORE_CAPACITY` | antikythera | `1500000` |
+| `VIEW_CACHE_MAX_VIEWS`, `VIEW_CACHE_MAX_MB` | antikythera | `64`, `384` |
+| `MAX_BLOCK_ROWS` | antikythera | `5000` |
+| `HEARTBEAT_TIMEOUT_MS` | antikythera | `15000` |
+| `PRICE_WAIT_MS` | antikythera, hermes | `10000` (startup wait for a price for every pair) |
+| `CATCHUP_MAX_PENDING` | antikythera | `100` |
+| `WARM_VIEWS`, `WARM_ROUNDS` | antikythera | `default`, `3` |
+| `DRAIN_MS` | antikythera | `2000` |
+| `ENTITLEMENTS_FILE` | antikythera | `/config/entitlements.json` (compose mounts `infra/config/entitlements.json` read-only) |
+| `COMMAND_TIMEOUT_MS` | antikythera | `5000` (no reply from themis by then: the client gets `INTERNAL`) |
+| `ACK_WAIT_V_MS` | antikythera | `2000` (longest an ack waits for the store to hold the replied version) |
+| `GROUP_COMMIT_MS`, `GROUP_COMMIT_MAX` | themis | `20`, `500` |
+| `VENUE_TIMEOUT_MS` | themis, hermes | `5000` (themis answers `TIMEOUT` after this; hermes drops older instructions. Keep the two equal) |
+| `RECONCILE_WINDOW_MIN` | themis | `15` |
+| `REBUILD_PROJECTION` | themis | `0` (`1` rebuilds `ORDER_STATE` at start) |
+| `HEALTH_PORT` | themis, hermes, helios | `4200`, `4100`, `4300` |
+| `HERMES_SEED`, `HELIOS_SEED` | hermes, helios | unset = clock |
+| `STEP_MS` | hermes | `100` |
+| `REF_MIDS_WAIT_MS` | helios | `10000` (how long a first start asks themis for `ref.mids`) |
+| `MONGO_CACHE_GB` | mongo | `1` (WiredTiger cache cap, so a shared 6GB Docker VM doesn't swap; raise it on the 16GB remote box) |
+| `REGISTRY`, `TAG` | compose | — |
+| `SEED_ROWS` | gaia | `1000000` |
+| `SEED` | gaia | `42` |
+| `SEED_NOW` | gaia | unset = wall clock; ISO timestamp pins the dataset for exact reproducibility |
+| `BATCH_SIZE` | gaia | `10000` |
+| `SEED_RESET` | gaia | `false`; `true` drops the orders collection and re-seeds, which refreshes the 6-month window to the current date |
+
+Removed by PLAN1: `DB_ADAPTER`, `WRITE_BEHIND_MS` and `LOAD_BATCH_SIZE` (antikythera), `MONGO_*` and `EXEC_MODE` (hermes).
 
 **Server process:** `NODE_OPTIONS=--max-old-space-size=3072`. Logging uses Fastify's built-in pino.
 
@@ -381,12 +406,12 @@ Pivot is not supported; reject the request if `pivotMode` is set.
 
 **Set filter values.** `setFilterValues{colId}` returns the distinct dictionary values for the current trader scope, sorted. It's capped at 5,000 values; free-text-like columns (orderId, clientOrderId, parentOrderId) use a text filter instead.
 
-**Trader scope.** `hello.traderId` is either `'ALL'` or a trader ID. It's applied as an implicit filter on every query; a new `hello` resets the subscription.
+**Trader scope.** `hello.userId` names the signed-in user (PLAN1 phase 1.6; `infra/config/entitlements.json`). `hello.traderId` is either `'ALL'` or a trader ID the user is entitled to: `ALL` means all of the user's traders (everyone for the supervisor). The resolved scope is applied as an implicit filter on every query, summary and filter-values list; a new `hello` resets the subscription. An unknown user gets `UNKNOWN_USER`, a trader the user may not see `FORBIDDEN`.
 
 ## Appendix C: Protocol types (packages/logos/src/protocol.ts)
 ```ts
 type ClientMsg =
-  | { t: 'hello'; userId?: string; traderId: string; codec: 'json' | 'msgpack'; clientId: string }   // userId: PLAN1, optional until 1.6
+  | { t: 'hello'; userId: string; traderId: string; codec: 'json' | 'msgpack'; clientId: string }   // userId: required from PLAN1 phase 1.6
   | { t: 'getRows'; reqId: number; req: SsrmRequest }
   | { t: 'setFilterValues'; reqId: number; colId: string }
   | { t: 'command'; reqId: number; orderId: string; action: 'CANCEL' | 'PAUSE' | 'RESUME' }

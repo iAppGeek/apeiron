@@ -102,7 +102,9 @@ export class MemoryBus implements Bus {
   private readonly servers = new Map<string, RequestHandler>();
   private readonly buckets = new Map<string, MemoryKvState>();
 
-  constructor(streams: Record<string, string[]> = { ORDERS: ['orders.*'], PRICES: ['prices.*'] }) {
+  constructor(
+    streams: Record<string, string[]> = { PRICES: ['prices.*'], EXEC: ['exec.reports'], VENUE: ['exec.commands'] },
+  ) {
     for (const [name, subjects] of Object.entries(streams)) this.streams.set(name, { subjects, log: [] });
   }
 

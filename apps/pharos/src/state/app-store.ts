@@ -31,6 +31,10 @@ export type AppState = {
   /** True once the server has accepted a hello, so the grid may start requesting rows. */
   welcomed: boolean;
   codec: CodecName;
+  /** The user this tab signs in as, null until one is picked; reconnects send this one. */
+  requestedUser: string | null;
+  /** The user the server confirmed in a welcome, with their display name. */
+  confirmedUser: { userId: string; name: string } | null;
   /** The trader the user picked last; reconnects send this one. */
   requestedTrader: string;
   /** The trader the server confirmed in a welcome; the selector shows this one. */
@@ -68,6 +72,8 @@ export type AppActions = {
   setCloseReason: (reason: string) => void;
   setWelcomed: (traders: TraderInfo[]) => void;
   setCodec: (codec: CodecName) => void;
+  setRequestedUser: (userId: string | null) => void;
+  setConfirmedUser: (user: { userId: string; name: string } | null) => void;
   setRequestedTrader: (traderId: string) => void;
   setConfirmedTrader: (traderId: string) => void;
   setRowCount: (rowCount: number | null, grouped?: boolean) => void;
@@ -94,6 +100,8 @@ export const INITIAL_APP_STATE: AppState = {
   closeHistory: [],
   welcomed: false,
   codec: 'json',
+  requestedUser: null,
+  confirmedUser: null,
   requestedTrader: 'ALL',
   confirmedTrader: 'ALL',
   traders: [],
@@ -133,6 +141,12 @@ export const useAppStore = create<AppState & AppActions>()((set) => ({
   },
   setCodec: (codec): void => {
     set({ codec });
+  },
+  setRequestedUser: (requestedUser): void => {
+    set({ requestedUser });
+  },
+  setConfirmedUser: (confirmedUser): void => {
+    set({ confirmedUser });
   },
   setRequestedTrader: (requestedTrader): void => {
     set({ requestedTrader });

@@ -1,4 +1,4 @@
-import { COLUMNS, type CommandAction } from '@apeiron/logos';
+import { COLUMNS, type AmendChanges, type CommandAction, type Order } from '@apeiron/logos';
 import type {
   BodyScrollEvent,
   DefaultMenuItem,
@@ -10,6 +10,7 @@ import type {
 } from 'ag-grid-community';
 import { AgGridProvider, AgGridReact } from 'ag-grid-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { AmendDialog } from '../components/AmendDialog';
 import { NewOrdersBadge } from '../components/NewOrdersBadge';
 import type { AppController } from '../state/app-controller';
 import { useAppStore } from '../state/app-store';
@@ -19,7 +20,7 @@ import { createDeltaApplier, type DeltaApplier } from './apply-delta';
 import { buildColumnDefs } from './column-defs';
 import { createDatasource } from './datasource';
 import type { BlotterContext } from './cell-renderers';
-import { describeCommandFailure, describeFailure } from './errors';
+import { describeAmendFailure, describeCommandFailure, describeFailure } from './errors';
 import { fetchFilterValues } from './filter-values';
 import { computeRowId, getRowId } from './get-row-id';
 import {
@@ -111,9 +112,41 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
     [client, pending],
   );
 
+  /** The order whose amend dialog is open: a copy of the row as it was when the dialog opened. */
+  const [amending, setAmending] = useState<Order | null>(null);
+
+  const openAmend = useCallback(
+    (orderId: string): void => {
+      const data: unknown = api?.getRowNode(orderId)?.data;
+      if (typeof data === 'object' && data !== null) setAmending({ ...(data as Order) });
+    },
+    [api],
+  );
+
+  const runAmend = useCallback(
+    (orderId: string, changes: AmendChanges): void => {
+      pending.begin(orderId);
+      client
+        .amend(orderId, changes)
+        .then(() => {
+          useAppStore.getState().pushToast('info', `Amended ${orderId}`);
+        })
+        .catch((error: unknown) => {
+          const failure =
+            error instanceof RequestError ? { code: error.code, message: error.message } : { code: 'INTERNAL' as const, message: '' };
+          useAppStore.getState().pushToast('error', describeAmendFailure(failure.code, orderId, failure.message));
+        })
+        .finally(() => {
+          pending.end(orderId);
+        });
+    },
+    [client, pending],
+  );
+
   const getContextMenuItems = useCallback(
-    (params: GetContextMenuItemsParams): (DefaultMenuItem | MenuItemDef)[] => buildContextMenuItems(orderTargetOf(params.node), runCommand),
-    [runCommand],
+    (params: GetContextMenuItemsParams): (DefaultMenuItem | MenuItemDef)[] =>
+      buildContextMenuItems(orderTargetOf(params.node), runCommand, openAmend),
+    [runCommand, openAmend],
   );
 
   const onGridReady = useCallback((event: GridReadyEvent) => {
@@ -245,6 +278,18 @@ export function Blotter({ client, controller }: BlotterProps): ReactElement {
         />
       </AgGridProvider>
       <NewOrdersBadgeConnected api={api} />
+      {amending !== null && (
+        <AmendDialog
+          order={amending}
+          onClose={() => {
+            setAmending(null);
+          }}
+          onSubmit={(changes) => {
+            runAmend(amending.orderId, changes);
+            setAmending(null);
+          }}
+        />
+      )}
       {overlay !== null && (
         <div className="overlay" role="status" data-testid="blotter-overlay">
           <div className="overlay-card">

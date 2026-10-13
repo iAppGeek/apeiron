@@ -54,10 +54,18 @@ services:
       NATS_URL: nats://nats:4222
       PRICE_WAIT_MS: ${PRICE_WAIT_MS:-10000}
       CATCHUP_MAX_PENDING: ${CATCHUP_MAX_PENDING:-100}
+      WARM_VIEWS: ${WARM_VIEWS:-default}
+      WARM_ROUNDS: ${WARM_ROUNDS:-3}
+      DRAIN_MS: ${DRAIN_MS:-2000}
+      COMMAND_TIMEOUT_MS: ${COMMAND_TIMEOUT_MS:-5000}
+      ACK_WAIT_V_MS: ${ACK_WAIT_V_MS:-2000}
       FLUSH_MS: ${FLUSH_MS:-50}
       FLUSH_BUDGET_MS: ${FLUSH_BUDGET_MS:-40}
       MAX_TRACKED_BLOCKS: ${MAX_TRACKED_BLOCKS:-100}
       LOAD_PRESET: ${LOAD_PRESET:-medium}
+      ENTITLEMENTS_FILE: /config/entitlements.json
+    volumes:
+      - ./infra/config/entitlements.json:/config/entitlements.json:ro
     # Caps the container so memory behaviour is defined (and matches the remote box budget).
     mem_limit: 3g
     ports:
@@ -68,7 +76,8 @@ services:
       themis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      # Ready means loaded, caught up, priced and warm (not just the process being up: that is /health/live).
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health/ready').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -95,6 +104,8 @@ services:
       GROUP_COMMIT_MS: ${GROUP_COMMIT_MS:-20}
       GROUP_COMMIT_MAX: ${GROUP_COMMIT_MAX:-500}
       REBUILD_PROJECTION: ${REBUILD_PROJECTION:-0}
+      # The same value goes to hermes, which drops instructions older than this (themis has answered them TIMEOUT).
+      VENUE_TIMEOUT_MS: ${VENUE_TIMEOUT_MS:-5000}
     mem_limit: 1g
     ports:
       - "127.0.0.1:4200:4200"
@@ -111,6 +122,38 @@ services:
       start_period: 300s
     restart: unless-stopped
 
+  # The price feed: a random walk per pair published as prices.<PAIR>. Knows nothing about orders. It starts each
+  # walk from the last price on the PRICES stream (so a restart carries on), else from the order service's levels.
+  helios:
+    profiles: [core]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      args:
+        APP: helios
+    image: ${REGISTRY:-local}/apeiron/helios:${TAG:-dev}
+    environment:
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HEALTH_PORT: "4300"
+      HELIOS_SEED: ${HELIOS_SEED:-}
+    ports:
+      - "127.0.0.1:4300:4300"
+    # After themis, so a first start (no last price on the stream yet) can ask it for the open orders' levels
+    # instead of giving up after 10 s and starting every pair at its reference level.
+    depends_on:
+      nats:
+        condition: service_healthy
+      themis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4300/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
   hermes:
     profiles: [core]
     build:
@@ -119,19 +162,19 @@ services:
       args:
         APP: hermes
     image: ${REGISTRY:-local}/apeiron/hermes:${TAG:-dev}
+    # No database: hermes is the venue. It loads the open orders from themis and sends submissions and execution reports.
     environment:
-      MONGO_URL: mongodb://mongo:27017
-      MONGO_DB: ${MONGO_DB:-blotter}
       NATS_URL: nats://nats:4222
       LOAD_PRESET: ${LOAD_PRESET:-medium}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       HEALTH_PORT: "4100"
+      VENUE_TIMEOUT_MS: ${VENUE_TIMEOUT_MS:-5000}
     depends_on:
-      mongo:
-        condition: service_healthy
       nats:
         condition: service_healthy
       themis:
+        condition: service_healthy
+      helios:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4100/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]

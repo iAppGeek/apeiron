@@ -58,6 +58,24 @@ export function isRetryable(code: FailureCode): boolean {
   return code === 'NOT_READY' || code === 'DISCONNECTED' || code === 'TIMEOUT';
 }
 
+/** The toast text for an amend the server refused: its own reason for a refused amend or state, the generic text otherwise. */
+export function describeAmendFailure(code: FailureCode, orderId: string, serverMessage?: string): string {
+  const head = `Amend failed for ${orderId}`;
+  switch (code) {
+    case 'INVALID_AMEND':
+    case 'INVALID_TRANSITION':
+      return `${head}: ${serverMessage ? `${serverMessage}.` : describeFailure(code)}`;
+    case 'UNKNOWN_ORDER':
+      return `${head}: the order is no longer active (it may have completed).`;
+    case 'INTERNAL':
+      return serverMessage === 'command timed out'
+        ? `${head}: the middleware did not answer in time. Check the order before retrying.`
+        : `${head}: ${describeFailure(code, serverMessage)}`;
+    default:
+      return `${head}: ${describeFailure(code, serverMessage)}`;
+  }
+}
+
 const VERB: Record<CommandAction, string> = { CANCEL: 'Cancel', PAUSE: 'Pause', RESUME: 'Resume' };
 
 /**

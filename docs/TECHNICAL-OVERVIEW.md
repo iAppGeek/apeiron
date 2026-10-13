@@ -109,15 +109,16 @@ flowchart LR
   end
   NG["nginx :8080<br/>static + /ws proxy"]
   HE["hermes<br/>prices + lifecycle"]
-  NA[("NATS JetStream<br/>ORDERS, PRICES")]
+  NA[("NATS JetStream<br/>PRICES, EXEC, VENUE, KV ORDER_STATE")]
   MO[("MongoDB")]
   GA["gaia (seed)"]
   PR["Prometheus + Grafana"]
   TA["talos (50 clients)"]
   W <-->|"WebSocket: JSON text or msgpack binary"| NG <--> WS
-  HE -->|"prices.PAIR, orders.events, control.state"| NA
+  HE -->|"orders.submit, exec.reports, control.state"| NA
+  HL -->|"prices.PAIR"| NA
   NA -->|"durable consumer blotter-server"| LIVE
-  WS -->|"orders.commands, control.load"| NA --> HE
+  WS -->|"orders.cmd (request), control.load"| NA --> HE
   WB -->|"upsertMany"| MO
   MO -->|"loadAll at startup"| ST
   GA --> MO
@@ -333,7 +334,9 @@ per-tick **ChangeSet** ([`query/changeset.ts`](../apps/antikythera/src/query/cha
   row: `{row, isNew, fields, prev, lo/hi field mask, ts}`. `prev` keeps the *first* old value per field in the tick, and
   `ts` the earliest source-event timestamp (used for `delta.srcTs`).
 - **Price join:** `liveByPair` maps each pair to its LIVE/PAUSED rows; a tick reprices only those rows (market bid/ask/mid,
-  spread, distance-to-limit, slippage, unrealised P&L), and `lastUpdateTime` never moves backwards (resilience bug 3).
+  spread, distance-to-limit, unrealised P&L: `deriveOverlay`, a pure function of the record and the quote). The blotter
+  never writes `lastUpdateTime` (only the order service does), so a price move is not a change to the order and the column
+  no longer ticks; this is what the old "never moves backwards" guard (resilience bug 3) turned into.
 - `View.applyChanges` classifies each changed row with a 64-bit field-mask intersection:
   - **value-only**: no changed field is in the view's sort, filter or group columns → nothing moves; clients holding the
     row get the new values.
@@ -426,17 +429,15 @@ When a held client asks for a block while adds are pending, the delta carrying t
 The blotter no longer writes to Mongo (the write-behind pass was removed). [`apps/themis`](../apps/themis/src/themis.ts)
 is the order service of record; Mongo is its durable copy.
 
-- `themis` consumes `orders.events` through its own durable consumer, applies each event to the full order (`v + 1`),
-  and a group committer ([`committer.ts`](../apps/themis/src/committer.ts)) stores each batch (at most 20 ms or 500
+- `themis` takes hermes's submissions and execution reports (durable consumer `themis-exec`), applies each to the full
+  order with the shared rules (`v + 1`), and a group committer ([`committer.ts`](../apps/themis/src/committer.ts)) stores each batch (at most 20 ms or 500
   changes) with `upsertMany`, **then** puts the new records into the `ORDER_STATE` bucket in the same order, **then**
-  acknowledges the events. A failed write is retried with backoff, so nothing is published before it is stored and
-  nothing is dropped. **Price-only changes are never persisted** (they are not events).
-- The `blotter-server` consumer is acked as soon as a flush has applied the events to the store. Its restart still loads
-  from Mongo until phase 1.3a, so for the few tens of milliseconds themis needs to commit, a restarting blotter can miss an
-  event; the move to the bucket removes that window.
-- Both consumers use `AckPolicy.All`; a crash replays exactly the events not yet acknowledged.
-- Replays are safe because NATS events carry **absolute** post-change values (`filledQty: 4_200_000`, never `+100_000`),
-  so applying one twice is an idempotent upsert.
+  acknowledges the input. A failed write is retried with backoff, so nothing is published before it is stored and
+  nothing is dropped. **Price-only changes are never persisted** (the blotter's overlay is not data).
+- The blotter holds no consumer position: it watches the bucket, and a restart loads each order's latest state again.
+- `themis-exec` uses `AckPolicy.All`; a crash replays exactly the reports not yet acknowledged, and the `execSeq` rule drops the
+  ones that were already applied.
+- Replays are safe because a report is applied only if its `execSeq` is above the last accepted one.
 - CP-4 R5: `ack_wait` 60 s, `max_ack_pending` 20,000, pulls bounded to 500 messages.
 
 ## 5. Protocol
@@ -447,7 +448,8 @@ Authoritative: [`packages/logos/src/protocol.ts`](../packages/logos/src/protocol
 
 | Client → server | Purpose |
 |---|---|
-| `hello{traderId, codec, clientId}` | (re)start a session: trader scope and codec; always JSON text; resets tracking |
+| `hello{userId, traderId, codec, clientId}` | (re)start a session: user, trader scope (within the user's entitlements) and codec; always JSON text; resets tracking |
+| `amend{reqId, orderId, changes}` | change the limit price, quantity, end time or urgency of a working order (`PENDING_START`, `LIVE`, `PAUSED`); answered like `command` with `ack` or `error` (`INVALID_AMEND`, `INVALID_TRANSITION`, `UNKNOWN_ORDER`, `FORBIDDEN`) |
 | `getRows{reqId, req}` | one SSRM block (`startRow`, `endRow`, `rowGroupCols`, `groupKeys`, `valueCols`, `sortModel`, `filterModel`) |
 | `setFilterValues{reqId, colId}` | distinct values for a set filter, trader-scoped, ≤ 5,000 |
 | `command{reqId, orderId, action}` | `CANCEL` / `PAUSE` / `RESUME` |
@@ -494,12 +496,17 @@ Client messages are validated with zod; server messages are not, for speed.
 
 `commandId = "<clientId>:<reqId>"` ([`live/commands.ts`](../apps/antikythera/src/live/commands.ts)).
 
-1. The server pre-checks the transition against the store (`canApplyCommand`); an impossible one is answered at once
-   with `INVALID_TRANSITION` / `UNKNOWN_ORDER`.
-2. Otherwise it publishes `orders.commands` with the `commandId`.
-3. Hermes, the authority, answers with an `orders.events` `UPDATE` carrying the `commandId`, or a `REJECT`.
-4. The server acks the client **after the flush that applied the UPDATE has sent its deltas**, so the client always sees
-   the status change before the ack. A command unanswered for 5 s is an error.
+1. The server sends a request on `orders.cmd` with the `commandId` (it does not pre-check: `themis` is the only authority).
+2. `themis` checks the lifecycle, sends the venue an instruction (`exec.commands`) and replies when hermes's execution
+   report is stored and published: `{ ok, v }` with the order's new version, or a refusal (`INVALID_TRANSITION`,
+   `UNKNOWN_ORDER`, a venue refusal as `INVALID_TRANSITION`, `TIMEOUT` as INTERNAL "command timed out").
+3. The server acks the client **once its store holds version `v`** (the flush that applied the record has sent its
+   deltas), so the client sees the status change before the ack; if the record has not arrived after 2 s it acks anyway.
+   A command with no reply in 5 s is an error.
+
+An **amend** takes the same route (`orders.cmd` with `kind: 'amend'`, same `commandId` and ack rule). `themis` applies it with
+`applyAmend` (rules in `packages/logos/src/rules.ts`, shared with the dialog's `checkAmend`): no venue instruction, a new
+version, `remainingQty`, `pctComplete`, `notionalUsd`, `filledNotionalUsd` and `durationMins` recomputed.
 
 Measured (phase 6, [`PHASE-6.md`](checkpoints/PHASE-6.md)): click to status on screen **p50 58 ms / p95 89 ms**; under 50
 clients (CP-4 final) command ack **p50 38 ms / p95 66–67 ms**.
@@ -966,7 +973,8 @@ flowchart LR
 - **The three checks** (after the stream stops and everything is quiet; [`oracle.ts`](../e2e/support/oracle.ts),
   [`sampler.ts`](../e2e/support/sampler.ts)):
   1. **Model vs server.** A fresh protocol client reads every created and touched order; every field must equal the
-     model (except `lastUpdateTime`, the server's clock, and the quote fields of orders closed within a flush window).
+     model, every field (`lastUpdateTime` and the market snapshot of closed orders included, since the blotter writes
+     neither).
   2. **Server vs screen.** Every row each page holds must equal a fresh server read at the same position, field for field
      including `lastUpdateTime`; plus the root row count, group `childCount`s and aggregates (relative 1e-9), and the
      status chips.
@@ -1056,7 +1064,6 @@ From PLAN.md's decisions table and "Decisions log", and the review files.
 | **Non-default-sort anchoring drift** | Under a sort other than `createdAt desc`, rows arrive by background refresh; the first refresh after scrolling can drift about one row | CP-5 review |
 | **Connect-storm cold burst** | 50 clients opening cold views at the same instant queue on one thread: startup burst max 265 ms (json) / 445 ms (msgpack) | CP-4 §12.1 |
 | **Rare long stalls** | Single event-loop stalls of 200–350 ms show in the longest-stall figure (p99 stays 19–23 ms) | CP-4 §12.1 |
-| **`lastUpdateTime` after a restart** | Price-driven changes aren't persisted, so after a server restart an open order's update time steps back for under a second until the next tick | CP-6, TESTING.md |
 | **Saturated links** | At 16 KB/s the client's heartbeat gives up before the server does; tick-to-screen reaches 20 s+ while throttled | TESTING.md |
 | **Tracking bound** | The server follows at most 2,000 rows below the top of a route; rows beyond that in an unrefreshed cache would go stale (not observed) | TESTING.md |
 | **`getRowNode` is a linear scan** in SSRM | Cheap at ≤ 2,000 cached rows; won't scale to a much larger client cache | CP-3 |

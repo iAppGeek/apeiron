@@ -1,9 +1,26 @@
-import { MemoryBus, generateOrders, type Order, type OrderCommand, type OrderEvent, type PriceTick } from '@apeiron/logos';
-import { afterEach, describe, expect, it } from 'vitest';
+import { startThemis, type Themis } from '@apeiron/themis/themis';
+import { InMemoryOrderRepository, toStoredOrder } from '@apeiron/mnemosyne';
+import {
+  BUCKETS,
+  MemoryBus,
+  OVERLAY_FIELDS,
+  PAIRS,
+  generateOrders,
+  parseExecReport,
+  type CurrencyPair,
+  type ExecReport,
+  type Order,
+  type OrderCommandRequest,
+  type OrderStateRecord,
+  type PriceTick,
+} from '@apeiron/logos';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDriver, type Driver } from './driver';
-import { OrderModel } from './model';
+import { checkVenueVsService } from './oracle';
 
 const SEED_NOW = Date.UTC(2026, 9, 6, 12, 0, 0);
+const referenceMids = (): Record<CurrencyPair, number> => Object.fromEntries(PAIRS.map((p) => [p.pair, p.mid])) as Record<CurrencyPair, number>;
+const silent = { error: () => undefined, warn: () => undefined, info: () => undefined, debug: () => undefined };
 
 function current(): Order[] {
   const out: Order[] = [];
@@ -18,77 +35,161 @@ const wait = (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
-type Capture = { events: OrderEvent[]; ticks: PriceTick[]; commands: OrderCommand[] };
+type World = { bus: MemoryBus; repo: InMemoryOrderRepository; themis: Themis; maxId: string | null };
+
+/** The order service running for real on an in-memory bus, holding the open orders; the driver talks to it as it does in the stack. */
+async function world(bus: MemoryBus = new MemoryBus()): Promise<World> {
+  const repo = new InMemoryOrderRepository();
+  await repo.upsertMany(current().map(toStoredOrder));
+  const themis = await startThemis({ bus, repo, log: silent, groupCommitMs: 2, groupCommitMax: 200, reconcileWindowMin: 15, rebuildProjection: false });
+  return { bus, repo, themis, maxId: await repo.maxOrderId() };
+}
+
+type Capture = { reports: ExecReport[]; ticks: PriceTick[]; commands: OrderCommandRequest[] };
 
 async function capture(bus: MemoryBus): Promise<Capture> {
-  const out: Capture = { events: [], ticks: [], commands: [] };
-  await bus.subscribe('orders.events', (p) => out.events.push(p as OrderEvent));
+  const out: Capture = { reports: [], ticks: [], commands: [] };
+  const request = bus.request.bind(bus);
+  vi.spyOn(bus, 'request').mockImplementation((subject, payload, timeoutMs) => {
+    if (subject === 'orders.cmd') out.commands.push(payload as OrderCommandRequest);
+    return request(subject, payload, timeoutMs);
+  });
+    await bus.subscribe('exec.reports', (p) => {
+    const parsed = parseExecReport(p);
+    if (parsed.ok) out.reports.push(parsed.value);
+  });
   await bus.subscribe('prices.*', (p) => out.ticks.push(p as PriceTick));
-  await bus.subscribe('orders.commands', (p) => out.commands.push(p as OrderCommand));
   return out;
 }
 
+const OVERLAY = new Set<string>(OVERLAY_FIELDS);
+
 describe('createDriver', () => {
   let driver: Driver | null = null;
+  let service: Themis | null = null;
   afterEach(async () => {
-    await driver?.stop();
+    await driver?.dispose();
+    await service?.stop();
+    driver = null;
+    service = null;
   });
 
-  it('publishes a seeded stream whose model equals replaying the published events', async () => {
-    const bus = new MemoryBus();
-    const seen = await capture(bus);
-    const orders = current();
-    const maxId = orders.map((o) => o.orderId).sort().at(-1) ?? null;
+  const make = (w: World, extra: Partial<Parameters<typeof createDriver>[0]> = {}): Driver => {
+    service = w.themis;
     driver = createDriver({
-      bus,
-      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve(maxId) },
+      bus: w.bus,
+      repo: { loadOpen: () => w.repo.loadOpen(), latestMidsByPair: () => Promise.resolve(referenceMids()), maxOrderId: () => w.repo.maxOrderId() },
       seed: 7,
       rate: 'normal',
       stepMs: 10,
-      pauseEveryMs: 50,
-      resumeAfterMs: 100,
+      pauseEveryMs: 0,
+      ...extra,
     });
-    await driver.start();
-    await wait(800);
-    await driver.stop();
+    return driver;
+  };
 
-    const stats = driver.stats();
+  it('feeds its model from the order service: every order the model holds equals the record the service published', async () => {
+    const w = await world();
+    const seen = await capture(w.bus);
+    const d = make(w, { pauseEveryMs: 50, resumeAfterMs: 100 });
+    await d.start();
+    await wait(1_000);
+    await d.stop();
+    await w.themis.flush();
+    await d.settled(200, 5_000);
+
+    const stats = d.stats();
     expect(stats.publishErrors).toBe(0);
     expect(stats.events).toBeGreaterThan(20);
     expect(stats.ticks).toBeGreaterThan(0);
-    expect(driver.startMaxOrderId()).toBe(maxId);
+    expect(seen.reports.length).toBeGreaterThan(20);
+    expect(d.startMaxOrderId()).toBe(w.maxId);
 
-    // The model is exactly what an independent replay of the published events and ticks gives.
-    const replay = new OrderModel(current());
-    for (const e of seen.events) replay.applyEvent(e);
-    for (const t of seen.ticks) replay.applyTick(t);
-    const ids = driver.model().idsToVerify();
+    const ids = d.model().idsToVerify();
     expect(ids.length).toBeGreaterThan(0);
-    expect(replay.idsToVerify().sort()).toEqual(ids.sort());
-    for (const id of ids) expect(driver.model().expected(id)).toEqual(replay.expected(id));
+    for (const id of ids) {
+      const record = (await w.bus.kv(BUCKETS.orderState).get(id))?.value as OrderStateRecord;
+      const expected = d.model().expected(id)?.order as Order;
+      for (const field of Object.keys(record.order) as (keyof Order)[]) {
+        // An open order carries the overlay of the last tick on top of its record; every other field is the record's.
+        if (OVERLAY.has(field) && (record.order.status === 'LIVE' || record.order.status === 'PAUSED')) continue;
+        expect(expected[field], `${id}.${field}`).toEqual(record.order[field]);
+      }
+    }
 
-    // New orders carry ascending ids above the starting maximum.
-    const created = driver.model().createdIds;
+    // New orders carry ascending ids above the starting maximum, and the driver counted each once.
+    const created = d.model().createdIds;
+    expect(created.length).toBeGreaterThan(0);
     expect(created.length).toBe(stats.created);
-    expect(created.every((id, i) => id > (created[i - 1] ?? maxId ?? ''))).toBe(true);
+    expect(created.every((id, i) => id > (created[i - 1] ?? w.maxId ?? ''))).toBe(true);
   });
 
-  it('is deterministic for a seed', async () => {
+  it('keeps a log of what the venue sent, and replaying it reproduces what the order service stored', async () => {
+    const w = await world();
+    const seen = await capture(w.bus);
+    const d = make(w, { pauseEveryMs: 50, resumeAfterMs: 100 });
+    await d.start();
+    await wait(1_000);
+    await d.stop();
+    await w.themis.flush();
+    await d.settled(200, 5_000);
+    const log = d.venueLog();
+    expect([...log.reports.values()].flat()).toHaveLength(seen.reports.length);
+    expect(log.reports.size).toBeGreaterThan(5);
+    for (const [orderId, list] of log.reports) {
+      expect(log.startOf(orderId), orderId).toBeDefined();
+      expect(list.map((r) => r.execSeq)).toEqual([...list.map((r) => r.execSeq)].sort((a, b) => a - b));
+    }
+    const check = await checkVenueVsService({ log, kv: w.bus.kv(BUCKETS.orderState) });
+    expect(check.failures).toEqual([]);
+    expect(check.stats['ordersCompared']).toBe(log.reports.size);
+  });
+
+  it('stops publishing prices while paused (the model sees none either) and carries on when resumed', async () => {
+    const w = await world();
+    const seen = await capture(w.bus);
+    const d = make(w);
+    await d.start();
+    await wait(300);
+    d.pausePrices(true);
+    const ticksBefore = seen.ticks.length;
+    const modelTicksBefore = d.stats().ticks;
+    await wait(500);
+    expect(seen.ticks.length).toBe(ticksBefore);
+    expect(d.stats().ticks).toBe(modelTicksBefore);
+    expect(seen.reports.length).toBeGreaterThan(0);
+    d.pausePrices(false);
+    await wait(400);
+    await d.stop();
+    expect(seen.ticks.length).toBeGreaterThan(ticksBefore);
+  });
+
+  it('runs hermes and helios for real: ticks come from the price feed, and reports are numbered per order', async () => {
+    const w = await world();
+    const seen = await capture(w.bus);
+    const d = make(w);
+    await d.start();
+    await wait(600);
+    await d.stop();
+    expect(new Set(seen.ticks.map((t) => t.pair)).size).toBe(PAIRS.length);
+    const byOrder = new Map<string, number[]>();
+    for (const r of seen.reports) byOrder.set(r.orderId, [...(byOrder.get(r.orderId) ?? []), r.execSeq]);
+    expect(byOrder.size).toBeGreaterThan(5);
+    for (const list of byOrder.values()) expect(list).toEqual([...list].sort((a, b) => a - b));
+  });
+
+  it('starts the same way for a seed: the first reports (the startup reconciliation) are identical', async () => {
     const run = async (): Promise<string[]> => {
-      const bus = new MemoryBus();
-      const seen = await capture(bus);
-      const d = createDriver({
-        bus,
-        repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
-        seed: 99,
-        rate: 'normal',
-        stepMs: 10,
-        pauseEveryMs: 0,
-      });
+      const w = await world();
+      const seen = await capture(w.bus);
+      const d = make(w, { seed: 99 });
       await d.start();
-      driver = d;
       await d.stop();
-      return seen.events.slice(0, 30).map((e) => (e.type === 'NEW' ? e.order.orderId : e.type === 'UPDATE' ? e.order.orderId : e.orderId));
+      await d.dispose();
+      await w.themis.stop();
+      service = null;
+      driver = null;
+      return seen.reports.slice(0, 30).map((r) => `${r.type}:${r.orderId}:${r.execSeq}`);
     };
     const a = await run();
     const b = await run();
@@ -97,34 +198,27 @@ describe('createDriver', () => {
   });
 
   it('issues PAUSE commands for LIVE orders and RESUME for the ones it paused', async () => {
-    const bus = new MemoryBus();
-    const seen = await capture(bus);
-    driver = createDriver({
-      bus,
-      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
-      seed: 3,
-      rate: 'normal',
-      stepMs: 10,
-      pauseEveryMs: 20,
-      resumeAfterMs: 40,
-    });
-    await driver.start();
-    await wait(400);
-    await driver.stop();
-    const actions = new Set(seen.commands.map((c) => c.action));
+    const w = await world();
+    const seen = await capture(w.bus);
+    const d = make(w, { seed: 3, pauseEveryMs: 20, resumeAfterMs: 40 });
+    await d.start();
+    await wait(500);
+    await d.stop();
+    const actions = new Set(seen.commands.map((c) => (c.kind === 'action' ? c.action : c.kind)));
     expect(actions.has('PAUSE')).toBe(true);
-    expect(driver.stats().commands.pause).toBe(seen.commands.filter((c) => c.action === 'PAUSE').length);
-    expect(seen.commands.every((c) => c.requestedBy === 'driver' && c.commandId.startsWith('driver:'))).toBe(true);
+    expect(d.stats().commands.pause).toBe(seen.commands.filter((c) => c.kind === 'action' && c.action === 'PAUSE').length);
+    expect(seen.commands.every((c) => c.userId === 'driver' && c.commandId.startsWith('driver:'))).toBe(true);
   });
 
-  it('retries a publish that fails once and counts it as a retry, not an error', async () => {
+  it('retries a report publish that fails once and counts it as a retry, not an error', async () => {
     const bus = new MemoryBus();
+    const w = await world(bus);
     let failed = 0;
     const flaky = new Proxy(bus, {
       get(target, prop, receiver): unknown {
         if (prop === 'publish') {
           return (subject: string, payload: unknown): Promise<void> => {
-            if (subject === 'orders.events' && failed < 3) {
+            if (subject === 'exec.reports' && failed < 3) {
               failed += 1;
               return Promise.reject(new Error('timeout'));
             }
@@ -134,45 +228,42 @@ describe('createDriver', () => {
         return Reflect.get(target, prop, receiver) as unknown;
       },
     });
-    driver = createDriver({
-      bus: flaky,
-      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
-      seed: 1,
-      rate: 'normal',
-      stepMs: 10,
-      pauseEveryMs: 0,
-      retryDelayMs: 1,
-    });
-    await driver.start();
-    await wait(150);
-    await driver.stop();
+    const d = make({ ...w, bus: flaky }, { seed: 1, retryDelayMs: 1 });
+    await d.start();
+    await wait(300);
+    await d.stop();
     expect(failed).toBe(3);
-    expect(driver.stats().publishRetries).toBeGreaterThan(0);
-    expect(driver.stats().publishErrorSamples).toEqual([]);
-    expect(driver.stats().publishErrors).toBe(0);
+    expect(d.stats().publishRetries).toBeGreaterThan(0);
+    expect(d.stats().publishErrorSamples).toEqual([]);
+    expect(d.stats().publishErrors).toBe(0);
   });
 
-  it('counts a failed publish, because the model would then hold an event the bus never got', async () => {
+  it('counts a report publish that keeps failing, because the model would then be missing a change the bus never got', async () => {
     const bus = new MemoryBus();
+    const w = await world(bus);
     const failing = new Proxy(bus, {
       get(target, prop, receiver): unknown {
-        if (prop === 'publish') return (subject: string): Promise<void> => (subject === 'orders.events' ? Promise.reject(new Error('down')) : Promise.resolve());
+        if (prop === 'publish') return (subject: string, payload: unknown): Promise<void> => (subject === 'exec.reports' ? Promise.reject(new Error('down')) : target.publish(subject, payload));
         return Reflect.get(target, prop, receiver) as unknown;
       },
     });
-    driver = createDriver({
-      bus: failing,
-      repo: { loadOpen: () => Promise.resolve(current().map((order) => ({ order }))), maxOrderId: () => Promise.resolve('ALG00999999') },
-      seed: 1,
-      rate: 'normal',
-      stepMs: 10,
-      pauseEveryMs: 0,
-      retryDelayMs: 1,
-    });
-    await driver.start();
-    await wait(100);
-    await driver.stop();
-    expect(driver.stats().publishErrors).toBeGreaterThan(0);
-    expect(driver.stats().publishErrorSamples).toEqual(['Error: down']);
+    const d = make({ ...w, bus: failing }, { seed: 1, retryDelayMs: 1 });
+    await d.start();
+    await wait(200);
+    await d.stop();
+    expect(d.stats().publishErrors).toBeGreaterThan(0);
+    expect(d.stats().publishErrorSamples).toEqual(['Error: down']);
+  });
+
+  it('settles once the order service has stopped publishing records', async () => {
+    const w = await world();
+    const d = make(w);
+    await d.start();
+    await wait(300);
+    await d.stop();
+    const started = Date.now();
+    await d.settled(150, 5_000);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });

@@ -24,8 +24,9 @@ flowchart LR
     NG["nginx<br/>static files + /ws proxy"]
     AN["antikythera<br/>blotter server"]
     TH["themis<br/>order service of record"]
+    HL["helios<br/>price feed"]
     HE["hermes<br/>mock middleware"]
-    NA[("NATS JetStream<br/>ORDERS, PRICES, KV ORDER_STATE")]
+    NA[("NATS JetStream<br/>PRICES, EXEC, VENUE, KV ORDER_STATE")]
     MO[("MongoDB")]
     GA["gaia<br/>seeder (one-shot)"]
     PR["Prometheus + Grafana"]
@@ -33,11 +34,13 @@ flowchart LR
   end
   W <-->|"WebSocket: JSON or msgpack"| NG
   NG <--> AN
-  HE -->|"prices.*, orders.events"| NA
+  HL -->|"prices.*"| NA
+  HE -->|"exec.reports, orders.submit"| NA
+  NA -->|"prices.*"| HE
   NA -->|"durable consumer"| AN
-  AN -->|"orders.commands, control.load"| NA
+  AN -->|"orders.cmd (request), control.load"| NA
   NA --> HE
-  NA -->|"orders.events (durable consumer)"| TH
+  NA -->|"exec.reports (durable consumer themis-exec)"| TH
   TH -->|"group commit"| MO
   TH -->|"ORDER_STATE (after the commit)"| NA
   NA -->|"ORDER_STATE watch at startup, then live"| AN
@@ -52,8 +55,9 @@ flowchart LR
 |---|---|---|
 | **pharos** | `apps/pharos` | The web app. React 19, AG Grid Enterprise 36 with the server-side row model, a Web Worker that owns the socket and the codec, Zustand for small app state. Served by unprivileged nginx |
 | **antikythera** | `apps/antikythera` | The blotter server (Node, Fastify, `ws`). Holds every order in memory, answers `getRows`, ingests the live feed, and pushes deltas. Connects only to NATS |
-| **themis** | `apps/themis` | The order service of record. Owns the database: it consumes `orders.events` through its own durable consumer, applies them to the full order, stores each batch (group commit, 20 ms or 500 changes), then publishes the order's new version to the `ORDER_STATE` KV bucket and acknowledges the event. Keeps a per-order version `v`, rebuilds the bucket (the "projection") from the database when it is missing, and reconciles anything a crash left unpublished. Never reads prices |
-| **hermes** | `apps/hermes` | Mock middleware: a 20-pair random-walk price feed and the order lifecycle (pending to live, fills, new orders), and it executes commands. Stands in for the real order management system |
+| **themis** | `apps/themis` | The order service of record. Owns the database: it takes submissions and execution reports, applies them to the full order, stores each batch (group commit, 20 ms or 500 changes), then publishes the order's new version to the `ORDER_STATE` KV bucket and acknowledges the input. Keeps a per-order version `v`, rebuilds the bucket (the "projection") from the database when it is missing, and reconciles anything a crash left unpublished. Never reads prices |
+| **helios** | `apps/helios` | The price feed: a 20-pair random walk published as `prices.<PAIR>` at 3 ticks per second each, to the `PRICES` stream (file storage, one message per subject). Starts each walk from the last price on the stream, else from the order service's `ref.mids`, else the pair's reference level. Knows nothing about orders |
+| **hermes** | `apps/hermes` | Mock middleware: the order lifecycle (pending to live, fills, new orders), and it executes commands. Follows `prices.*` for fill prices and for the market snapshot of an order that completes; makes no prices. Stands in for the real order management system |
 | **gaia** | `apps/gaia` | The seeder: deterministic generation of 1M orders over six months, bulk-loaded into the database; a second run is a no-op |
 | **talos** | `apps/talos` | The load harness: N WebSocket clients, each with its own sort, filter, group and scroll pattern, reporting latency percentiles and server CPU, RSS and event-loop lag |
 | **logos** | `packages/logos` | The shared vocabulary: the `Order` type, the 50-column metadata, the protocol, the JSON and msgpack codecs, the PRNG and order generator, the `Bus` port, and the order lifecycle state machine |
@@ -71,6 +75,7 @@ and UI depend on neither NATS nor Mongo, and only `themis`, `hermes` (until phas
 sequenceDiagram
   participant G as gaia
   participant M as MongoDB
+  participant P as helios
   participant H as hermes
   participant N as NATS
   participant A as antikythera
@@ -80,13 +85,12 @@ sequenceDiagram
   G->>M: upsertMany (1M orders, batches of 10,000)
   A->>N: watch ORDER_STATE (latest state of every order), then lastPerSubject(PRICES)
   Note over A: columnar store filled; /health ok
-  H->>M: loadCurrent (PENDING_START, LIVE, PAUSED)
+  H->>M: loadOpen (PENDING_START, LIVE, PAUSED)
   loop every 330 ms per pair
-    H->>N: prices.PAIR
+    P->>N: prices.PAIR
   end
-  H->>N: orders.events (new, fills, status changes)
-  N->>A: durable consumer, acked after applying
-  N->>T: durable consumer `themis`, acked after the commit and the KV put
+  H->>N: orders.submit and exec.reports (new orders, fills, status changes)
+  N->>T: durable consumer `themis-exec`, acked after the commit and the KV put
   T->>M: upsertMany (group commit)
   T->>N: ORDER_STATE put (v)
   U->>W: getRows (block, sort, filter, group)
@@ -105,22 +109,33 @@ sequenceDiagram
 2. **Load.** At startup `antikythera` waits for `themis` to mark the `ORDER_STATE` projection ready, reads the bucket's
    initial values straight into the columnar store (about 12 s for 1.7 million rows in a container), sorts the rows by
    `orderId`, then catches up on the changes made meanwhile and takes the last price of every pair. `/health` is 503 with
-   its `stage` (`snapshot`, `catchup`, `prices`) until it is `ready`, and the blotter has no database driver at all.
-3. **Live updates.** `hermes` publishes price ticks (`prices.<PAIR>`, 3 per second per pair) and order events
-   (`orders.events`: new orders, fills, status changes). Both streams are JetStream, and the server reads them through a
-   durable consumer that acknowledges only after an event has been applied, so a restart replays what was missed. `themis` reads the
-   events and persists them; `antikythera` reads the result: each order's latest state from the `ORDER_STATE` bucket (a record is
-   applied only if its `v` is above the row's), and the prices. Until phase 1.5c it still listens to `orders.events`, plain
-   and without a position, for the answer to a command.
+   its `stage` (`snapshot`, `catchup`, `prices`, `warmup`) until it is `ready`, and the blotter has no database driver at all.
+   Ready means fast, not just loaded: before it says so it builds the default views (`createdAt desc` for everyone and for each
+   trader, everyone grouped by status; `WARM_VIEWS` can point at a JSON file of `{traders, req}` entries) and runs
+   `WARM_ROUNDS` passes of blocks 0 to 4 over each. Three endpoints: `/health/live` (the process is up), `/health/ready`
+   (200 only at `ready`; the compose healthcheck) and `/health`, an alias of ready that adds `snapshotMs` and `warmupMs`.
+   On SIGTERM it drains: `/health/ready` turns 503 at once, new WebSocket upgrades are refused, and after `DRAIN_MS` (2 s)
+   every socket is closed with code **1012** ("server restarting"), which pharos answers by reconnecting immediately
+   (keeping its trader, codec and server choices) instead of backing off.
+3. **Live updates.** `helios` publishes price ticks (`prices.<PAIR>`, 3 per second per pair). `hermes` sends new orders as
+   submissions and everything else as execution reports; `themis` stores them and publishes each order's new version to the
+   `ORDER_STATE` bucket. `antikythera` watches that bucket (a record is applied only if its `v` is above the row's) and the
+   prices. A restart replays nothing: it loads the latest state of every order again.
 4. **Deltas.** Every flush tick the server patches its cached views and each client session turns the changes into a
    `delta` for the rows that client holds.
 5. **Grid.** The worker decodes the delta and posts it to the main thread, which applies it synchronously with
    `applyServerSideTransaction` (flash, up/down colour), keeps the viewport anchored, and counts new orders for the badge.
 
-**Commands** go the other way: a context-menu action becomes a `command` message, the server validates it (zod, and a
-state check against the lifecycle machine), publishes `orders.commands`, `hermes` applies it and publishes the resulting
-order event, and the status change reaches every client as an ordinary update. The server acknowledges the command once
-hermes has confirmed it, or answers `error` (shown as a toast) if the transition is not allowed.
+**Commands** go the other way: a context-menu action becomes a `command` message, the server validates the message (zod)
+and sends it to `themis` as a request on `orders.cmd`. `themis` checks it against the lifecycle machine, instructs the venue
+(`exec.commands`) and replies once `hermes`'s execution report is stored and published, with the order's new version. The
+status change reaches every client as an ordinary update; the server acknowledges the command once its own store holds
+that version (or after 2 s), or answers `error` (shown as a toast) with the code `themis` gave.
+
+**Amend** follows the same path with `kind: 'amend'`: the context menu's "Amend order…" opens a dialog (limit price, quantity,
+end time, urgency) that runs the order service's own `checkAmend` to warn before sending. `themis` applies an amend directly
+(no venue instruction): it validates the four fields, recomputes the quantity-derived fields, writes a new version and
+replies with it. `hermes` picks the new parameters up from the `ORDER_STATE` update.
 
 ## Key algorithms
 
@@ -216,6 +231,20 @@ per row and field, `newAbove` summed). The main thread applies each delta with t
 `applyServerSideTransaction`, merging every partial row into the row's current data right before the call: the async API
 would merge two partials against stale data and lose fields. Price cells flash and are coloured up or down for 600 ms.
 
+### Execution path (themis)
+
+`hermes` is only the venue (it has no database, and `orders.events` is gone): new orders go to `themis` as `orders.submit` requests (idempotent on `clientOrderId`; the reply carries the id
+`themis` assigned, ascending), and everything that happens to an order is an execution report on `exec.reports` (stream
+`EXEC`, durable consumer `themis-exec`): `ACTIVATED`, `FILL` (quantity, price and the quote), `CANCELLED`, `PAUSED`,
+`RESUMED`, each with an `execSeq` that hermes numbers per order. `themis` applies a report only if its `execSeq` is above the
+last accepted (a duplicate is acknowledged and counted; gaps are fine), clamps a fill larger than what remains, rejects what
+the lifecycle forbids (storing only the counter, so it is not replayed), and takes the market snapshot and the realised P&L
+of a completion from the quote in the report. At startup hermes asks `themis` for the open orders (`orders.query.open`:
+chunks of at most 500 records published to an inbox, then a summary reply), follows `ORDER_STATE` for changes, and applies a
+record only if it is not behind the reports it has already sent.
+Commands reach hermes as venue instructions (`exec.commands`, durable `hermes-venue`) sent by `themis`; hermes answers
+with the execution report, or a `VENUE_REJECT` report when it cannot carry the instruction out.
+
 ### Persistence (themis)
 
 `antikythera` no longer writes to the database. `themis` stores every lifecycle and fill change (price-only changes are
@@ -230,8 +259,18 @@ Authoritative: `docs/PLAN.md` Appendix C and `packages/logos/src/protocol.ts`.
 
 | Direction | Messages |
 |---|---|
-| client to server | `hello` (trader, codec), `getRows`, `setFilterValues`, `command`, `control` (load preset), `ping` |
+| client to server | `hello` (user, trader, codec), `getRows`, `setFilterValues`, `command`, `amend`, `control` (load preset), `ping` |
 | server to client | `welcome`, `rows`, `filterValues`, `delta`, `summary`, `ack`, `error`, `pong` |
+
+### Users and entitlements
+
+`infra/config/entitlements.json` lists the users and the traders each may see (`["T1"]`, or `["*"]` for the supervisor). It is
+mounted read-only into the blotter (`ENTITLEMENTS_FILE`) and validated at startup; a missing or invalid file stops the
+blotter. A user has one trader or `*` (a view is scoped to one trader or to everyone). `hello` carries the `userId`;
+`ALL` resolves to the user's own trader (or everyone for `*`), so users with different scopes never share a view, a summary
+or a filter-values list. A trader the user may not see is refused with `FORBIDDEN`, an unknown user with `UNKNOWN_USER`, and a
+command on another trader's order with `FORBIDDEN` before anything is sent to `themis`. There are no passwords: pharos asks
+who is looking (a modal on first load, then a header select; `?user=` overrides; `sessionStorage` keeps it per tab).
 
 ## Deployment view
 

@@ -25,7 +25,7 @@ describe('TalosClient hello', () => {
   it('sends hello as JSON text, then resolves on welcome', async () => {
     const { c, s } = setup();
     const p = c.hello('msgpack');
-    expect(s.sent[0]).toEqual({ binary: false, msg: { t: 'hello', traderId: 'T1', codec: 'msgpack', clientId: 'c1' } });
+    expect(s.sent[0]).toEqual({ binary: false, msg: { t: 'hello', userId: 'SUPERVISOR', traderId: 'T1', codec: 'msgpack', clientId: 'c1' } });
     s.deliver(welcome());
     await expect(p).resolves.toBe(true);
     expect(c.codec).toBe('msgpack');

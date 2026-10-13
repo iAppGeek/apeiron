@@ -1,6 +1,6 @@
 import {
   OVERLAY_FIELDS,
-  derivePriceFields,
+  deriveOverlay,
   isOpen,
   type CurrencyPair,
   type Order,
@@ -41,9 +41,9 @@ const rowStatus = (store: ColumnarStore, row: number): OrderStatus => {
  *
  * - order records (the full latest state of an order, from the order service) are written in place when their
  *   version is newer than the row's, feeding the tick's ChangeSet;
- * - the price join keeps `liveByPair` as statuses change and, for each pair that ticked, recomputes the
- *   price-derived fields of its LIVE and PAUSED rows with the shared logos function (price-only changes are
- *   never persisted);
+ * - the price join keeps `liveByPair` as statuses change and, for each pair that ticked, overlays the six
+ *   price-derived fields on its LIVE and PAUSED rows with the shared logos function `deriveOverlay`. An overlay is a pure
+ *   function of the record and the latest quote: it never touches `lastUpdateTime`, which only the order service sets;
  * - a record never regresses a row: it is applied only when its `v` is above the one the row holds.
  */
 export class LiveStore {
@@ -143,7 +143,7 @@ export class LiveStore {
     }
     for (const pair of this.pendingTicks) oldest = Math.min(oldest, (this.latestTicks.get(pair) as PriceTick).ts);
     this.flushAgeMs = oldest === Infinity ? null : Math.max(0, now - oldest);
-    this.applyPrices(now, cs, eventRows);
+    this.applyPrices(cs, eventRows);
     return cs;
   }
 
@@ -167,7 +167,7 @@ export class LiveStore {
       this.stats.recordsStale++;
       return;
     }
-    const { changed, prev } = this.store.updateRow(row, this.monotonic(row, this.patchOf(order)));
+    const { changed, prev } = this.store.updateRow(row, this.patchOf(order));
     this.store.setVersion(row, record.v);
     this.stats.recordsApplied++;
     this.afterUpdate(row, changed, prev, cs, record.srcTs);
@@ -183,18 +183,6 @@ export class LiveStore {
     const patch: Record<string, unknown> = {};
     for (const key of Object.keys(order)) if (!OVERLAY_SET.has(key)) patch[key] = order[key as keyof Order];
     return patch as Partial<Order>;
-  }
-
-  /**
-   * `lastUpdateTime` never moves backwards. Order records carry their producer's clock and repricing uses the
-   * server's, and two clocks disagree by a few milliseconds; without this a row's update time could step back and
-   * a client would see a value older than one it had already shown.
-   */
-  private monotonic<T extends Partial<Order>>(row: number, patch: T): T {
-    const proposed = patch.lastUpdateTime;
-    if (proposed === undefined) return patch;
-    const current = this.store.numberColumn('lastUpdateTime')[row] as number;
-    return current > proposed ? { ...patch, lastUpdateTime: current } : patch;
   }
 
   private afterUpdate(row: number, changed: readonly OrderField[], prev: Partial<Order>, cs: ChangeSet, ts: number): void {
@@ -242,7 +230,7 @@ export class LiveStore {
 
   // ------------------------------------------------------------------ price join
 
-  private applyPrices(now: number, cs: ChangeSet, eventRows: Set<number>): void {
+  private applyPrices(cs: ChangeSet, eventRows: Set<number>): void {
     const ticked = this.pendingTicks;
     this.pendingTicks = new Set();
     for (const pair of ticked) {
@@ -250,20 +238,20 @@ export class LiveStore {
       this.stats.ticksApplied++;
       const rows = this.liveByPair.get(pair);
       if (rows === undefined) continue;
-      for (const row of rows) this.recompute(row, tick, now, cs, tick.ts);
+      for (const row of rows) this.recompute(row, tick, cs, tick.ts);
     }
-    // A fill changes unrealised P&L and slippage, so rows touched by events are repriced even if their pair is quiet.
+    // A fill changes unrealised P&L, so rows touched by records are repriced even if their pair is quiet.
     for (const row of eventRows) {
       if (!isOpen(rowStatus(this.store, row))) continue;
       const pair = this.pairOf(row);
       if (ticked.has(pair)) continue;
       const tick = this.latestTicks.get(pair);
-      if (tick !== undefined) this.recompute(row, tick, now, cs, Infinity);
+      if (tick !== undefined) this.recompute(row, tick, cs, Infinity);
     }
   }
 
   /** `ts` is the source timestamp this repricing is owed to: the tick's own, or Infinity when an order event already supplied it. */
-  private recompute(row: number, tick: PriceTick, now: number, cs: ChangeSet, ts: number): void {
+  private recompute(row: number, tick: PriceTick, cs: ChangeSet, ts: number): void {
     const s = this.store;
     const n = (field: OrderField): number => s.numberColumn(field)[row] as number;
     const orNull = (v: number): number | null => (v === v ? v : null);
@@ -279,7 +267,7 @@ export class LiveStore {
       orderQty: n('orderQty'),
       notionalUsd: n('notionalUsd'),
     };
-    const { changed, prev } = s.updateRow(row, this.monotonic(row, derivePriceFields(input, tick, now)));
+    const { changed, prev } = s.updateRow(row, deriveOverlay(input, tick));
     this.stats.priceRecomputes++;
     cs.noteUpdate(row, changed, prev, ts);
   }

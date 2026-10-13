@@ -1,5 +1,4 @@
-import { NatsBus, ensureStreams } from '@apeiron/iris';
-import { MongoOrderRepository } from '@apeiron/mnemosyne';
+import { NatsBus } from '@apeiron/iris';
 import { loadConfig } from './config.js';
 import { closeServer, startHealthServer } from './health.js';
 import { startHermes, type Hermes } from './hermes.js';
@@ -18,24 +17,19 @@ const health = await startHealthServer(
   metrics,
 );
 
-const repo = await MongoOrderRepository.connect({ url: config.mongoUrl, db: config.mongoDb });
 const bus = await NatsBus.connect({ url: config.natsUrl, name: 'hermes', log });
 
-const streams = await ensureStreams(await bus.manager());
-log.info({ streams }, 'streams ready');
-
-const current = (await repo.loadOpen()).map((record) => record.order);
-const maxOrderId = await repo.maxOrderId();
-log.info({ current: current.length, maxOrderId }, 'loaded current orders');
+// hermes has no database and creates nothing: the open orders come from the order service, which owns the streams, and
+// everything it does is a message.
 
 hermes = await startHermes({
   bus,
   log,
   preset: config.loadPreset,
-  current,
-  maxOrderId,
   seed: config.seed ?? Date.now() % 2 ** 31,
   stepMs: config.stepMs,
+  priceWaitMs: config.priceWaitMs,
+  venueTimeoutMs: config.venueTimeoutMs,
   metrics,
 });
 log.info({ preset: config.loadPreset }, 'hermes started');
@@ -45,7 +39,6 @@ const shutdown = async (signal: string): Promise<void> => {
   await hermes?.stop();
   await closeServer(health);
   await bus.close();
-  await repo.close();
   process.exit(0);
 };
 process.on('SIGTERM', () => void shutdown('SIGTERM'));

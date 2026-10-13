@@ -15,6 +15,8 @@ export type Reader = {
 export type ReaderOptions = {
   /** Direct to antikythera (default ws://127.0.0.1:4000/ws), never through the fault proxy. */
   url?: string;
+  /** The signed-in user (default `SUPERVISOR`, who sees every trader). */
+  userId?: string;
   traderId?: string;
   codec?: CodecName;
   clientId?: string;
@@ -84,7 +86,7 @@ export async function openReader(options: ReaderOptions = {}): Promise<Reader> {
     welcomed = resolve;
     failed = reject;
     socket.onopen = (): void => {
-      const hello: ClientMsg = { t: 'hello', traderId: options.traderId ?? 'ALL', codec: codecName, clientId: options.clientId ?? `oracle-${Math.random().toString(36).slice(2, 8)}` };
+      const hello: ClientMsg = { t: 'hello', userId: options.userId ?? 'SUPERVISOR', traderId: options.traderId ?? 'ALL', codec: codecName, clientId: options.clientId ?? `oracle-${Math.random().toString(36).slice(2, 8)}` };
       socket.send(sendable(jsonCodec.encode(hello)));
     };
   });

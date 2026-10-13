@@ -15,9 +15,9 @@ const MIN_ROWS = Number(process.env['E2E_MIN_ROWS'] ?? '100000');
 export class Blotter {
   constructor(readonly page: Page) {}
 
-  /** Opens the app and waits until the socket is connected and the first rows are on screen. */
-  async open(): Promise<void> {
-    await this.page.goto('/');
+  /** Opens the app as `user` (default the supervisor, who sees every trader) and waits until the socket is connected and the first rows are on screen. */
+  async open(user = 'SUPERVISOR'): Promise<void> {
+    await this.page.goto(`/?user=${user}`);
     await this.waitUntilReady();
   }
 

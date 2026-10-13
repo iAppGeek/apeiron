@@ -8,14 +8,14 @@ const jsz = (lastSeq: number, pending: number, ack: number): unknown => ({
     {
       stream_detail: [
         { name: 'KV_ORDER_STATE', state: { last_seq: lastSeq } },
-        { name: 'ORDERS', consumer_detail: [{ name: 'hermes-commands', num_pending: 9, num_ack_pending: 9 }, { name: 'themis', num_pending: pending, num_ack_pending: ack }] },
+        { name: 'ORDERS', consumer_detail: [{ name: 'hermes-commands', num_pending: 9, num_ack_pending: 9 }, { name: 'themis-exec', num_pending: pending, num_ack_pending: ack }] },
       ],
     },
   ],
 });
 
 describe('parseSnapshot', () => {
-  it('reads the stage, the applied revision, the newest published one and the themis consumer only', () => {
+  it('reads the stage, the applied revision, the newest published one and the themis-exec consumer only', () => {
     expect(parseSnapshot(health(), lag(41), jsz(42, 3, 4))).toMatchObject({
       status: 'ok',
       stage: 'ready',

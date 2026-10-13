@@ -26,8 +26,7 @@ export type SsrmRequest = {
 export type Row = Record<string, string | number | boolean | null | undefined>;
 
 export type ClientMsg =
-  /** `userId` is optional until entitlements arrive (PLAN1 phase 1.6), when it becomes required. */
-  | { t: 'hello'; userId?: string; traderId: string; codec: CodecName; clientId: string }
+  | { t: 'hello'; userId: string; traderId: string; codec: CodecName; clientId: string }
   | { t: 'getRows'; reqId: number; req: SsrmRequest }
   | { t: 'setFilterValues'; reqId: number; colId: string }
   | { t: 'command'; reqId: number; orderId: string; action: CommandAction }
@@ -43,7 +42,7 @@ export type ServerMsg =
       columnsVersion: string;
       /** The load preset the mock middleware last reported; null until it has. */
       preset: LoadPreset | null;
-      /** The signed-in user; set from PLAN1 phase 1.6. */
+      /** The signed-in user. */
       user?: { userId: string; name: string };
       /** Which implementation answered; set from PLAN2 phase 2.7. */
       server?: { impl: 'node' | 'java'; version: string; startedAt: number };
@@ -134,7 +133,7 @@ export const amendChangesSchema: z.ZodType<AmendChanges> = z
   })
   .refine((c) => AMEND_FIELDS.some((f) => c[f] !== undefined), { message: 'no fields to amend' });
 
-const ssrmRequestSchema: z.ZodType<SsrmRequest> = z.object({
+export const ssrmRequestSchema: z.ZodType<SsrmRequest> = z.object({
   startRow: nonNegInt,
   endRow: nonNegInt,
   rowGroupCols: z.array(
@@ -158,7 +157,7 @@ const ssrmRequestSchema: z.ZodType<SsrmRequest> = z.object({
 export const clientMsgSchema: z.ZodType<ClientMsg> = z.discriminatedUnion('t', [
   z.object({
     t: z.literal('hello'),
-    userId: z.string().min(1).optional(),
+    userId: z.string().min(1),
     traderId: z.string().min(1),
     codec: z.enum(['json', 'msgpack']),
     clientId: z.string().min(1),

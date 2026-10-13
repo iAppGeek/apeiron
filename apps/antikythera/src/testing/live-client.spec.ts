@@ -4,6 +4,7 @@ import { buildServer, type BlotterServer } from '../server.js';
 import { LiveClient, flatRequest, groupedRequest, measureDefaultView, measureGroupedView, median, percentile } from './live-client.js';
 import { publishRecord, seedBucket } from './bucket.js';
 import { makeOrders } from './orders.js';
+import { testEntitlements } from './users.js';
 
 const ROWS = makeOrders(
   Array.from({ length: 30 }, (_, i) => ({
@@ -30,7 +31,7 @@ async function start(): Promise<{ bus: MemoryBus; url: string }> {
   const bus = new MemoryBus();
   await seedBucket(bus, ROWS);
   await Promise.all(CURRENCY_PAIRS.map((pair) => bus.publish(`prices.${pair}`, { pair, bid: 1.08, ask: 1.0802, ts: 1 })));
-  server = await buildServer({ bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, summaryIntervalMs: 100, priceWaitMs: 20, snapshotPollMs: 5 });
+  server = await buildServer({ entitlements: testEntitlements, bus, logLevel: 'silent', storeCapacity: 64, flushMs: 20, summaryIntervalMs: 100, priceWaitMs: 20, snapshotPollMs: 5 });
   await server.app.listen({ port: 0, host: '127.0.0.1' });
   await server.load();
   const addr = server.app.server.address();

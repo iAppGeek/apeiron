@@ -3,16 +3,27 @@ import {
   CONSUMERS,
   STREAMS,
   SUBJECTS,
+  applyAmend,
+  applyExecReport,
+  canApplyCommand,
+  formatOrderId,
   isTerminal,
-  parseOrderEvent,
+  parseExecReport,
+  parseOrderCommandRequest,
+  parseOrderSeq,
   parseOrderStateRecord,
+  recordFromSubmission,
+  validateSubmission,
   type Bus,
   type BusSubscription,
   type KvBucket,
+  type OrderCommandReply,
+  type OrderStateRecord,
+  type SubmitReply,
+  type VenueInstruction,
 } from '@apeiron/logos';
 import type { OrderRepository, StoredOrder } from '@apeiron/mnemosyne';
-import { applyOrderEvent } from './apply-event.js';
-import { GroupCommitter } from './committer.js';
+import { GroupCommitter, toStateRecord } from './committer.js';
 import type { Logger } from './log.js';
 import type { ThemisMetrics } from './metrics.js';
 import { ensureProjection, reconcileProjection } from './projection.js';
@@ -25,11 +36,22 @@ export type ThemisOptions = {
   groupCommitMax: number;
   reconcileWindowMin: number;
   rebuildProjection: boolean;
+  /** How long a command waits for the venue's report before it is answered `TIMEOUT` (default 5 s). */
+  venueTimeoutMs?: number;
   metrics?: ThemisMetrics;
   now?: () => number;
 };
 
 export type ThemisStatus = { status: 'ok' | 'stopped'; openOrders: number; applied: number; commits: number };
+
+/** How long a command waits for the venue by default. */
+export const DEFAULT_VENUE_TIMEOUT_MS = 5_000;
+
+/** Open orders go to a caller in messages of at most this many records. */
+export const QUERY_CHUNK = 500;
+
+/** How long a `clientOrderId` is remembered, so a repeated submission returns the order it made. */
+export const SUBMISSION_MEMORY_MS = 24 * 3_600_000;
 
 export type Themis = {
   status(): ThemisStatus;
@@ -47,9 +69,9 @@ export const ORDER_STATE_META_CONFIG = { history: 1, storage: 'file', replicas: 
 const isOpenRecord = (stored: StoredOrder): boolean => !isTerminal(stored.order.status);
 
 /**
- * The order service of record, in projection mode (phase 1.2). It owns the database: it reads today's
- * `orders.events` through its own durable consumer, applies them to the full order, stores each batch (group
- * commit) and only then publishes the new version to the `ORDER_STATE` bucket and acknowledges the input.
+ * The order service of record. It owns the database: it takes submissions and execution reports from the venue,
+ * applies them to the full order with the shared rules, stores each batch (group commit) and only then publishes the new
+ * version to the `ORDER_STATE` bucket and acknowledges the input.
  * Startup makes sure the bucket holds every order, reconciles anything a crash left unpublished, and loads the
  * open orders into memory. Events are handled one at a time, so an order's versions are strictly ordered.
  */
@@ -97,51 +119,238 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
     return parsed.ok ? { order: parsed.value.order, v: parsed.value.v, execSeq: parsed.value.execSeq } : undefined;
   };
 
-  const handle = async (payload: unknown, ack: () => void): Promise<void> => {
-    const parsed = parseOrderEvent(payload);
-    if (!parsed.ok) {
-      log.warn({ error: parsed.error }, 'dropped invalid order event');
-      metrics?.event('invalid', 'invalid');
-      committer.whenCommitted(ack);
-      return;
+  /** Forgets a finished order only if nothing newer has been applied since, then acknowledges the input. */
+  const finish = (record: StoredOrder, ack: () => void) => (): void => {
+    if (!isOpenRecord(record) && book.get(record.order.orderId)?.v === record.v) book.delete(record.order.orderId);
+    ack();
+  };
+
+  // Inputs are applied one at a time, in arrival order, so an order's versions are strictly ordered. Applying does not
+  // wait for the commit: the batch window is what makes this fast.
+  let chain: Promise<void> = Promise.resolve();
+  const enqueue = <T,>(task: () => Promise<T>): Promise<T> => {
+    const run = chain.then(task);
+    chain = run.then(
+      () => undefined,
+      (error: unknown) => {
+        log.error({ err: error }, 'failed to handle an input');
+      },
+    );
+    return run;
+  };
+
+  const consumers: BusSubscription[] = [];
+
+  // ---- execution: submissions, execution reports from the venue, and the open orders for whoever needs them
+
+  const clock = options.now ?? ((): number => Date.now());
+  const venueTimeoutMs = options.venueTimeoutMs ?? DEFAULT_VENUE_TIMEOUT_MS;
+  let seq = parseOrderSeq((await repo.maxOrderId()) ?? 'ALG00000000') ?? 0;
+  // Kept in time order (oldest first), so expiring old ids only ever looks at the front of the map.
+  const submitted = new Map<string, { orderId: string; v: number; at: number }>();
+  const known = [...book.values()].filter((stored) => stored.order.clientOrderId !== '').sort((a, b) => a.order.createdAt - b.order.createdAt);
+  for (const stored of known) submitted.set(stored.order.clientOrderId, { orderId: stored.order.orderId, v: stored.v, at: stored.order.createdAt });
+  const forgetOldSubmissions = (now: number): void => {
+    for (const [id, entry] of submitted) {
+      if (now - entry.at <= SUBMISSION_MEMORY_MS) return;
+      submitted.delete(id);
     }
-    const event = parsed.value;
-    const current = event.type === 'REJECT' ? undefined : await lookup(event.order.orderId, state);
-    const outcome = applyOrderEvent(current, event);
-    if (outcome.kind !== 'changed') {
-      metrics?.event(event.type, outcome.kind);
-      committer.whenCommitted(ack);
-      return;
-    }
-    const { record, srcTs } = outcome;
-    book.set(record.order.orderId, record);
-    applied++;
-    metrics?.event(event.type, 'applied');
-    committer.submit(record, srcTs, () => {
-      // Forget a finished order only if nothing newer has been applied since.
-      if (!isOpenRecord(record) && book.get(record.order.orderId)?.v === record.v) book.delete(record.order.orderId);
-      ack();
+  };
+
+  const submit = (payload: unknown): Promise<SubmitReply> =>
+    new Promise<SubmitReply>((resolve) => {
+      void enqueue(() => {
+        const checked = validateSubmission(payload);
+        if (!checked.ok) {
+          metrics?.submission('invalid');
+          resolve({ ok: false, code: 'INVALID_SUBMISSION', message: checked.message });
+          return Promise.resolve();
+        }
+        const now = clock();
+        forgetOldSubmissions(now);
+        const key = checked.submission.clientOrderId;
+        const seen = submitted.get(key);
+        if (seen !== undefined) {
+          metrics?.submission('duplicate');
+          committer.whenCommitted(() => resolve({ ok: true, orderId: seen.orderId, v: seen.v }));
+          return Promise.resolve();
+        }
+        const orderId = formatOrderId(++seq);
+        const record = recordFromSubmission(checked.submission, orderId, now);
+        const stored: StoredOrder = { order: record.order, v: record.v, execSeq: record.execSeq };
+        book.set(orderId, stored);
+        submitted.set(key, { orderId, v: stored.v, at: now });
+        metrics?.submission('accepted');
+        committer.submit(stored, record.srcTs, () => resolve({ ok: true, orderId, v: stored.v }));
+        return Promise.resolve();
+      });
+    });
+
+  // ---- commands: validate, instruct the venue, wait for its report, and answer once that report is stored and published
+
+  type PendingCommand = { orderId: string; kind: 'action'; startedAt: number; resolve: (reply: OrderCommandReply) => void; timer: ReturnType<typeof setTimeout> };
+  const pending = new Map<string, PendingCommand>();
+  const instructed = new Map<string, string>();
+
+  const settle = (instrId: string, reply: OrderCommandReply): void => {
+    const waiting = pending.get(instrId);
+    if (waiting === undefined) return;
+    clearTimeout(waiting.timer);
+    pending.delete(instrId);
+    instructed.delete(waiting.orderId);
+    metrics?.command(waiting.kind, reply.ok ? 'ok' : reply.code, (performance.now() - waiting.startedAt) / 1000);
+    waiting.resolve(reply);
+  };
+
+  const command = (payload: unknown): Promise<OrderCommandReply> => {
+    const parsed = parseOrderCommandRequest(payload);
+    if (!parsed.ok) throw new Error(`unreadable command: ${parsed.error}`);
+    const request = parsed.value;
+    // The blotter has checked the user's entitlement (an internal hop themis trusts); who asked is logged for the record.
+    log.info(
+      { commandId: request.commandId, userId: request.userId, orderId: request.orderId, ...(request.kind === 'action' ? { action: request.action } : { amend: request.changes }) },
+      'command received',
+    );
+    return new Promise<OrderCommandReply>((resolve) => {
+      const refuse = (code: Extract<OrderCommandReply, { ok: false }>['code'], message: string): void => {
+        metrics?.command(request.kind, code, 0);
+        resolve({ ok: false, code, message });
+      };
+      void enqueue(async () => {
+        const current = await lookup(request.orderId, state);
+        if (current === undefined) {
+          refuse('UNKNOWN_ORDER', `Order ${request.orderId} does not exist`);
+          return;
+        }
+        if (request.kind === 'amend') {
+          // Applied directly: the order's parameters are not the venue's to accept. the venue reads the new ones from the KV update.
+          const startedAt = performance.now();
+          const now = clock();
+          const held: OrderStateRecord = { v: current.v, execSeq: current.execSeq, srcTs: current.order.lastUpdateTime, order: current.order };
+          const amended = applyAmend(held, request.changes, now);
+          if (!amended.ok) {
+            refuse(amended.code, amended.message);
+            return;
+          }
+          const next = amended.record;
+          const stored: StoredOrder = { order: next.order, v: next.v, execSeq: next.execSeq };
+          book.set(stored.order.orderId, stored);
+          committer.submit(stored, now, () => {
+            metrics?.command('amend', 'ok', (performance.now() - startedAt) / 1000);
+            resolve({ ok: true, v: stored.v });
+          });
+          return;
+        }
+        if (!canApplyCommand(current.order.status, request.action)) {
+          refuse('INVALID_TRANSITION', `Cannot ${request.action.toLowerCase()} an order that is ${current.order.status}`);
+          return;
+        }
+        if (instructed.has(request.orderId) || pending.has(request.commandId)) {
+          refuse('INVALID_TRANSITION', `Another instruction for ${request.orderId} is waiting for the venue`);
+          return;
+        }
+        const instruction: VenueInstruction = { instrId: request.commandId, orderId: request.orderId, action: request.action, ts: clock() };
+        const timer = setTimeout(() => {
+          settle(request.commandId, { ok: false, code: 'TIMEOUT', message: `The venue did not answer within ${venueTimeoutMs} ms` });
+        }, venueTimeoutMs);
+        pending.set(request.commandId, { orderId: request.orderId, kind: 'action', startedAt: performance.now(), resolve, timer });
+        instructed.set(request.orderId, request.commandId);
+        try {
+          await bus.publish(SUBJECTS.execCommands, instruction);
+        } catch (error) {
+          log.warn({ err: error, commandId: request.commandId }, 'could not send the venue instruction');
+          settle(request.commandId, { ok: false, code: 'TIMEOUT', message: 'Could not reach the venue' });
+        }
+      });
     });
   };
 
-  let chain: Promise<void> = Promise.resolve();
-  let consumer: BusSubscription | null = null;
-  consumer = await bus.consume(
-    { stream: STREAMS.orders, durable: CONSUMERS.themis, subject: SUBJECTS.ordersEvents },
-    (payload, _subject, ack) => {
-      chain = chain.then(() => handle(payload, ack)).catch((error: unknown) => {
-        log.error({ err: error }, 'failed to handle an order event');
+  const handleReport = async (payload: unknown, ack: () => void): Promise<void> => {
+    const parsed = parseExecReport(payload);
+    if (!parsed.ok) {
+      log.warn({ error: parsed.error }, 'dropped invalid execution report');
+      metrics?.report('invalid', 'invalid');
+      committer.whenCommitted(ack);
+      return;
+    }
+    const report = parsed.value;
+    const instrId = 'instrId' in report ? report.instrId : undefined;
+    // A refusal answers the waiting command whatever its execSeq says (a venue that does not know the order cannot number it).
+    if (report.type === 'VENUE_REJECT') settle(report.instrId, { ok: false, code: 'VENUE_REJECT', message: report.message });
+    const current = await lookup(report.orderId, state);
+    if (current === undefined) {
+      log.warn({ orderId: report.orderId, type: report.type }, 'execution report for an unknown order');
+      metrics?.report(report.type, 'unknown');
+      if (instrId !== undefined) settle(instrId, { ok: false, code: 'UNKNOWN_ORDER', message: `Order ${report.orderId} does not exist` });
+      committer.whenCommitted(ack);
+      return;
+    }
+    const held: OrderStateRecord = { v: current.v, execSeq: current.execSeq, srcTs: current.order.lastUpdateTime, order: current.order };
+    const result = applyExecReport(held, report);
+    if (result.kind === 'duplicate') {
+      metrics?.report(report.type, 'duplicate');
+      committer.whenCommitted(() => {
+        if (instrId !== undefined) settle(instrId, { ok: true, v: current.v });
+        ack();
       });
-    },
+      return;
+    }
+    // An applied report is a new version. A rejected one (or a venue refusal) changes nothing but the counter, which is
+    // stored so that a bad report is not replayed for ever.
+    const next = result.record;
+    const stored: StoredOrder = { order: next.order, v: next.v, execSeq: next.execSeq };
+    book.set(stored.order.orderId, stored);
+    if (result.kind === 'applied') {
+      applied++;
+      if (result.clamped) metrics?.clamped();
+    } else {
+      log.debug({ orderId: report.orderId, type: report.type, kind: result.kind }, 'execution report not applied');
+    }
+    metrics?.report(report.type, result.kind === 'applied' ? 'applied' : 'rejected');
+    const done = finish(stored, ack);
+    committer.submit(stored, report.ts, () => {
+      done();
+      if (instrId === undefined) return;
+      if (result.kind === 'applied') settle(instrId, { ok: true, v: stored.v });
+      else if (result.kind === 'rejected') settle(instrId, { ok: false, code: 'INVALID_TRANSITION', message: result.message });
+    });
+  };
+
+  consumers.push(
+    await bus.consume({ stream: STREAMS.exec, durable: CONSUMERS.themisExec, subject: SUBJECTS.execReports }, (payload, _subject, ack) => {
+      void enqueue(() => handleReport(payload, ack));
+    }),
   );
-  log.info({ stream: STREAMS.orders, durable: CONSUMERS.themis }, 'consuming order events');
+  log.info({ stream: STREAMS.exec, durable: CONSUMERS.themisExec }, 'consuming execution reports');
+
+  consumers.push(await bus.serve(SUBJECTS.ordersSubmit, submit));
+  consumers.push(await bus.serve(SUBJECTS.ordersCmd, command));
+
+  // The open orders, in messages of at most QUERY_CHUNK records published to the caller's inbox, then a summary reply.
+  consumers.push(
+    await bus.serve(SUBJECTS.ordersQueryOpen, (payload) => {
+      const inbox = (payload as { inbox?: unknown } | null)?.inbox;
+      if (typeof inbox !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(inbox)) throw new Error('orders.query.open needs an inbox subject');
+      return enqueue(async () => {
+        const records = [...book.values()].filter(isOpenRecord).map((stored) => toStateRecord(stored, stored.order.lastUpdateTime));
+        const chunks = Math.max(1, Math.ceil(records.length / QUERY_CHUNK));
+        for (let i = 0; i < chunks; i++) {
+          await bus.publish(inbox, { chunk: i, of: chunks, records: records.slice(i * QUERY_CHUNK, (i + 1) * QUERY_CHUNK) });
+        }
+        return { chunks, count: records.length };
+      });
+    }),
+  );
+
+  // The price feed asks for a starting level per pair when its stream has no last price (it never reads orders).
+  consumers.push(await bus.serve(SUBJECTS.refMids, () => repo.latestMidsByPair()));
 
   return {
     status: (): ThemisStatus => ({ status: stopped ? 'stopped' : 'ok', openOrders: openOrders(), applied, commits: committer.stats.batches }),
     debug: (): Record<string, unknown> => ({
       openOrders: openOrders(),
       heldOrders: book.size,
-      pendingInstructions: 0,
+      pendingInstructions: pending.size,
       queued: committer.pending,
       lastCommit: { size: committer.stats.lastSize, ms: committer.stats.lastMs, kvMs: committer.stats.lastKvMs },
       commits: committer.stats.batches,
@@ -152,7 +361,8 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
     },
     stop: async (stopOptions: { flush?: boolean } = {}): Promise<void> => {
       stopped = true;
-      await consumer?.close();
+      for (const sub of consumers) await sub.close();
+      for (const waiting of pending.values()) clearTimeout(waiting.timer);
       if (stopOptions.flush === false) return;
       await chain;
       await committer.stop();

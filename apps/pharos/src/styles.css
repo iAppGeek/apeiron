@@ -137,3 +137,15 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); font
   padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
   color: var(--amber); background: rgba(251, 191, 36, 0.14); border: 1px solid rgba(251, 191, 36, 0.5);
 }
+
+.modal-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(5, 8, 15, 0.8); z-index: 200; }
+.modal { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 24px; min-width: 320px; max-width: 420px; }
+.modal h2 { margin: 0 0 8px; font-size: 18px; }
+.modal-note { color: var(--muted); font-size: 12px; margin: 0 0 16px; }
+.modal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.modal-user { width: 100%; display: flex; justify-content: space-between; align-items: center; }
+.modal-user-id { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.amend-fields { display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px; }
+.amend-field { justify-content: space-between; }
+.amend-error { color: var(--red); font-size: 12px; margin: 0 0 12px; }
+.amend-buttons { display: flex; justify-content: flex-end; gap: 8px; }

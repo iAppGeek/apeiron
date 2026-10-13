@@ -1,6 +1,7 @@
 import { useEffect, useMemo, type ReactElement } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { Header } from './components/Header';
+import { UserPicker } from './components/UserPicker';
 import { StatusBar } from './components/StatusBar';
 import { SummaryStrip } from './components/SummaryStrip';
 import { Toasts } from './components/Toasts';
@@ -8,16 +9,19 @@ import { Blotter } from './grid/Blotter';
 import { startFpsMeter } from './metrics/fps-meter';
 import { createAppController } from './state/app-controller';
 import { useAppStore } from './state/app-store';
+import { USERS, type UserStorage } from './state/users';
 import type { BlotterClient } from './transport/client';
 
 export type AppProps = {
   client: BlotterClient;
   /** WebSocket endpoint, `/ws` on the page's own origin. */
   wsUrl: string;
+  /** Where this tab remembers its user (`sessionStorage`). */
+  storage?: UserStorage | null;
 };
 
-export function App({ client, wsUrl }: AppProps): ReactElement {
-  const controller = useMemo(() => createAppController(client), [client]);
+export function App({ client, wsUrl, storage = null }: AppProps): ReactElement {
+  const controller = useMemo(() => createAppController(client, { storage }), [client, storage]);
   // Everything except the new-orders count, which only the badge needs, so the grid is not re-rendered 10 times a second.
   const state = useAppStore(
     useShallow((s) => ({
@@ -25,6 +29,7 @@ export function App({ client, wsUrl }: AppProps): ReactElement {
       reconnectAttempt: s.reconnectAttempt,
       codec: s.codec,
       traders: s.traders,
+      requestedUser: s.requestedUser,
       confirmedTrader: s.confirmedTrader,
       requestedTrader: s.requestedTrader,
       welcomed: s.welcomed,
@@ -66,6 +71,11 @@ export function App({ client, wsUrl }: AppProps): ReactElement {
   return (
     <div className="app">
       <Header
+        users={USERS}
+        userId={state.requestedUser ?? ''}
+        onUserChange={(id) => {
+          void controller.changeUser(id);
+        }}
         traders={state.traders}
         traderId={state.confirmedTrader}
         switching={state.requestedTrader !== state.confirmedTrader}
@@ -106,6 +116,14 @@ export function App({ client, wsUrl }: AppProps): ReactElement {
         preset={state.preset}
       />
       <Toasts toasts={state.toasts} onDismiss={state.dismissToast} />
+      {state.requestedUser === null && (
+        <UserPicker
+          users={USERS}
+          onPick={(id) => {
+            void controller.changeUser(id);
+          }}
+        />
+      )}
     </div>
   );
 }

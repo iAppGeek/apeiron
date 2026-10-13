@@ -51,9 +51,9 @@ describe('attachWorkerHost', () => {
     const socket = makeSocket();
     attachWorkerHost(scope, { createSocket: () => socket, clock, clientId: 'c1' });
     send({ kind: 'connect', url: 'ws://h/ws' });
-    send({ kind: 'hello', id: 1, traderId: 'T3', codec: 'json' });
+    send({ kind: 'hello', id: 1, userId: 'TRADER3', traderId: 'T3', codec: 'json' });
     socket.onopen?.();
-    expect(JSON.parse(socket.send.mock.calls[0]?.[0] as string)).toMatchObject({ traderId: 'T3' });
+    expect(JSON.parse(socket.send.mock.calls[0]?.[0] as string)).toMatchObject({ userId: 'TRADER3', traderId: 'T3' });
     send({ kind: 'close' });
     expect(socket.close).toHaveBeenCalled();
     expect(posted.at(-1)).toMatchObject({ kind: 'status', status: 'closed' });

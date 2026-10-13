@@ -1,4 +1,4 @@
-import { BUCKETS, MemoryBus, jsonCodec, type ClientMsg, type Order, type OrderCommand, type OrderEvent, type ServerMsg } from '@apeiron/logos';
+import { BUCKETS, MemoryBus, jsonCodec, type ClientMsg, type Order, type OrderCommandReply, type OrderCommandRequest, type ServerMsg } from '@apeiron/logos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryEngine } from '../query/engine.js';
 import { ClientSession } from '../session.js';
@@ -7,6 +7,7 @@ import { ensureBuckets, publishRecord } from '../testing/bucket.js';
 import { makeOrders } from '../testing/orders.js';
 import type { Connection, Frame } from '../transport.js';
 import { LiveRuntime } from './runtime.js';
+import { testEntitlements } from '../testing/users.js';
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -24,9 +25,9 @@ const LIVE: Partial<Order> = {
   marketMid: 1.08,
 };
 
-type Rig = { bus: MemoryBus; store: ColumnarStore; runtime: LiveRuntime; engine: QueryEngine; published: OrderCommand[] };
+type Rig = { bus: MemoryBus; store: ColumnarStore; runtime: LiveRuntime; engine: QueryEngine; requests: OrderCommandRequest[]; serve: (reply: (r: OrderCommandRequest) => OrderCommandReply | Promise<OrderCommandReply>) => Promise<void> };
 
-async function rig(): Promise<Rig> {
+async function rig(options: { commandTimeoutMs?: number; ackWaitVMs?: number } = {}): Promise<Rig> {
   const bus = new MemoryBus();
   await ensureBuckets(bus);
   const orders = makeOrders([{ ...LIVE }, { ...LIVE, status: 'PAUSED' }, { ...LIVE, status: 'FILLED' }]);
@@ -39,26 +40,35 @@ async function rig(): Promise<Rig> {
     engine,
     bus,
     log,
-    flushMs: 100,
+    flushMs: 10,
     maxTrackedBlocks: 20,
-    commandTimeoutMs: 5_000,
+    commandTimeoutMs: options.commandTimeoutMs ?? 1_000,
+    ackWaitVMs: options.ackWaitVMs ?? 300,
     snapshot: { entries: watch[Symbol.asyncIterator](), watch, revision: 0 },
   });
   runtime.start();
-  await vi.advanceTimersByTimeAsync(0);
-  const published: OrderCommand[] = [];
-  await bus.subscribe('orders.commands', (p) => void published.push(p as OrderCommand));
-  return { bus, store, runtime, engine, published };
+  await vi.waitFor(() => expect(runtime.isAttached).toBe(true));
+  const requests: OrderCommandRequest[] = [];
+  const serve: Rig['serve'] = async (reply) => {
+    await bus.serve('orders.cmd', async (p) => {
+      requests.push(p as OrderCommandRequest);
+      return reply(p as OrderCommandRequest);
+    });
+  };
+  return { bus, store, runtime, engine, requests, serve };
 }
 
 type Client = { sent: ServerMsg[]; session: ClientSession; send: (m: ClientMsg) => void };
 
 function client(r: Rig, clientId = 'c1'): Client {
   const sent: ServerMsg[] = [];
-  const connection = { send: (f: Frame): void => void sent.push(jsonCodec.decode(f) as ServerMsg), close: vi.fn(), bufferedAmount: 0 };
-  const session = new ClientSession(connection as unknown as Connection, { engine: () => r.engine, live: () => r.runtime, log });
+  const connection = { send: (f: Frame): void => {
+      const m = jsonCodec.decode(f) as ServerMsg;
+      if (m.t !== 'summary') sent.push(m);
+    }, close: vi.fn(), bufferedAmount: 0 };
+  const session = new ClientSession(connection as unknown as Connection, { entitlements: testEntitlements, engine: () => r.engine, live: () => r.runtime, log });
   const send = (m: ClientMsg): void => session.handleFrame(JSON.stringify(m));
-  send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId });
+  send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId });
   send({
     t: 'getRows',
     reqId: 1,
@@ -70,70 +80,28 @@ function client(r: Rig, clientId = 'c1'): Client {
 
 const command = (reqId: number, orderId: string, action: 'CANCEL' | 'PAUSE' | 'RESUME'): ClientMsg => ({ t: 'command', reqId, orderId, action });
 const types = (c: Client): string[] => c.sent.filter((m) => m.t !== 'summary').map((m) => (m.t === 'error' ? `error:${m.code}` : m.t));
-const hermesUpdate = (commandId: string, orderId: string, order: Partial<Order>): OrderEvent => ({
-  type: 'UPDATE',
-  order: { orderId, ...order },
-  ts: 1,
-  commandId,
-});
 
-/**
- * What answers a command: hermes's UPDATE on `orders.events`, and the order service's new record for the order
- * (one version up) on the bucket. The blotter acks once the record shows the new status.
- */
-async function answer(r: Rig, commandId: string, orderId: string, patch: Partial<Order>, options: { record?: boolean } = {}): Promise<void> {
-  await r.bus.publish('orders.events', hermesUpdate(commandId, orderId, patch));
-  if (options.record === false) return;
+/** The order service's record for the order, one version up, with the patch applied. */
+async function publishNext(r: Rig, orderId: string, patch: Partial<Order>): Promise<number> {
   const row = r.store.rowIndexOf(orderId) as number;
-  await publishRecord(r.bus, { ...r.store.orderAt(row), ...patch }, r.store.versionAt(row) + 1);
+  const v = r.store.versionAt(row) + 1;
+  await publishRecord(r.bus, { ...r.store.orderAt(row), ...patch }, v);
+  return v;
 }
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('LiveRuntime command correlation', () => {
-  it('answers an unknown order at once, without publishing', async () => {
-    vi.useFakeTimers();
+describe('LiveRuntime commands', () => {
+  it('sends the command to the order service with its id, and acks after the store holds the version it replied with', async () => {
     const r = await rig();
-    const c = client(r);
-    c.send(command(5, 'NOPE', 'CANCEL'));
-    expect(c.sent).toEqual([{ t: 'error', reqId: 5, code: 'UNKNOWN_ORDER', message: 'Order NOPE does not exist' }]);
-    expect(r.published).toEqual([]);
-    expect(r.runtime.commands.size).toBe(0);
-    await r.runtime.stop();
-  });
-
-  it('pre-checks the transition against the store status, without publishing', async () => {
-    vi.useFakeTimers();
-    const r = await rig();
-    const c = client(r);
-    c.send(command(1, 'T0000003', 'CANCEL'));
-    c.send(command(2, 'T0000001', 'RESUME'));
-    c.send(command(3, 'T0000002', 'PAUSE'));
-    expect(c.sent).toEqual([
-      { t: 'error', reqId: 1, code: 'INVALID_TRANSITION', message: 'Cannot cancel an order that is FILLED' },
-      { t: 'error', reqId: 2, code: 'INVALID_TRANSITION', message: 'Cannot resume an order that is LIVE' },
-      { t: 'error', reqId: 3, code: 'INVALID_TRANSITION', message: 'Cannot pause an order that is PAUSED' },
-    ]);
-    expect(r.published).toEqual([]);
-    await r.runtime.stop();
-  });
-
-  it('publishes the command with its id and acks only after the UPDATE has been applied and sent', async () => {
-    vi.useFakeTimers({ now: 50_000 });
-    const r = await rig();
+    await r.serve(async (req) => ({ ok: true, v: await publishNext(r, req.orderId, { status: 'PAUSED' }) }));
     const c = client(r, 'client-9');
     c.send(command(7, 'T0000001', 'PAUSE'));
-    expect(r.published).toEqual([
-      { orderId: 'T0000001', action: 'PAUSE', requestedBy: 'client-9', ts: 50_000, commandId: 'client-9:7' },
-    ]);
-    expect(c.sent).toEqual([]);
     expect(r.runtime.commands.size).toBe(1);
-
-    await answer(r, 'client-9:7', 'T0000001', { status: 'PAUSED' });
-    expect(c.sent).toEqual([]);
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.waitFor(() => expect(types(c)).toContain('ack'));
+    expect(r.requests).toEqual([{ commandId: 'client-9:7', userId: 'SUPERVISOR', orderId: 'T0000001', kind: 'action', action: 'PAUSE' }]);
     expect(types(c)).toEqual(['delta', 'ack']);
     const delta = c.sent.find((m) => m.t === 'delta') as Extract<ServerMsg, { t: 'delta' }>;
     expect(delta.updates[0]?.rows[0]).toMatchObject({ orderId: 'T0000001', status: 'PAUSED' });
@@ -142,128 +110,133 @@ describe('LiveRuntime command correlation', () => {
     await r.runtime.stop();
   });
 
-  it('does not ack until the store shows the status the order service published', async () => {
-    vi.useFakeTimers({ now: 50_000 });
+  it('sends an amend as a request of kind amend, and acks after the store holds the new version', async () => {
     const r = await rig();
+    await r.serve(async (req) => ({ ok: true, v: await publishNext(r, req.orderId, { urgency: 'HIGH', orderQty: 2_000_000 }) }));
+    const c = client(r, 'a1');
+    c.send({ t: 'amend', reqId: 3, orderId: 'T0000001', changes: { urgency: 'HIGH', orderQty: 2_000_000 } });
+    await vi.waitFor(() => expect(types(c)).toEqual(['delta', 'ack']));
+    expect(r.requests).toEqual([
+      { commandId: 'a1:3', userId: 'SUPERVISOR', orderId: 'T0000001', kind: 'amend', changes: { urgency: 'HIGH', orderQty: 2_000_000 } },
+    ]);
+    expect(c.sent.at(-1)).toEqual({ t: 'ack', reqId: 3 });
+    await r.runtime.stop();
+  });
+
+  it('passes an INVALID_AMEND refusal through', async () => {
+    const r = await rig();
+    await r.serve(() => ({ ok: false, code: 'INVALID_AMEND', message: 'Quantity must be a whole number above the filled quantity (400000)' }));
+    const c = client(r);
+    c.send({ t: 'amend', reqId: 2, orderId: 'T0000001', changes: { orderQty: 100_000 } });
+    await vi.waitFor(() => expect(c.sent).toEqual([{ t: 'error', reqId: 2, code: 'INVALID_AMEND', message: 'Quantity must be a whole number above the filled quantity (400000)' }]));
+    await r.runtime.stop();
+  });
+
+  it('holds the ack until the record arrives, then sends it', async () => {
+    const r = await rig();
+    await r.serve(() => ({ ok: true, v: 2 }));
     const c = client(r);
     c.send(command(8, 'T0000001', 'PAUSE'));
-    await answer(r, 'c1:8', 'T0000001', { status: 'PAUSED' }, { record: false });
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.waitFor(() => expect(r.requests).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 60));
     expect(types(c)).toEqual([]);
     expect(r.runtime.commands.size).toBe(1);
-    const row = r.store.rowIndexOf('T0000001') as number;
-    await publishRecord(r.bus, { ...r.store.orderAt(row), status: 'PAUSED' }, 2);
-    await vi.advanceTimersByTimeAsync(100);
-    expect(types(c)).toEqual(['delta', 'ack']);
+    await publishNext(r, 'T0000001', { status: 'PAUSED' });
+    await vi.waitFor(() => expect(types(c)).toEqual(['delta', 'ack']));
+    await r.runtime.stop();
+  });
+
+  it('acks anyway when the record has not arrived by the wait limit', async () => {
+    const r = await rig({ ackWaitVMs: 80 });
+    await r.serve(() => ({ ok: true, v: 9 }));
+    const c = client(r);
+    c.send(command(9, 'T0000001', 'PAUSE'));
+    await vi.waitFor(() => expect(types(c)).toEqual(['ack']));
     expect(r.runtime.commands.size).toBe(0);
     await r.runtime.stop();
   });
 
   it('applies the record for every client but acks only the one that asked', async () => {
-    vi.useFakeTimers();
     const r = await rig();
+    await r.serve(async (req) => ({ ok: true, v: await publishNext(r, req.orderId, { status: 'PAUSED' }) }));
     const asker = client(r, 'a');
     const watcher = client(r, 'b');
     asker.send(command(1, 'T0000001', 'PAUSE'));
-    await answer(r, 'a:1', 'T0000001', { status: 'PAUSED' });
-    await vi.advanceTimersByTimeAsync(100);
-    expect(types(asker)).toEqual(['delta', 'ack']);
+    await vi.waitFor(() => expect(types(asker)).toEqual(['delta', 'ack']));
     expect(types(watcher)).toEqual(['delta']);
     await r.runtime.stop();
   });
 
-  it('turns a REJECT into an error with hermes code and message', async () => {
-    vi.useFakeTimers();
+  it('passes a refusal through with its code and message, and a venue refusal as INVALID_TRANSITION', async () => {
     const r = await rig();
+    const replies: OrderCommandReply[] = [
+      { ok: false, code: 'UNKNOWN_ORDER', message: 'Order NOPE does not exist' },
+      { ok: false, code: 'INVALID_TRANSITION', message: 'Cannot cancel an order that is FILLED' },
+      { ok: false, code: 'VENUE_REJECT', message: 'Cannot resume an order that is LIVE' },
+      { ok: false, code: 'TIMEOUT', message: 'venue did not answer' },
+    ];
+    await r.serve(() => replies.shift() as OrderCommandReply);
     const c = client(r);
-    c.send(command(2, 'T0000001', 'PAUSE'));
-    await r.bus.publish('orders.events', {
-      type: 'REJECT',
-      commandId: 'c1:2',
-      orderId: 'T0000001',
-      code: 'INVALID_TRANSITION',
-      message: 'Cannot go from PAUSED to PAUSED',
-      ts: 1,
-    } satisfies OrderEvent);
-    expect(c.sent).toEqual([{ t: 'error', reqId: 2, code: 'INVALID_TRANSITION', message: 'Cannot go from PAUSED to PAUSED' }]);
+    c.send(command(1, 'NOPE', 'CANCEL'));
+    await vi.waitFor(() => expect(c.sent).toHaveLength(1));
+    c.send(command(2, 'T0000003', 'CANCEL'));
+    await vi.waitFor(() => expect(c.sent).toHaveLength(2));
+    c.send(command(3, 'T0000001', 'RESUME'));
+    await vi.waitFor(() => expect(c.sent).toHaveLength(3));
+    c.send(command(4, 'T0000001', 'PAUSE'));
+    await vi.waitFor(() => expect(c.sent).toHaveLength(4));
+    expect(c.sent).toEqual([
+      { t: 'error', reqId: 1, code: 'UNKNOWN_ORDER', message: 'Order NOPE does not exist' },
+      { t: 'error', reqId: 2, code: 'INVALID_TRANSITION', message: 'Cannot cancel an order that is FILLED' },
+      { t: 'error', reqId: 3, code: 'INVALID_TRANSITION', message: 'Cannot resume an order that is LIVE' },
+      { t: 'error', reqId: 4, code: 'INTERNAL', message: 'command timed out' },
+    ]);
     expect(r.runtime.commands.size).toBe(0);
     await r.runtime.stop();
   });
 
-  it('errors with INTERNAL "command timed out" after 5 seconds, and ignores a late answer', async () => {
-    vi.useFakeTimers();
-    const r = await rig();
+  it('errors with INTERNAL "command timed out" when the order service does not answer', async () => {
+    const r = await rig({ commandTimeoutMs: 80 });
     const c = client(r);
     c.send(command(3, 'T0000001', 'CANCEL'));
-    await vi.advanceTimersByTimeAsync(4_900);
-    expect(types(c).filter((t) => t.startsWith('error'))).toEqual([]);
-    await vi.advanceTimersByTimeAsync(200);
-    expect(c.sent.filter((m) => m.t === 'error')).toEqual([{ t: 'error', reqId: 3, code: 'INTERNAL', message: 'command timed out' }]);
-    c.sent.length = 0;
-    await answer(r, 'c1:3', 'T0000001', { status: 'CANCELLED' });
-    await vi.advanceTimersByTimeAsync(100);
-    expect(types(c)).toEqual(['delta']);
+    await vi.waitFor(() => expect(c.sent).toEqual([{ t: 'error', reqId: 3, code: 'INTERNAL', message: 'command timed out' }]));
+    expect(r.runtime.commands.size).toBe(0);
     await r.runtime.stop();
   });
 
-  it('forgets a session`s pending commands when it closes', async () => {
-    vi.useFakeTimers();
+  it('errors with INTERNAL when the reply cannot be read', async () => {
     const r = await rig();
+    await r.bus.serve('orders.cmd', () => ({ nonsense: true }));
+    const c = client(r);
+    c.send(command(5, 'T0000001', 'PAUSE'));
+    await vi.waitFor(() => expect(c.sent).toEqual([{ t: 'error', reqId: 5, code: 'INTERNAL', message: 'Unreadable reply to the command' }]));
+    await r.runtime.stop();
+  });
+
+  it('forgets a session`s pending commands when it closes, and sends it nothing', async () => {
+    const r = await rig();
+    let release: (reply: OrderCommandReply) => void = () => undefined;
+    await r.serve(() => new Promise<OrderCommandReply>((resolve) => (release = resolve)));
     const c = client(r);
     c.send(command(4, 'T0000001', 'PAUSE'));
-    c.send(command(5, 'T0000002', 'RESUME'));
-    expect(r.runtime.commands.size).toBe(2);
+    await vi.waitFor(() => expect(r.requests).toHaveLength(1));
+    expect(r.runtime.commands.size).toBe(1);
     c.session.dispose();
     expect(r.runtime.commands.size).toBe(0);
-    await answer(r, 'c1:4', 'T0000001', { status: 'PAUSED' });
-    await vi.advanceTimersByTimeAsync(6_000);
+    release({ ok: true, v: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
     expect(c.sent).toEqual([]);
     await r.runtime.stop();
   });
 
-  it('answers INTERNAL when the command cannot be published', async () => {
-    vi.useFakeTimers();
-    const r = await rig();
-    const original = r.bus.publish.bind(r.bus);
-    vi.spyOn(r.bus, 'publish').mockImplementation((subject, payload) =>
-      subject === 'orders.commands' ? Promise.reject(new Error('nats down')) : original(subject, payload),
-    );
-    const c = client(r);
-    c.send(command(6, 'T0000001', 'PAUSE'));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(c.sent).toEqual([{ t: 'error', reqId: 6, code: 'INTERNAL', message: 'Could not send the command' }]);
-    expect(r.runtime.commands.size).toBe(0);
-    await r.runtime.stop();
-  });
-
   it('refuses a request id that is already in flight', async () => {
-    vi.useFakeTimers();
     const r = await rig();
+    await r.serve(() => new Promise<OrderCommandReply>(() => undefined));
     const c = client(r);
     c.send(command(1, 'T0000001', 'PAUSE'));
     c.send(command(1, 'T0000002', 'CANCEL'));
     expect(c.sent).toEqual([{ t: 'error', reqId: 1, code: 'BAD_REQUEST', message: 'Command c1:1 is already in progress' }]);
-    expect(r.published).toHaveLength(1);
-    await r.runtime.stop();
-  });
-
-  it('ignores answers to commands it is not waiting for', async () => {
-    vi.useFakeTimers();
-    const r = await rig();
-    const c = client(r);
-    await answer(r, 'other-process:1', 'T0000001', { status: 'PAUSED' });
-    await r.bus.publish('orders.events', {
-      type: 'REJECT',
-      commandId: 'other-process:2',
-      orderId: 'T0000001',
-      code: 'UNKNOWN_ORDER',
-      message: 'x',
-      ts: 1,
-    } satisfies OrderEvent);
-    await vi.advanceTimersByTimeAsync(100);
-    // The record is applied for everyone; nobody is waiting for the answer, so nobody is acked.
-    expect(types(c)).toEqual(['delta']);
-    expect(r.runtime.commands.size).toBe(0);
+    await vi.waitFor(() => expect(r.requests).toHaveLength(1));
     await r.runtime.stop();
   });
 });

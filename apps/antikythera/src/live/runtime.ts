@@ -2,18 +2,17 @@ import {
   CURRENCY_PAIRS,
   STREAMS,
   SUBJECTS,
-  canApplyCommand,
   makeCommandId,
   parseLoadState,
-  parseOrderEvent,
+  parseOrderCommandReply,
   parsePriceTick,
   type Bus,
   type BusSubscription,
   type KvEntry,
   type KvWatch,
-  type OrderCommand,
-  type OrderEvent,
-  type OrderStatus,
+  type ErrorCode,
+  type OrderCommandReply,
+  type OrderCommandRequest,
   type LoadPreset,
 } from '@apeiron/logos';
 import { readRecord } from '../records.js';
@@ -22,14 +21,15 @@ import type { QueryEngine } from '../query/engine.js';
 import type { View, ViewChanges } from '../query/view.js';
 import type { LiveHooks, ClientSession, CommandRequest } from '../session.js';
 import type { ColumnarStore } from '../store/columnar-store.js';
-import { CommandCorrelator, type CommandOutcome } from './commands.js';
+import { CommandTracker, DEFAULT_ACK_WAIT_V_MS, DEFAULT_COMMAND_TIMEOUT_MS, type CommandOutcome } from './commands.js';
 import { DEFAULT_BACKPRESSURE, type BackpressureOptions } from './backpressure.js';
 import type { StatusSummary } from './counters.js';
 import { LiveStore } from './live-store.js';
 import { SystemStats } from './system-stats.js';
+import { warmUp, type WarmEntry, type WarmReport } from '../warmup.js';
 
 /** Where the blotter is in starting up. The snapshot is loaded before the runtime exists. */
-export type Stage = 'snapshot' | 'catchup' | 'prices' | 'ready';
+export type Stage = 'snapshot' | 'catchup' | 'prices' | 'warmup' | 'ready' | 'draining';
 
 /** What the snapshot hands over: the still-open watch, and the highest revision it saw. */
 export type WatchHandoff = { entries: AsyncIterator<KvEntry>; watch: KvWatch; revision: number };
@@ -53,8 +53,10 @@ export type LiveRuntimeOptions = {
   rankRefreshMs?: number;
   /** Views idle this long with no subscribers are dropped (default 60s). */
   viewIdleMs?: number;
-  /** How long a command may wait for hermes before the client gets an error (default 5s). */
+  /** How long a command may wait for the order service before the client gets an error (default 5 s). */
   commandTimeoutMs?: number;
+  /** After the order service accepts a command, how long to wait for the store to hold its version before acking anyway (default 2 s). */
+  ackWaitVMs?: number;
   /** Wait between attempts to attach to the bus. */
   retryMs?: number;
   /** The order-state watch to continue from. Without one the runtime applies no records (tests that only feed ticks). */
@@ -63,6 +65,9 @@ export type LiveRuntimeOptions = {
   priceWaitMs?: number;
   /** Caught up once a watch entry has at most this many entries pending behind it (default 100). */
   catchupMaxPending?: number;
+  /** The views to build before the blotter is ready (default none), and how many passes of blocks 0 to 4 to run over each. */
+  warmViews?: readonly WarmEntry[];
+  warmRounds?: number;
   /** Called when the stage changes. */
   onStage?: (stage: Stage, seconds: number) => void;
   /** Called when the order-state watch ends unexpectedly: the process cannot keep its store current. */
@@ -85,9 +90,8 @@ export type FlushStats = {
 const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /**
- * The live half of the server. After the store has loaded it attaches to the bus (the durable `blotter-server`
- * consumer on `orders.events`, `prices.*`), then every `flushMs` it applies the queued events and ticks to the
- * store, patches every cached view from the tick's ChangeSet, and lets each client session send its delta. It
+ * The live half of the server. After the store has loaded it attaches to the bus (the order-state watch, `prices.*`),
+ * then every `flushMs` it applies the queued records and ticks to the store, patches every cached view from the tick's ChangeSet, and lets each client session send its delta. It
  * keeps string ranks fresh in the background and drops idle views.
  */
 export class LiveRuntime implements LiveHooks {
@@ -97,13 +101,12 @@ export class LiveRuntime implements LiveHooks {
   readonly maxTrackedBlocks: number;
   readonly backpressure: BackpressureOptions;
   readonly summaryIntervalMs: number;
-  readonly commands: CommandCorrelator;
+  readonly commands: CommandTracker;
   private readonly sessions = new Set<ClientSession>();
-  /** Commands the order service has answered; each is acked once the store shows the status it set. */
-  private readonly awaitingApply = new Map<string, { orderId: string; status: OrderStatus | undefined }>();
   private currentStage: Stage = 'catchup';
   private stageStarted = performance.now();
   private caughtUp = false;
+  private warm: WarmReport | null = null;
   private lastEntryAt = performance.now();
   private readonly ignored = { delete: 0, invalid: 0 };
   private reported = { applied: 0, stale: 0, delete: 0, invalid: 0 };
@@ -119,7 +122,7 @@ export class LiveRuntime implements LiveHooks {
 
   constructor(private readonly options: LiveRuntimeOptions) {
     this.live = new LiveStore(options.store, options.log);
-    this.commands = new CommandCorrelator(options.commandTimeoutMs);
+    this.commands = new CommandTracker();
     this.maxTrackedBlocks = options.maxTrackedBlocks;
     this.backpressure = options.backpressure ?? DEFAULT_BACKPRESSURE;
     this.summaryIntervalMs = options.summaryIntervalMs ?? 1_000;
@@ -127,6 +130,16 @@ export class LiveRuntime implements LiveHooks {
 
   get stage(): Stage {
     return this.currentStage;
+  }
+
+  /** What the warm-up did, once it has run. */
+  get warmup(): WarmReport | null {
+    return this.warm;
+  }
+
+  /** Stops being ready: health says so at once, and the server closes its sockets a moment later. */
+  drain(): void {
+    this.currentStage = 'draining';
   }
 
   /** Records the order service published that this process read but did not apply. */
@@ -187,48 +200,54 @@ export class LiveRuntime implements LiveHooks {
   }
 
   /**
-   * Sends a trader command to hermes. A fast pre-check against the store answers an unknown order or an
-   * impossible transition at once; otherwise the command is published to `orders.commands` and `settle` is
-   * called when the matching UPDATE has been applied (ok), hermes rejects it, or it times out. Hermes stays
-   * authoritative: the pre-check can be stale, so a command that passes it may still be rejected.
+   * Sends a trader command to the order service (`orders.cmd`, request and reply) and calls `settle` once with how it
+   * ended. The order service validates it against the lifecycle, instructs the venue and replies once the venue's report is
+   * stored and published, with the new version of the order; the blotter then acks as soon as its own store holds that
+   * version (so the client has seen the change), or after `ackWaitVMs` anyway. A refusal passes through with its code
+   * (a venue refusal as INVALID_TRANSITION, a timeout as INTERNAL "command timed out"). The blotter does not pre-check
+   * the lifecycle: the order service is the only authority.
    */
   command(request: CommandRequest, settle: (outcome: CommandOutcome) => void): void {
-    const status = this.live.statusOf(request.orderId);
-    if (status === undefined) {
-      settle({ ok: false, code: 'UNKNOWN_ORDER', message: `Order ${request.orderId} does not exist` });
-      return;
-    }
-    if (!canApplyCommand(status, request.action)) {
-      settle({
-        ok: false,
-        code: 'INVALID_TRANSITION',
-        message: `Cannot ${request.action.toLowerCase()} an order that is ${status}`,
-      });
-      return;
-    }
     const commandId = makeCommandId(request.clientId, request.reqId);
     const { metrics } = this.options;
-    const started = performance.now();
-    const timed = (outcome: CommandOutcome): void => {
-      metrics?.command(outcome.ok ? 'ok' : outcome.code, (performance.now() - started) / 1000);
-      settle(outcome);
-    };
-    if (!this.commands.register(commandId, request.owner, timed)) {
+    if (!this.commands.start(commandId, request.owner)) {
       settle({ ok: false, code: 'BAD_REQUEST', message: `Command ${commandId} is already in progress` });
       return;
     }
-    const payload: OrderCommand = {
-      orderId: request.orderId,
-      action: request.action,
-      requestedBy: request.clientId,
-      ts: Date.now(),
-      commandId,
+    const started = performance.now();
+    const done = (outcome: CommandOutcome): void => {
+      if (!this.commands.finish(commandId)) return;
+      metrics?.command(outcome.ok ? 'ok' : outcome.code, (performance.now() - started) / 1000);
+      settle(outcome);
     };
+    const body: OrderCommandRequest =
+      'action' in request
+        ? { commandId, userId: request.userId, orderId: request.orderId, kind: 'action', action: request.action }
+        : { commandId, userId: request.userId, orderId: request.orderId, kind: 'amend', changes: request.changes };
     metrics?.ingest('command');
-    this.options.bus.publish(SUBJECTS.ordersCommands, payload).catch((error: unknown) => {
-      this.options.log.error({ err: error, commandId }, 'failed to publish order command');
-      this.commands.resolve(commandId, { ok: false, code: 'INTERNAL', message: 'Could not send the command' });
-    });
+    this.options.bus.request(SUBJECTS.ordersCmd, body, this.options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS).then(
+      (raw) => {
+        const parsed = parseOrderCommandReply(raw);
+        if (!parsed.ok) {
+          this.options.log.error({ error: parsed.error, commandId }, 'unreadable command reply');
+          done({ ok: false, code: 'INTERNAL', message: 'Unreadable reply to the command' });
+          return;
+        }
+        const reply: OrderCommandReply = parsed.value;
+        if (!reply.ok) {
+          done(failure(reply));
+          return;
+        }
+        const deadline = performance.now() + (this.options.ackWaitVMs ?? DEFAULT_ACK_WAIT_V_MS);
+        this.commands.waitForVersion(commandId, request.orderId, reply.v, deadline, () => done({ ok: true }));
+        // The record may already be here.
+        this.settleAcks();
+      },
+      (error: unknown) => {
+        this.options.log.warn({ err: error, commandId }, 'command request failed');
+        done({ ok: false, code: 'INTERNAL', message: 'command timed out' });
+      },
+    );
   }
 
   preset(): LoadPreset | null {
@@ -237,6 +256,11 @@ export class LiveRuntime implements LiveHooks {
 
   setPreset(preset: LoadPreset): Promise<void> {
     return this.options.bus.publish(SUBJECTS.controlLoad, { preset });
+  }
+
+  traderOf(orderId: string): string | undefined {
+    const row = this.options.store.rowIndexOf(orderId);
+    return row === undefined ? undefined : this.options.store.orderAt(row).traderId;
   }
 
   summary(traderId: string): StatusSummary {
@@ -274,7 +298,7 @@ export class LiveRuntime implements LiveHooks {
         }
       }
       // After the sessions have sent their deltas, so a client sees the status change before its ack.
-      this.settleAppliedCommands();
+      this.settleAcks();
       this.reportRecords();
       const ms = performance.now() - t0;
       this.options.metrics?.flush(ms / 1000);
@@ -345,6 +369,8 @@ export class LiveRuntime implements LiveHooks {
   // ---- bus
 
   private setStage(stage: Stage): void {
+    // A blotter that is draining never goes back to starting up or to ready.
+    if (this.currentStage === 'draining') return;
     const now = performance.now();
     const seconds = (now - this.stageStarted) / 1000;
     this.options.metrics?.startup(this.currentStage, seconds);
@@ -366,23 +392,13 @@ export class LiveRuntime implements LiveHooks {
     }
   }
 
-  /** A command's answer: a REJECT fails it at once; an UPDATE waits until the store shows the status it set. */
-  private correlate(event: OrderEvent): void {
-    if (event.type === 'REJECT') {
-      this.commands.resolve(event.commandId, { ok: false, code: event.code, message: event.message });
-    } else if (event.type === 'UPDATE' && event.commandId !== undefined && this.commands.has(event.commandId)) {
-      this.awaitingApply.set(event.commandId, { orderId: event.order.orderId, status: event.order.status });
-    }
-  }
-
-  private settleAppliedCommands(): void {
-    for (const [commandId, waiting] of this.awaitingApply) {
-      if (!this.commands.has(commandId)) this.awaitingApply.delete(commandId);
-      else if (waiting.status === undefined || this.live.statusOf(waiting.orderId) === waiting.status) {
-        this.awaitingApply.delete(commandId);
-        this.commands.resolve(commandId, { ok: true });
-      }
-    }
+  /** Acks the commands whose version the store now holds (or whose wait is over). */
+  private settleAcks(): void {
+    const store = this.options.store;
+    this.commands.release((orderId) => {
+      const row = store.rowIndexOf(orderId);
+      return row === undefined ? undefined : store.versionAt(row);
+    }, performance.now());
   }
 
   /**
@@ -400,6 +416,12 @@ export class LiveRuntime implements LiveHooks {
     await this.waitForPrices();
     if (this.stopped) return;
     this.flush();
+    this.setStage('warmup');
+    this.warm = await warmUp(this.options.engine, this.options.warmViews ?? [], this.options.warmRounds ?? 1, {
+      log: (fields, message) => this.options.log.warn(fields, message),
+    });
+    this.options.log.info({ ...this.warm }, 'warm-up finished');
+    if (this.stopped || this.currentStage === 'draining') return;
     this.setStage('ready');
   }
 
@@ -487,13 +509,6 @@ export class LiveRuntime implements LiveHooks {
         if (parsed.ok) this.currentPreset = parsed.value.preset;
       });
       this.subscriptions.push(state);
-      // Until commands go through the order service (phase 1.5c), the answer to a command is still an event on
-      // `orders.events`. Listened to plain: this is not a consumer and holds no position in the stream.
-      const answers = await bus.subscribe(SUBJECTS.ordersEvents, (payload) => {
-        const parsed = parseOrderEvent(payload);
-        if (parsed.ok) this.correlate(parsed.value);
-      });
-      this.subscriptions.push(answers);
       this.attached = true;
       log.info({}, 'attached to the message bus');
     } catch (error) {
@@ -505,4 +520,11 @@ export class LiveRuntime implements LiveHooks {
       await this.attach();
     }
   }
+}
+
+/** The client-facing failure for an order service refusal. */
+function failure(reply: Extract<OrderCommandReply, { ok: false }>): Extract<CommandOutcome, { ok: false }> {
+  const code: ErrorCode =
+    reply.code === 'VENUE_REJECT' ? 'INVALID_TRANSITION' : reply.code === 'TIMEOUT' ? 'INTERNAL' : reply.code;
+  return { ok: false, code, message: reply.code === 'TIMEOUT' ? 'command timed out' : reply.message };
 }

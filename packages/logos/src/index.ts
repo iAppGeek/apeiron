@@ -12,3 +12,4 @@ export * from './bus.js';
 export * from './memory-bus.js';
 export * from './contracts.js';
 export * from './rules.js';
+export * from './entitlements.js';

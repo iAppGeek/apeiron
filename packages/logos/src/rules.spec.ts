@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { sampleOrders } from './fixtures.js';
 import type { ExecReport, OrderStateRecord, Submission } from './contracts.js';
 import type { Order } from './order.js';
-import { applyAmend, applyExecReport, recordFromSubmission, validateSubmission } from './rules.js';
+import { applyAmend, applyExecReport, canAmend, checkAmend, recordFromSubmission, validateSubmission } from './rules.js';
 
 const NOW = 1_800_000_000_000;
 const QUOTE = { bid: 1.0799, ask: 1.0801 };
@@ -224,6 +224,28 @@ describe('applyAmend', () => {
     expect(applyAmend(base, changes, NOW)).toMatchObject({ ok: false, code: 'INVALID_AMEND' });
   });
 
+  it('gives a PAUSED order the whole pause back on resume, even when it was amended while paused', () => {
+    const pausedAt = NOW - 60_000;
+    const base = record({ status: 'PAUSED', lastUpdateTime: pausedAt });
+    const amended = ok(applyAmend(base, { urgency: 'LOW' }, NOW));
+    expect(amended.order.endTime).toBe(base.order.endTime + 60_000);
+    const resumedAt = NOW + 30_000;
+    const resumed = applyExecReport(amended, { type: 'RESUMED', orderId: 'X', execSeq: 1, instrId: 'c:1', ts: resumedAt });
+    if (resumed.kind !== 'applied') throw new Error(resumed.kind);
+    expect(resumed.record.order.endTime).toBe(base.order.endTime + (resumedAt - pausedAt));
+  });
+
+  it('takes an end time set while paused as given, and extends it only by the pause after the amend', () => {
+    const base = record({ status: 'PAUSED', lastUpdateTime: NOW - 60_000 });
+    const endTime = NOW + 900_000;
+    expect(ok(applyAmend(base, { endTime }, NOW)).order.endTime).toBe(endTime);
+  });
+
+  it('leaves the end time of a LIVE order alone unless the amend sets it', () => {
+    const base = record();
+    expect(ok(applyAmend(base, { urgency: 'LOW' }, NOW)).order.endTime).toBe(base.order.endTime);
+  });
+
   it('does not mutate its input', () => {
     const base = record();
     const copy = structuredClone(base);
@@ -262,5 +284,34 @@ describe('validateSubmission and recordFromSubmission', () => {
     const rec = recordFromSubmission(submission(), 'ALG00000042', NOW);
     expect(rec).toMatchObject({ v: 1, execSeq: 0, srcTs: NOW });
     expect(rec.order).toMatchObject({ orderId: 'ALG00000042', createdAt: NOW, lastUpdateTime: NOW });
+  });
+});
+
+describe('checkAmend and canAmend', () => {
+  const working = (over: Partial<Order> = {}): Order => record({ startTime: NOW - 60_000, endTime: NOW + 3_600_000, limitPrice: null, urgency: 'MEDIUM', filledQty: 100_000, remainingQty: 900_000, ...over }).order;
+
+  it('says which statuses can be amended', () => {
+    expect((['PENDING_START', 'LIVE', 'PAUSED'] as const).map(canAmend)).toEqual([true, true, true]);
+    expect((['FILLED', 'CANCELLED'] as const).map(canAmend)).toEqual([false, false]);
+  });
+
+  it('returns null for an amend that may go ahead, and the failure otherwise, in the words applyAmend uses', () => {
+    const order = working();
+    expect(checkAmend(order, { urgency: 'HIGH' }, NOW)).toBeNull();
+    expect(checkAmend(working({ status: 'FILLED' }), { urgency: 'HIGH' }, NOW)).toEqual({ code: 'INVALID_TRANSITION', message: 'Cannot amend an order that is FILLED' });
+    expect(checkAmend(order, { orderQty: 100_000 }, NOW)).toEqual({ code: 'INVALID_AMEND', message: 'Quantity must be a whole number above the filled quantity (100000)' });
+    expect(checkAmend(order, { orderQty: order.orderQty, urgency: order.urgency }, NOW)).toEqual({ code: 'INVALID_AMEND', message: 'Nothing to change' });
+    expect(checkAmend(order, { endTime: NOW - 1 }, NOW)).toEqual({ code: 'INVALID_AMEND', message: 'End time must be after now and the start time' });
+    expect(checkAmend(order, { limitPrice: 1.123456789 }, NOW)).toMatchObject({ code: 'INVALID_AMEND' });
+  });
+
+  it('agrees with applyAmend about every case', () => {
+    const base = record({ startTime: NOW - 60_000, endTime: NOW + 3_600_000, filledQty: 100_000, remainingQty: 900_000 });
+    for (const changes of [{ urgency: 'HIGH' }, { orderQty: 5 }, { endTime: 1 }, { limitPrice: 0.5 }, {}] as const) {
+      const failure = checkAmend(base.order, changes, NOW);
+      const applied = applyAmend(base, changes, NOW);
+      expect(applied.ok).toBe(failure === null);
+      if (!applied.ok) expect(failure).toEqual({ code: applied.code, message: applied.message });
+    }
   });
 });

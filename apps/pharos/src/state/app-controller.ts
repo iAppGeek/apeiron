@@ -4,6 +4,7 @@ import { describeFailure } from '../grid/errors';
 import { createLatencyWindow, tickToScreenMs } from '../metrics/latency';
 import { RequestError, type BlotterClient } from '../transport/client';
 import { useAppStore } from './app-store';
+import { rememberUser, type UserStorage } from './users';
 
 /** Applies a delta to the grid and says how many rows it touched (for the rows-updated-per-second figure). */
 export type DeltaHandler = (delta: DeltaMsg) => ApplyStats | void;
@@ -11,6 +12,8 @@ export type DeltaHandler = (delta: DeltaMsg) => ApplyStats | void;
 export type ControllerDeps = {
   /** Wall clock in ms; the same clock the transport worker uses for ping and clock offset. */
   now?: () => number;
+  /** Where the tab remembers its user (`sessionStorage`); null when there is none. */
+  storage?: UserStorage | null;
 };
 
 /** The close code the server uses with SLOW_CONSUMER. */
@@ -19,8 +22,10 @@ export const SLOW_CONSUMER_CLOSE_CODE = 1013;
 export const LATENCY_WINDOW_MS = 10_000;
 
 export type AppController = {
-  /** Connects the transport and sends the first hello. Returns a function that undoes the wiring. */
+  /** Connects the transport and sends the first hello, once there is a user to sign in as. Returns a function that undoes the wiring. */
   start: (url: string) => () => void;
+  /** Signs this tab in as `userId`: the first time it connects, afterwards it re-sends hello with the trader reset to ALL. */
+  changeUser: (userId: string) => Promise<void>;
   changeTrader: (traderId: string) => Promise<void>;
   changeCodec: (codec: CodecName) => Promise<void>;
   /** Sends the load preset (medium or stress) to the server, which relays it to the mock middleware. */
@@ -41,6 +46,8 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
   /** Trader hellos sent and not yet answered. */
   let inflightTraderHellos = 0;
   let deltaHandler: DeltaHandler | null = null;
+  let wsUrl: string | null = null;
+  let connected = false;
 
   const latency = createLatencyWindow(LATENCY_WINDOW_MS);
   let clockOffsetMs: number | null = null;
@@ -49,6 +56,23 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
   /** The link dropped (or the server cut us off) after we were welcomed: what the grid holds is no longer being kept up to date. */
   let resyncPending = false;
   let slowConsumerToast = false;
+  /** The latest welcome came from a different user than the one before it. */
+  let userSwitched = false;
+
+  /** Opens the socket and says hello as the requested user. Does nothing until a user has been picked. */
+  const connectNow = (): void => {
+    const { requestedUser, requestedTrader, codec } = useAppStore.getState();
+    if (wsUrl === null || requestedUser === null || connected) return;
+    connected = true;
+    client.connect(wsUrl);
+    client.hello(requestedUser, requestedTrader, codec).catch((error: unknown) => {
+      // A dropped link is already shown in the status bar, and the reconnect re-sends this hello.
+      if (error instanceof RequestError && error.code === 'DISCONNECTED') return;
+      // The server refused the user: ask again.
+      useAppStore.getState().setRequestedUser(null);
+      reportFailure(error);
+    });
+  };
 
   const reportFailure = (error: unknown): void => {
     const state = useAppStore.getState();
@@ -112,9 +136,14 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
         slowConsumerToast = false;
         state.setWelcomed(msg.traders);
         if (msg.preset !== null) state.setPreset(msg.preset);
+        {
+          const previousUser = state.confirmedUser?.userId ?? null;
+          state.setConfirmedUser(msg.user ?? null);
+          userSwitched = previousUser !== null && msg.user !== undefined && previousUser !== msg.user.userId;
+        }
         // A welcome with no trader change in flight is the answer to a reconnect hello, which carries the
-        // requested trader, so the server has now confirmed it.
-        if (inflightTraderHellos === 0 && state.requestedTrader !== state.confirmedTrader) {
+        // requested user and trader, so the server has now confirmed them.
+        if (inflightTraderHellos === 0 && (state.requestedTrader !== state.confirmedTrader || userSwitched)) {
           confirmTrader(state.requestedTrader);
         } else if (resyncPending) {
           // A fresh session tracks nothing, so deltas stop for every row the grid already holds. Reload them.
@@ -160,12 +189,8 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
         if (code === SLOW_CONSUMER_CLOSE_CODE) onSlowConsumer();
       });
       const offMessage = client.on('message', onMessage);
-      client.connect(url);
-      const { requestedTrader, codec } = useAppStore.getState();
-      client.hello(requestedTrader, codec).catch((error: unknown) => {
-        // A dropped link is already shown in the status bar, and the reconnect re-sends this hello.
-        if (!(error instanceof RequestError && error.code === 'DISCONNECTED')) reportFailure(error);
-      });
+      wsUrl = url;
+      connectNow();
       return (): void => {
         offStatus();
         offStats();
@@ -174,12 +199,42 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
       };
     },
 
+    async changeUser(userId: string): Promise<void> {
+      const state = useAppStore.getState();
+      const previous = { user: state.requestedUser, trader: state.requestedTrader };
+      rememberUser(deps.storage ?? null, userId);
+      state.setRequestedUser(userId);
+      if (!connected) {
+        connectNow();
+        return;
+      }
+      // Another user is another table: start from all of their traders.
+      state.setRequestedTrader('ALL');
+      inflightTraderHellos += 1;
+      try {
+        await client.hello(userId, 'ALL', state.codec);
+      } catch (error) {
+        inflightTraderHellos -= 1;
+        // A dropped link keeps the request: the reconnect hello carries it and its welcome confirms it.
+        if (error instanceof RequestError && error.code === 'DISCONNECTED') return;
+        const current = useAppStore.getState();
+        current.setRequestedUser(previous.user);
+        current.setRequestedTrader(previous.trader);
+        if (previous.user !== null) rememberUser(deps.storage ?? null, previous.user);
+        reportFailure(error);
+        return;
+      }
+      inflightTraderHellos -= 1;
+      confirmTrader('ALL');
+    },
+
     async changeTrader(traderId: string): Promise<void> {
-      const { codec, setRequestedTrader } = useAppStore.getState();
+      const { codec, requestedUser, setRequestedTrader } = useAppStore.getState();
+      if (requestedUser === null) return;
       setRequestedTrader(traderId);
       inflightTraderHellos += 1;
       try {
-        await client.hello(traderId, codec);
+        await client.hello(requestedUser, traderId, codec);
       } catch (error) {
         inflightTraderHellos -= 1;
         // A dropped link keeps the request: the reconnect hello carries it and its welcome confirms it.
@@ -193,9 +248,10 @@ export function createAppController(client: BlotterClient, deps: ControllerDeps 
     },
 
     async changeCodec(codec: CodecName): Promise<void> {
-      const { requestedTrader, setCodec } = useAppStore.getState();
+      const { requestedUser, requestedTrader, setCodec } = useAppStore.getState();
+      if (requestedUser === null) return;
       try {
-        await client.hello(requestedTrader, codec);
+        await client.hello(requestedUser, requestedTrader, codec);
       } catch (error) {
         reportFailure(error);
         return;

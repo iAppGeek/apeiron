@@ -1,4 +1,4 @@
-import type { CodecName, CommandAction, LoadPreset, Row, ServerMsg, SsrmRequest } from '@apeiron/logos';
+import type { AmendChanges, CodecName, CommandAction, LoadPreset, Row, ServerMsg, SsrmRequest } from '@apeiron/logos';
 import type {
   ConnectionStatus,
   Failure,
@@ -52,7 +52,7 @@ export class RequestError extends Error {
 export type BlotterClient = {
   connect(url: string): void;
   /** Resolves with the server's welcome once it accepts the trader and codec. */
-  hello(traderId: string, codec: CodecName): Promise<WelcomeMsg>;
+  hello(userId: string, traderId: string, codec: CodecName): Promise<WelcomeMsg>;
   getRows(req: SsrmRequest): Promise<RowsResult>;
   setFilterValues(colId: string): Promise<string[]>;
   /** Asks the server to switch the mock middleware load preset; resolves when the server has published it. */
@@ -63,6 +63,8 @@ export type BlotterClient = {
    * UNKNOWN_ORDER, INTERNAL for a timeout) or a transport code.
    */
   command(orderId: string, action: CommandAction): Promise<void>;
+  /** Changes the limit price, quantity, end time or urgency of a working order. Resolves when the server has applied it. */
+  amend(orderId: string, changes: AmendChanges): Promise<void>;
   on<E extends keyof ClientEvents>(event: E, handler: (payload: ClientEvents[E]) => void): () => void;
   /** Requests and hellos still waiting for an answer; zero once every one has been answered or failed. */
   pending(): number;
@@ -139,11 +141,11 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
       worker.postMessage({ kind: 'connect', url });
     },
 
-    hello(traderId: string, codec: CodecName): Promise<WelcomeMsg> {
+    hello(userId: string, traderId: string, codec: CodecName): Promise<WelcomeMsg> {
       return new Promise<WelcomeMsg>((resolve, reject) => {
         const id = nextId++;
         hellos.set(id, { resolve, reject });
-        worker.postMessage({ kind: 'hello', id, traderId, codec });
+        worker.postMessage({ kind: 'hello', id, userId, traderId, codec });
       });
     },
 
@@ -166,6 +168,11 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
 
     async command(orderId: string, action: CommandAction): Promise<void> {
       const msg = await request((reqId) => ({ t: 'command', reqId, orderId, action }));
+      if (msg.t !== 'ack') throw new RequestError({ code: 'INTERNAL', message: `Unexpected reply: ${msg.t}` });
+    },
+
+    async amend(orderId: string, changes: AmendChanges): Promise<void> {
+      const msg = await request((reqId) => ({ t: 'amend', reqId, orderId, changes }));
       if (msg.t !== 'ack') throw new RequestError({ code: 'INTERNAL', message: `Unexpected reply: ${msg.t}` });
     },
 
