@@ -67,6 +67,8 @@ export type Harness = {
   since(): Promise<{ reconnects: number; deltasApplied: number }[]>;
   /** Waits until every page shows Connected and is not busy. */
   allConnected(timeoutMs: number): Promise<boolean>;
+  /** Notes each page's close count now and returns a check that holds once every page's socket has closed since. */
+  closedSinceNow(): Promise<() => Promise<boolean>>;
   /** Runs check 2 on every page right now, without stopping anything. The canary uses it to prove the check can fail. */
   screens(): Promise<Check[]>;
   /** Stops the stream, waits for everything to go quiet, runs the three checks and writes the report. */
@@ -181,6 +183,11 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 
     allConnected: (timeoutMs) =>
       until(async () => (await Promise.all(pages.map((p) => readStats(p.page)))).every((s) => s.state === 'connected' && !s.busy), timeoutMs, 250),
+
+    async closedSinceNow(): Promise<() => Promise<boolean>> {
+      const before = (await Promise.all(pages.map((p) => readStats(p.page)))).map((s) => s.closes);
+      return async () => (await Promise.all(pages.map((p) => readStats(p.page)))).every((s, i) => s.closes > (before[i] ?? 0));
+    },
 
     async screens(): Promise<Check[]> {
       const out: Check[] = [];

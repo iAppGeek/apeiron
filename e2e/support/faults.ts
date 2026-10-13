@@ -12,8 +12,12 @@ export type FaultsOptions = {
 };
 
 export type Faults = {
-  /** Resets every live connection (TCP RST) and lets new ones through again almost at once. */
-  dropClean(): Promise<void>;
+  /**
+   * Resets every live connection (TCP RST) and lets new ones through again almost at once. Toxiproxy's reset_peer only
+   * fires on a connection when a byte flows through it, so one that is quiet for the whole window survives; pass `landed`
+   * (true once every connection has been reset) to keep the toxic on past the window until it holds, up to {@link RESET_MAX_MS}.
+   */
+  dropClean(landed?: () => Promise<boolean>): Promise<void>;
   /** Disables the proxy, which closes every connection and refuses new ones, for `ms`, then enables it. */
   down(ms: number): Promise<void>;
   /** Half-open stall: data stops flowing both ways and nothing is closed. Undo with {@link Faults.clear}. */
@@ -36,6 +40,9 @@ const defaultSleep = (ms: number): Promise<void> =>
 
 /** How long the reset toxic stays on: long enough for every live connection to be reset, short enough that the retry gets through. */
 export const RESET_WINDOW_MS = 600;
+/** The longest the reset toxic stays on while waiting for `landed`. */
+export const RESET_MAX_MS = 15_000;
+const RESET_POLL_MS = 100;
 
 export function createFaults(options: FaultsOptions = {}): Faults {
   const api = options.api ?? 'http://127.0.0.1:8474';
@@ -78,10 +85,16 @@ export function createFaults(options: FaultsOptions = {}): Faults {
   };
 
   return {
-    async dropClean(): Promise<void> {
+    async dropClean(landed?: () => Promise<boolean>): Promise<void> {
       await addToxic({ name: 'reset', type: 'reset_peer', stream: 'downstream', toxicity: 1, attributes: { timeout: 0 } });
-      await sleep(RESET_WINDOW_MS);
-      await removeToxic('reset');
+      try {
+        await sleep(RESET_WINDOW_MS);
+        for (let waited = RESET_WINDOW_MS; landed !== undefined && waited < RESET_MAX_MS && !(await landed()); waited += RESET_POLL_MS) {
+          await sleep(RESET_POLL_MS);
+        }
+      } finally {
+        await removeToxic('reset');
+      }
     },
 
     async down(ms: number): Promise<void> {
