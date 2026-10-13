@@ -15,6 +15,7 @@ import { buildServer, type BlotterServer } from './server.js';
 import { seedBucket } from './testing/bucket.js';
 import { propertyOrders } from './testing/dataset.js';
 import { defaultWarmViews } from './warmup.js';
+import { testEntitlements } from './testing/users.js';
 
 const ORDERS = propertyOrders(7, 1_200);
 
@@ -95,7 +96,7 @@ beforeEach(async () => {
   bus = new MemoryBus();
   await seeded(bus);
   await publishAllPrices(bus);
-  server = await buildServer({ bus, logLevel: 'silent', storeCapacity: 2_000, ...FAST });
+  server = await buildServer({ entitlements: testEntitlements, bus, logLevel: 'silent', storeCapacity: 2_000, ...FAST });
   await server.app.listen({ port: 0, host: '127.0.0.1' });
   const addr = server.app.server.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
@@ -138,7 +139,7 @@ describe('GET /health', () => {
   });
 
   it('warms the configured views before it is ready, and reports how long that took', async () => {
-    const warm = await buildServer({ bus, logLevel: 'silent', storeCapacity: 2_000, ...FAST, warmViews: defaultWarmViews(), warmRounds: 2 });
+    const warm = await buildServer({ entitlements: testEntitlements, bus, logLevel: 'silent', storeCapacity: 2_000, ...FAST, warmViews: defaultWarmViews(), warmRounds: 2 });
     expect(warm.health().warmupMs).toBe(0);
     await warm.load();
     expect(warm.health()).toMatchObject({ status: 'ok', stage: 'ready' });
@@ -157,7 +158,7 @@ describe('GET /health', () => {
 
   it('stays in the snapshot stage and never reports ok against a bucket with no projection marker', async () => {
     const empty = new MemoryBus();
-    const s = await buildServer({ bus: empty, logLevel: 'silent', storeCapacity: 10, ...FAST });
+    const s = await buildServer({ entitlements: testEntitlements, bus: empty, logLevel: 'silent', storeCapacity: 10, ...FAST });
     const loading = s.load();
     await new Promise((r) => setTimeout(r, 60));
     const res = await s.app.inject({ method: 'GET', url: '/health' });
@@ -173,7 +174,7 @@ describe('GET /health', () => {
   it('answers NOT_READY until it has prices, then serves rows', async () => {
     const quiet = new MemoryBus();
     await seeded(quiet);
-    const s = await buildServer({ bus: quiet, logLevel: 'silent', storeCapacity: 2_000, ...FAST, priceWaitMs: 1_500 });
+    const s = await buildServer({ entitlements: testEntitlements, bus: quiet, logLevel: 'silent', storeCapacity: 2_000, ...FAST, priceWaitMs: 1_500 });
     await s.app.listen({ port: 0, host: '127.0.0.1' });
     const addr = s.app.server.address();
     const url = `ws://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : 0}/ws`;
@@ -181,7 +182,7 @@ describe('GET /health', () => {
     await new Promise((r) => setTimeout(r, 700));
     expect(s.health()).toMatchObject({ stage: 'prices', status: 'loading' });
     const c = await connect(url);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'early' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'early' });
     await c.next();
     c.send({ t: 'getRows', reqId: 1, req: req() });
     expect(await c.next()).toMatchObject({ t: 'error', code: 'NOT_READY' });
@@ -197,7 +198,7 @@ describe('GET /health', () => {
     await seeded(failing, ORDERS.slice(0, 3));
     const kv = failing.kv.bind(failing);
     failing.kv = (name) => ({ ...kv(name), status: () => Promise.reject(new Error('nats down')) });
-    const s = await buildServer({ bus: failing, logLevel: 'silent', storeCapacity: 10, ...FAST });
+    const s = await buildServer({ entitlements: testEntitlements, bus: failing, logLevel: 'silent', storeCapacity: 10, ...FAST });
     await expect(s.load()).rejects.toThrow('nats down');
     const res = await s.app.inject({ method: 'GET', url: '/health' });
     expect(res.statusCode).toBe(503);
@@ -210,7 +211,7 @@ describe.each<CodecName>(['json', 'msgpack'])('GET /ws (%s)', (codec) => {
   it('runs hello, getRows (flat and grouped), setFilterValues, a bad message and ping', async () => {
     await server.load();
     const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'ALL', codec, clientId: 'it-1' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec, clientId: 'it-1' });
     const welcome = await c.next();
     expect(welcome).toMatchObject({ t: 'welcome' });
 
@@ -272,11 +273,11 @@ describe.each<CodecName>(['json', 'msgpack'])('GET /ws (%s)', (codec) => {
   it('scopes rows to the trader from hello and resets on a new hello', async () => {
     await server.load();
     const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'T1', codec, clientId: 'it-2' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'T1', codec, clientId: 'it-2' });
     await c.next();
     c.send({ t: 'getRows', reqId: 1, req: req() });
     const t1 = await c.next();
-    c.send({ t: 'hello', traderId: 'ALL', codec, clientId: 'it-2' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec, clientId: 'it-2' });
     await c.next();
     c.send({ t: 'getRows', reqId: 2, req: req() });
     const all = await c.next();
@@ -294,7 +295,7 @@ describe('GET /ws codec renegotiation', () => {
     let reqId = 0;
     for (const codec of ['json', 'msgpack', 'json', 'msgpack'] as const) {
       // Every hello is JSON text, whichever codec is in use; the welcome comes back in the new codec.
-      c.send({ t: 'hello', traderId: 'ALL', codec, clientId: 'switch' }, 'json');
+      c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec, clientId: 'switch' }, 'json');
       expect(await c.next()).toMatchObject({ t: 'welcome' });
       reqId += 1;
       c.send({ t: 'getRows', reqId, req: req() });
@@ -318,7 +319,7 @@ describe('GET /ws robustness', () => {
     await new Promise((r) => bad.socket.once('close', r));
 
     const good = await connect(wsUrl);
-    good.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'ok' });
+    good.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'ok' });
     expect(await good.next()).toMatchObject({ t: 'welcome' });
     await good.close();
     expect((await fetch(`${base}/health`)).status).toBe(200);
@@ -326,7 +327,7 @@ describe('GET /ws robustness', () => {
 
   it('answers NOT_READY while loading', async () => {
     const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'early' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'early' });
     await c.next();
     c.send({ t: 'getRows', reqId: 1, req: req() });
     expect(await c.next()).toMatchObject({ t: 'error', reqId: 1, code: 'NOT_READY' });
@@ -334,13 +335,13 @@ describe('GET /ws robustness', () => {
   });
 
   it('logs cold builds that cross the slow threshold', async () => {
-    const slow = await buildServer({ bus, logLevel: 'silent', storeCapacity: 2_000, slowBuildMs: 0, ...FAST });
+    const slow = await buildServer({ entitlements: testEntitlements, bus, logLevel: 'silent', storeCapacity: 2_000, slowBuildMs: 0, ...FAST });
     await slow.app.listen({ port: 0, host: '127.0.0.1' });
     await slow.load();
     const addr = slow.app.server.address();
     const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
     const c = await connect(`ws://127.0.0.1:${port}/ws`);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'slow' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'slow' });
     await c.next();
     c.send({ t: 'getRows', reqId: 1, req: req() });
     expect(await c.next()).toMatchObject({ t: 'rows' });
@@ -380,7 +381,7 @@ describe('draining', () => {
   it('keeps serving the clients it already has until the sockets close', async () => {
     await server.load();
     const c = await connect(wsUrl);
-    c.send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'staying' });
+    c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'staying' });
     await c.next();
     const draining = server.drain(120);
     c.send({ t: 'getRows', reqId: 1, req: req() });

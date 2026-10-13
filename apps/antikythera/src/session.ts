@@ -1,13 +1,19 @@
 import {
   COLUMNS_VERSION,
   TRADERS,
+  findUser,
+  entitledTraders,
   getCodec,
+  mayAct,
   jsonCodec,
   msgpackCodec,
   parseClientMsg,
+  resolveScope,
   type ClientMsg,
   type CommandAction,
   type Codec,
+  type EntitlementUser,
+  type Entitlements,
   type ErrorCode,
   type LoadPreset,
   type ServerMsg,
@@ -40,6 +46,8 @@ export type LiveHooks = {
   /** The preset hermes last reported on `control.state`, or null before it has. */
   preset(): LoadPreset | null;
   summary(traderId: string): StatusSummary;
+  /** The trader who owns the order, or undefined when the store does not hold it. */
+  traderOf(orderId: string): string | undefined;
   stats(): ServerStats;
   maxTrackedBlocks: number;
   backpressure: BackpressureOptions;
@@ -47,7 +55,7 @@ export type LiveHooks = {
 };
 
 /** A trader command on its way to the order service. `owner` ties it to the session so it is forgotten when that closes. */
-export type CommandRequest = { owner: object; clientId: string; userId?: string; reqId: number; orderId: string; action: CommandAction };
+export type CommandRequest = { owner: object; clientId: string; userId: string; reqId: number; orderId: string; action: CommandAction };
 
 /** One flush tick as seen by a session. */
 export type FlushContext = { cs: ChangeSet; byView: ReadonlyMap<View, ViewChanges>; now: number; store: ColumnarStore };
@@ -58,6 +66,8 @@ export type SessionDeps = {
   /** Null until the store has finished loading. */
   engine: () => QueryEngine | null;
   log: SessionLogger;
+  /** Who may sign in and which traders each may see and act on. */
+  entitlements: Entitlements;
   traders?: readonly TraderInfo[];
   now?: () => number;
   /** Called after every successful getRows (used to log slow cold builds). */
@@ -83,7 +93,9 @@ function reqIdOf(input: unknown): number | undefined {
 export class ClientSession {
   private codec: Codec = jsonCodec;
   private helloDone = false;
+  /** The trader scope this client's views are built for: one trader, or `ALL` for a user entitled to everyone. */
   private traderId = 'ALL';
+  private user: EntitlementUser | null = null;
   private clientId = '';
   private closed = false;
   private tracker: ClientTracker | null = null;
@@ -254,12 +266,19 @@ export class ClientSession {
   }
 
   private onHello(msg: Extract<ClientMsg, { t: 'hello' }>): void {
-    if (msg.traderId !== 'ALL' && !this.traders.some((t) => t.traderId === msg.traderId)) {
-      this.sendError(undefined, 'UNKNOWN_TRADER', `Unknown trader: ${msg.traderId}`);
+    const user = findUser(this.deps.entitlements, msg.userId);
+    if (user === undefined) {
+      this.sendError(undefined, 'UNKNOWN_USER', `Unknown user: ${msg.userId}`);
+      return;
+    }
+    const scope = resolveScope(user, msg.traderId, this.traders);
+    if (!scope.ok) {
+      this.sendError(undefined, scope.code, scope.message);
       return;
     }
     this.codec = getCodec(msg.codec);
-    this.traderId = msg.traderId;
+    this.user = user;
+    this.traderId = scope.scope;
     this.clientId = msg.clientId;
     this.helloDone = true;
     this.tracker?.reset();
@@ -268,7 +287,8 @@ export class ClientSession {
     this.send({
       t: 'welcome',
       serverTime: this.now(),
-      traders: [...this.traders],
+      user: { userId: user.userId, name: user.name },
+      traders: entitledTraders(user, this.traders),
       columnsVersion: COLUMNS_VERSION,
       preset: this.deps.live?.()?.preset() ?? null,
     });
@@ -311,8 +331,13 @@ export class ClientSession {
       this.sendError(msg.reqId, 'NOT_IMPLEMENTED', 'commands are not available without a message bus');
       return;
     }
+    const owner = live.traderOf(msg.orderId);
+    if (this.user === null || (owner !== undefined && !mayAct(this.user, owner))) {
+      this.sendError(msg.reqId, 'FORBIDDEN', `Order ${msg.orderId} belongs to a trader you may not act for`);
+      return;
+    }
     live.command(
-      { owner: this, clientId: this.clientId, reqId: msg.reqId, orderId: msg.orderId, action: msg.action },
+      { owner: this, clientId: this.clientId, userId: this.user.userId, reqId: msg.reqId, orderId: msg.orderId, action: msg.action },
       (outcome) => {
         if (outcome.ok) this.send({ t: 'ack', reqId: msg.reqId });
         else this.sendError(msg.reqId, outcome.code, outcome.message);

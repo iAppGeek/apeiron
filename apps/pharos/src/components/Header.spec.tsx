@@ -1,11 +1,12 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
+import { USERS } from '../state/users';
 import { Header } from './Header';
 
 describe('Header', () => {
   it('shows the app name and subtitle', () => {
-    render(<Header preset={null} onPresetChange={vi.fn()} traders={[]} traderId="ALL" codec="json" ready onTraderChange={vi.fn()} onCodecChange={vi.fn()} />);
+    render(<Header users={USERS} userId="SUPERVISOR" onUserChange={vi.fn()} preset={null} onPresetChange={vi.fn()} traders={[]} traderId="ALL" codec="json" ready onTraderChange={vi.fn()} onCodecChange={vi.fn()} />);
     expect(screen.getByText('Apeiron')).toBeInTheDocument();
     expect(screen.getByText('Infinity Blotter')).toBeInTheDocument();
   });
@@ -15,6 +16,9 @@ describe('Header', () => {
     const onCodecChange = vi.fn();
     render(
       <Header
+        users={USERS}
+        userId="SUPERVISOR"
+        onUserChange={vi.fn()}
         preset={null}
         onPresetChange={vi.fn()}
         traders={[{ traderId: 'T1', traderName: 'Alice' }]}
@@ -25,7 +29,7 @@ describe('Header', () => {
         onCodecChange={onCodecChange}
       />,
     );
-    await userEvent.selectOptions(screen.getByRole('combobox'), 'T1');
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /trader/i }), 'T1');
     expect(onTraderChange).toHaveBeenCalledWith('T1');
     await userEvent.click(screen.getByRole('button', { name: 'Dev' }));
     await userEvent.click(screen.getByRole('radio', { name: 'MessagePack' }));
@@ -36,6 +40,9 @@ describe('Header', () => {
     const onPresetChange = vi.fn();
     render(
       <Header
+        users={USERS}
+        userId="SUPERVISOR"
+        onUserChange={vi.fn()}
         preset="medium"
         onPresetChange={onPresetChange}
         traders={[]}
@@ -53,7 +60,19 @@ describe('Header', () => {
   });
 
   it('disables the controls until ready', () => {
-    render(<Header preset={null} onPresetChange={vi.fn()} traders={[]} traderId="ALL" codec="json" ready={false} onTraderChange={vi.fn()} onCodecChange={vi.fn()} />);
-    expect(screen.getByRole('combobox')).toBeDisabled();
+    render(<Header users={USERS} userId="SUPERVISOR" onUserChange={vi.fn()} preset={null} onPresetChange={vi.fn()} traders={[]} traderId="ALL" codec="json" ready={false} onTraderChange={vi.fn()} onCodecChange={vi.fn()} />);
+    expect(screen.getByRole('combobox', { name: /trader/i })).toBeDisabled();
+  });
+});
+
+describe('Header user selector', () => {
+  it('shows the signed-in user and reports a change', async () => {
+    const onUserChange = vi.fn();
+    render(
+      <Header users={USERS} userId="TRADER1" onUserChange={onUserChange} preset={null} onPresetChange={vi.fn()} traders={[]} traderId="ALL" codec="json" ready onTraderChange={vi.fn()} onCodecChange={vi.fn()} />,
+    );
+    expect(screen.getByRole('combobox', { name: /user/i })).toHaveValue('TRADER1');
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /user/i }), 'TRADER4');
+    expect(onUserChange).toHaveBeenCalledWith('TRADER4');
   });
 });

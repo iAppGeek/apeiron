@@ -7,6 +7,7 @@ import { ensureBuckets, publishRecord } from '../testing/bucket.js';
 import { makeOrders } from '../testing/orders.js';
 import type { Connection, Frame } from '../transport.js';
 import { LiveRuntime } from './runtime.js';
+import { testEntitlements } from '../testing/users.js';
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -65,9 +66,9 @@ function client(r: Rig, clientId = 'c1'): Client {
       const m = jsonCodec.decode(f) as ServerMsg;
       if (m.t !== 'summary') sent.push(m);
     }, close: vi.fn(), bufferedAmount: 0 };
-  const session = new ClientSession(connection as unknown as Connection, { engine: () => r.engine, live: () => r.runtime, log });
+  const session = new ClientSession(connection as unknown as Connection, { entitlements: testEntitlements, engine: () => r.engine, live: () => r.runtime, log });
   const send = (m: ClientMsg): void => session.handleFrame(JSON.stringify(m));
-  send({ t: 'hello', traderId: 'ALL', codec: 'json', clientId });
+  send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId });
   send({
     t: 'getRows',
     reqId: 1,
@@ -100,7 +101,7 @@ describe('LiveRuntime commands', () => {
     c.send(command(7, 'T0000001', 'PAUSE'));
     expect(r.runtime.commands.size).toBe(1);
     await vi.waitFor(() => expect(types(c)).toContain('ack'));
-    expect(r.requests).toEqual([{ commandId: 'client-9:7', userId: 'anonymous', orderId: 'T0000001', kind: 'action', action: 'PAUSE' }]);
+    expect(r.requests).toEqual([{ commandId: 'client-9:7', userId: 'SUPERVISOR', orderId: 'T0000001', kind: 'action', action: 'PAUSE' }]);
     expect(types(c)).toEqual(['delta', 'ack']);
     const delta = c.sent.find((m) => m.t === 'delta') as Extract<ServerMsg, { t: 'delta' }>;
     expect(delta.updates[0]?.rows[0]).toMatchObject({ orderId: 'T0000001', status: 'PAUSED' });

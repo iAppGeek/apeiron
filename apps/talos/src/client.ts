@@ -90,7 +90,7 @@ export class TalosClient {
         resolve(msg !== null);
       };
       this.helloSentAt = this.deps.clock.now();
-      const text = JSON.stringify({ t: 'hello', traderId: this.deps.traderId, codec, clientId: this.deps.clientId } satisfies ClientMsg);
+      const text = JSON.stringify({ t: 'hello', userId: 'SUPERVISOR', traderId: this.deps.traderId, codec, clientId: this.deps.clientId } satisfies ClientMsg);
       this.emit(text, 'hello', 'json');
     });
   }

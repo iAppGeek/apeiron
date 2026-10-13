@@ -61,6 +61,9 @@ services:
       FLUSH_BUDGET_MS: ${FLUSH_BUDGET_MS:-40}
       MAX_TRACKED_BLOCKS: ${MAX_TRACKED_BLOCKS:-100}
       LOAD_PRESET: ${LOAD_PRESET:-medium}
+      ENTITLEMENTS_FILE: /config/entitlements.json
+    volumes:
+      - ./infra/config/entitlements.json:/config/entitlements.json:ro
     # Caps the container so memory behaviour is defined (and matches the remote box budget).
     mem_limit: 3g
     ports:

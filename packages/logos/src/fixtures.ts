@@ -17,7 +17,7 @@ export function sampleOrders(count: number): Order[] {
 /** One example of every client message type. */
 export function sampleClientMsgs(): ClientMsg[] {
   return [
-    { t: 'hello', traderId: 'ALL', codec: 'msgpack', clientId: 'client-é-1' },
+    { t: 'hello', userId: 'TRADER1', traderId: 'ALL', codec: 'msgpack', clientId: 'client-é-1' },
     { t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'client-2' },
     {
       t: 'getRows',

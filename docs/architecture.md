@@ -254,8 +254,18 @@ Authoritative: `docs/PLAN.md` Appendix C and `packages/logos/src/protocol.ts`.
 
 | Direction | Messages |
 |---|---|
-| client to server | `hello` (trader, codec), `getRows`, `setFilterValues`, `command`, `control` (load preset), `ping` |
+| client to server | `hello` (user, trader, codec), `getRows`, `setFilterValues`, `command`, `control` (load preset), `ping` |
 | server to client | `welcome`, `rows`, `filterValues`, `delta`, `summary`, `ack`, `error`, `pong` |
+
+### Users and entitlements
+
+`infra/config/entitlements.json` lists the users and the traders each may see (`["T1"]`, or `["*"]` for the supervisor). It is
+mounted read-only into the blotter (`ENTITLEMENTS_FILE`) and validated at startup; a missing or invalid file stops the
+blotter. A user has one trader or `*` (a view is scoped to one trader or to everyone). `hello` carries the `userId`;
+`ALL` resolves to the user's own trader (or everyone for `*`), so users with different scopes never share a view, a summary
+or a filter-values list. A trader the user may not see is refused with `FORBIDDEN`, an unknown user with `UNKNOWN_USER`, and a
+command on another trader's order with `FORBIDDEN` before anything is sent to `themis`. There are no passwords: pharos asks
+who is looking (a modal on first load, then a header select; `?user=` overrides; `sessionStorage` keeps it per tab).
 
 ## Deployment view
 

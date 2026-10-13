@@ -13,6 +13,12 @@ Apeiron is tested in six layers. Each answers a different question, and the chea
 
 Conventions that apply to all of it: Vitest for unit tests (`vi.mock`, `vi.spyOn`, `vi.fn`, never `jest.mock`), React Testing Library for components, Playwright for the browser, no fixed sleeps in the browser tests (`expect.poll` and `waitForFunction`; a `sleep` is only used to wait out a fault of known length), and every new module ships with a `*.spec.ts`.
 
+**Who the tests sign in as.** The blotter needs a user. The end-to-end page object opens the app with `?user=SUPERVISOR`
+(`Blotter.open(user)`), the protocol clients (the resilience reader, talos, the restart test) send `userId: 'SUPERVISOR'`,
+and `e2e/tests/users.e2e.ts` opens `TRADER1`, `TRADER2` and the supervisor side by side: each trader sees only their own
+orders, a command forged across users gets `FORBIDDEN`, an unknown user `UNKNOWN_USER`, and switching user in the header
+reloads the grid.
+
 ## Running each layer
 
 ```bash

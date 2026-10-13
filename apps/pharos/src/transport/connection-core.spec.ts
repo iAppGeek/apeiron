@@ -138,16 +138,17 @@ describe('handshake', () => {
 
   it('sends a JSON hello as the very first frame', () => {
     rig.core.connect('ws://x/ws');
+    rig.core.hello(1, 'TRADER1', 'ALL', 'json');
     rig.last().open();
     expect(rig.last().url).toBe('ws://x/ws');
     expect(rig.last().binaryType).toBe('arraybuffer');
     expect(typeof rig.last().sent[0]).toBe('string');
-    expect(rig.last().sentMsgs()[0]).toEqual({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'client-1' });
+    expect(rig.last().sentMsgs()[0]).toEqual({ t: 'hello', userId: 'TRADER1', traderId: 'ALL', codec: 'json', clientId: 'client-1' });
   });
 
   it('reports connecting, then connected on welcome, and resolves queued hellos', () => {
     rig.core.connect('ws://x/ws');
-    rig.core.hello(7, 'T1', 'json');
+    rig.core.hello(7, 'SUPERVISOR', 'T1', 'json');
     rig.last().open();
     expect(rig.last().sentMsgs()).toHaveLength(1);
     expect(rig.last().sentMsgs()[0]).toMatchObject({ t: 'hello', traderId: 'T1' });
@@ -172,7 +173,7 @@ describe('codec switching', () => {
     rig.core.connect('ws://x/ws');
     rig.last().open();
     rig.last().receive(welcome);
-    rig.core.hello(1, 'ALL', 'msgpack');
+    rig.core.hello(1, 'SUPERVISOR', 'ALL', 'msgpack');
     const sock = rig.last();
     // sent[1] is the immediate ping after welcome
     expect(typeof sock.sent[2]).toBe('string');
@@ -188,7 +189,7 @@ describe('codec switching', () => {
     rig.last().open();
     rig.last().receive(welcome);
     rig.core.request({ t: 'setFilterValues', reqId: 1, colId: 'venue' });
-    rig.core.hello(2, 'ALL', 'msgpack');
+    rig.core.hello(2, 'SUPERVISOR', 'ALL', 'msgpack');
     rig.last().receive({ t: 'filterValues', reqId: 1, values: ['A'] }, 'json');
     rig.last().receive(welcome, 'msgpack');
     expect(rig.ofKind('response')).toEqual([
@@ -200,10 +201,10 @@ describe('codec switching', () => {
   it('switches back to JSON', () => {
     const rig = makeRig();
     rig.core.connect('ws://x/ws');
-    rig.core.hello(1, 'ALL', 'msgpack');
+    rig.core.hello(1, 'SUPERVISOR', 'ALL', 'msgpack');
     rig.last().open();
     rig.last().receive(welcome, 'msgpack');
-    rig.core.hello(2, 'ALL', 'json');
+    rig.core.hello(2, 'SUPERVISOR', 'ALL', 'json');
     rig.core.request({ t: 'setFilterValues', reqId: 5, colId: 'venue' });
     expect(typeof rig.last().sent[3]).toBe('string');
   });
@@ -211,9 +212,10 @@ describe('codec switching', () => {
   it('falls back to the confirmed settings when the server rejects a hello', () => {
     const rig = makeRig();
     rig.core.connect('ws://x/ws');
+    rig.core.hello(1, 'TRADER1', 'ALL', 'json');
     rig.last().open();
     rig.last().receive(welcome);
-    rig.core.hello(3, 'NOBODY', 'msgpack');
+    rig.core.hello(3, 'TRADER1', 'NOBODY', 'msgpack');
     rig.last().receive({ t: 'error', code: 'UNKNOWN_TRADER', message: 'Unknown trader: NOBODY' });
     expect(rig.ofKind('hello-result').find((r) => r.id === 3)).toMatchObject({ ok: false, code: 'UNKNOWN_TRADER' });
     rig.core.request({ t: 'setFilterValues', reqId: 9, colId: 'venue' });
@@ -221,7 +223,25 @@ describe('codec switching', () => {
     rig.last().drop();
     rig.clock.advance(500);
     rig.last().open();
-    expect(rig.last().sentMsgs()[0]).toMatchObject({ traderId: 'ALL', codec: 'json' });
+    expect(rig.last().sentMsgs()[0]).toMatchObject({ userId: 'TRADER1', traderId: 'ALL', codec: 'json' });
+  });
+
+  it('keeps the signed-in user across a reconnect, and falls back to the confirmed user when another is refused', () => {
+    const rig = makeRig();
+    rig.core.connect('ws://x/ws');
+    rig.core.hello(1, 'TRADER1', 'ALL', 'json');
+    rig.last().open();
+    rig.last().receive(welcome);
+    rig.core.hello(2, 'TRADER2', 'ALL', 'json');
+    rig.last().receive(welcome);
+    expect(rig.last().sentMsgs().filter((m) => m.t === 'hello').at(-1)).toMatchObject({ userId: 'TRADER2' });
+    rig.core.hello(3, 'GHOST', 'ALL', 'json');
+    rig.last().receive({ t: 'error', code: 'UNKNOWN_USER', message: 'Unknown user: GHOST' });
+    expect(rig.ofKind('hello-result').find((r) => r.id === 3)).toMatchObject({ ok: false, code: 'UNKNOWN_USER' });
+    rig.last().drop();
+    rig.clock.advance(500);
+    rig.last().open();
+    expect(rig.last().sentMsgs()[0]).toMatchObject({ userId: 'TRADER2' });
   });
 });
 
@@ -299,7 +319,7 @@ describe('reconnect', () => {
   it('fails pending requests, then reconnects with exponential backoff and re-sends hello', () => {
     const rig = makeRig({ backoffBaseMs: 500, backoffMaxMs: 2000 });
     rig.core.connect('ws://x/ws');
-    rig.core.hello(1, 'T2', 'msgpack');
+    rig.core.hello(1, 'SUPERVISOR', 'T2', 'msgpack');
     rig.last().open();
     rig.last().receive(welcome);
     rig.core.request({ t: 'setFilterValues', reqId: 4, colId: 'venue' });
@@ -328,7 +348,7 @@ describe('reconnect', () => {
     rig.last().open();
     const hello = rig.last().sentMsgs()[0];
     expect(typeof rig.last().sent[0]).toBe('string');
-    expect(hello).toEqual({ t: 'hello', traderId: 'T2', codec: 'msgpack', clientId: 'client-1' });
+    expect(hello).toEqual({ t: 'hello', userId: 'SUPERVISOR', traderId: 'T2', codec: 'msgpack', clientId: 'client-1' });
     rig.last().receive(welcome, 'msgpack');
     expect(rig.ofKind('status').at(-1)).toMatchObject({ status: 'connected', attempt: 0, codec: 'msgpack' });
   });
@@ -375,7 +395,7 @@ describe('reconnect', () => {
   it('rejects hellos that were in flight when the link dropped', () => {
     const rig = makeRig();
     rig.core.connect('ws://x/ws');
-    rig.core.hello(1, 'ALL', 'json');
+    rig.core.hello(1, 'SUPERVISOR', 'ALL', 'json');
     rig.last().open();
     rig.last().drop();
     expect(rig.ofKind('hello-result')[0]).toMatchObject({ id: 1, ok: false, code: 'DISCONNECTED' });
@@ -556,7 +576,7 @@ describe('close codes', () => {
   it('reconnects at once when the server says it is restarting (1012), and keeps the trader and codec', () => {
     const rig = makeRig({ backoffBaseMs: 500 });
     rig.core.connect('ws://x/ws');
-    rig.core.hello(1, 'T3', 'msgpack');
+    rig.core.hello(1, 'SUPERVISOR', 'T3', 'msgpack');
     rig.last().open();
     rig.last().receive(welcome, 'msgpack');
     rig.last().drop(1012);
@@ -565,7 +585,7 @@ describe('close codes', () => {
     rig.clock.advance(0);
     expect(rig.sockets).toHaveLength(2);
     rig.last().open();
-    expect(rig.last().sentMsgs()[0]).toEqual({ t: 'hello', traderId: 'T3', codec: 'msgpack', clientId: 'client-1' });
+    expect(rig.last().sentMsgs()[0]).toEqual({ t: 'hello', userId: 'SUPERVISOR', traderId: 'T3', codec: 'msgpack', clientId: 'client-1' });
   });
 
   it('does not count the immediate retry as a failure: if it fails, the usual backoff starts from its base', () => {
@@ -619,11 +639,11 @@ describe('codec round trip', () => {
     const rig = makeRig();
     rig.core.connect('ws://x/ws');
     rig.last().open();
-    rig.core.hello(1, 'ALL', 'msgpack');
+    rig.core.hello(1, 'SUPERVISOR', 'ALL', 'msgpack');
     rig.last().receive(welcome, 'json');
-    rig.core.hello(2, 'ALL', 'json');
+    rig.core.hello(2, 'SUPERVISOR', 'ALL', 'json');
     rig.last().receive(welcome, 'msgpack');
-    rig.core.hello(3, 'ALL', 'msgpack');
+    rig.core.hello(3, 'SUPERVISOR', 'ALL', 'msgpack');
     rig.last().receive(welcome, 'json');
     const frames = rig.last().sent;
     const hellos = frames.filter((f) => ((typeof f === 'string' ? jsonCodec.decode(f) : msgpackCodec.decode(f)) as ClientMsg).t === 'hello');
@@ -631,7 +651,7 @@ describe('codec round trip', () => {
     for (const h of hellos) expect(typeof h).toBe('string');
     rig.core.request({ t: 'getRows', reqId: 9, req: { startRow: 0, endRow: 1, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [] } });
     expect(rig.last().sent.at(-1)).toBeInstanceOf(Uint8Array);
-    rig.core.hello(4, 'ALL', 'json');
+    rig.core.hello(4, 'SUPERVISOR', 'ALL', 'json');
     rig.core.request({ t: 'getRows', reqId: 10, req: { startRow: 0, endRow: 1, rowGroupCols: [], valueCols: [], groupKeys: [], sortModel: [] } });
     expect(typeof rig.last().sent.at(-1)).toBe('string');
   });
@@ -640,7 +660,7 @@ describe('codec round trip', () => {
     const rig = makeRig();
     rig.core.connect('ws://x/ws');
     rig.last().open();
-    rig.core.hello(1, 'ALL', 'msgpack');
+    rig.core.hello(1, 'SUPERVISOR', 'ALL', 'msgpack');
     rig.last().receive(welcome, 'json');
     rig.last().receive({ t: 'ack', reqId: 99 }, 'json');
     rig.last().receive({ t: 'ack', reqId: 100 }, 'msgpack');
@@ -654,7 +674,7 @@ describe('heartbeat and half-open detection', () => {
     const rig = makeRig({ pingIntervalMs: 2000, staleAfterMs: 6000, ...options });
     rig.core.connect('ws://x/ws');
     rig.last().open();
-    rig.core.hello(1, 'ALL', 'json');
+    rig.core.hello(1, 'SUPERVISOR', 'ALL', 'json');
     rig.last().receive(welcome);
     return rig;
   };

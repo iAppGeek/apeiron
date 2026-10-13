@@ -35,6 +35,8 @@ const envSchema = z.object({
   DRAIN_MS: posInt('2000'),
   /** A client silent this long (no frame, no pong) is terminated. */
   HEARTBEAT_TIMEOUT_MS: posInt('15000'),
+  /** Who may sign in and which traders each may see (the same file for every blotter). */
+  ENTITLEMENTS_FILE: z.string().min(1).default('/config/entitlements.json'),
 });
 
 export type AntikytheraConfig = {
@@ -56,6 +58,7 @@ export type AntikytheraConfig = {
   warmViews: string;
   warmRounds: number;
   drainMs: number;
+  entitlementsFile: string;
 };
 
 export function loadConfig(env: Record<string, string | undefined>): AntikytheraConfig {
@@ -84,5 +87,6 @@ export function loadConfig(env: Record<string, string | undefined>): Antikythera
     warmViews: e.WARM_VIEWS,
     warmRounds: e.WARM_ROUNDS,
     drainMs: e.DRAIN_MS,
+    entitlementsFile: e.ENTITLEMENTS_FILE,
   };
 }

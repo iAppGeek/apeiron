@@ -33,7 +33,7 @@ test.describe('blotter restart', () => {
       socket.onopen = (): void => resolve();
       socket.onerror = (): void => reject(new Error('could not connect'));
     });
-    socket.send(JSON.stringify({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'restart-e2e' }));
+    socket.send(JSON.stringify({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'restart-e2e' }));
 
     const restarted = run('docker', ['compose', '--profile', 'core', 'restart', 'antikythera'], { cwd: root });
     const seen: string[] = [];

@@ -4,6 +4,7 @@ import { QueryEngine } from './query/engine.js';
 import { ClientSession, type SessionDeps } from './session.js';
 import { makeStore } from './testing/orders.js';
 import type { Connection, Frame } from './transport.js';
+import { testEntitlements } from './testing/users.js';
 
 const store = makeStore([
   { traderId: 'T1', venue: 'EBS', orderQty: 1, createdAt: 1 },
@@ -35,6 +36,7 @@ function harness(overrides: Partial<SessionDeps> = {}): Harness {
     bufferedAmount: 0,
   };
   const deps: SessionDeps = {
+    entitlements: testEntitlements,
     engine: () => engine,
     log: { warn: vi.fn(), error: vi.fn() },
     now: () => 1234,
@@ -44,8 +46,9 @@ function harness(overrides: Partial<SessionDeps> = {}): Harness {
 }
 
 const json = (m: ClientMsg): string => JSON.stringify(m);
-const hello = (traderId = 'ALL', codec: 'json' | 'msgpack' = 'json'): ClientMsg => ({
+const hello = (traderId = 'ALL', codec: 'json' | 'msgpack' = 'json', userId = 'SUPERVISOR'): ClientMsg => ({
   t: 'hello',
+  userId,
   traderId,
   codec,
   clientId: 'c1',
@@ -87,6 +90,38 @@ describe('ClientSession handshake', () => {
       message: 'Send hello first',
     });
     expect(decodeJson(h.sent[1] as Frame)).toMatchObject({ reqId: 6, code: 'HELLO_REQUIRED' });
+  });
+
+  it('rejects an unknown user and stays un-negotiated', () => {
+    const h = harness();
+    h.session.handleFrame(json(hello('ALL', 'json', 'NOBODY')));
+    expect(decodeJson(h.sent[0] as Frame)).toEqual({ t: 'error', code: 'UNKNOWN_USER', message: 'Unknown user: NOBODY' });
+    h.session.handleFrame(json({ t: 'getRows', reqId: 1, req: req() }));
+    expect(decodeJson(h.sent[1] as Frame)).toMatchObject({ code: 'HELLO_REQUIRED' });
+  });
+
+  it('refuses a trader the user is not entitled to, but accepts their own and ALL', () => {
+    const forbidden = harness();
+    forbidden.session.handleFrame(json(hello('T2', 'json', 'TRADER1')));
+    expect(decodeJson(forbidden.sent[0] as Frame)).toMatchObject({ t: 'error', code: 'FORBIDDEN' });
+
+    const own = harness();
+    own.session.handleFrame(json(hello('T1', 'json', 'TRADER1')));
+    expect(decodeJson(own.sent[0] as Frame)).toMatchObject({ t: 'welcome', user: { userId: 'TRADER1', name: 'Alice Marlowe' } });
+    expect(own.session.trader).toBe('T1');
+  });
+
+  it('welcomes a user with only the traders they may see, and scopes ALL to them', () => {
+    const h = harness();
+    h.session.handleFrame(json(hello('ALL', 'json', 'TRADER3')));
+    expect(decodeJson(h.sent[0] as Frame)).toMatchObject({ t: 'welcome', traders: [{ traderId: 'T3', traderName: 'Chloe Tanaka' }] });
+    expect(h.session.trader).toBe('T3');
+    const sup = harness();
+    sup.session.handleFrame(json(hello('ALL')));
+    const welcome = decodeJson(sup.sent[0] as Frame) as Extract<ServerMsg, { t: 'welcome' }>;
+    expect(welcome.traders).toHaveLength(5);
+    expect(welcome.user).toEqual({ userId: 'SUPERVISOR', name: 'Desk Supervisor' });
+    expect(sup.session.trader).toBe('ALL');
   });
 
   it('rejects an unknown trader and stays un-negotiated', () => {

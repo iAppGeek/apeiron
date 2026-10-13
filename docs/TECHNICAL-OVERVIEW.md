@@ -448,7 +448,7 @@ Authoritative: [`packages/logos/src/protocol.ts`](../packages/logos/src/protocol
 
 | Client → server | Purpose |
 |---|---|
-| `hello{traderId, codec, clientId}` | (re)start a session: trader scope and codec; always JSON text; resets tracking |
+| `hello{userId, traderId, codec, clientId}` | (re)start a session: user, trader scope (within the user's entitlements) and codec; always JSON text; resets tracking |
 | `getRows{reqId, req}` | one SSRM block (`startRow`, `endRow`, `rowGroupCols`, `groupKeys`, `valueCols`, `sortModel`, `filterModel`) |
 | `setFilterValues{reqId, colId}` | distinct values for a set filter, trader-scoped, ≤ 5,000 |
 | `command{reqId, orderId, action}` | `CANCEL` / `PAUSE` / `RESUME` |

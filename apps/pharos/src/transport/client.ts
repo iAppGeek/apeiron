@@ -52,7 +52,7 @@ export class RequestError extends Error {
 export type BlotterClient = {
   connect(url: string): void;
   /** Resolves with the server's welcome once it accepts the trader and codec. */
-  hello(traderId: string, codec: CodecName): Promise<WelcomeMsg>;
+  hello(userId: string, traderId: string, codec: CodecName): Promise<WelcomeMsg>;
   getRows(req: SsrmRequest): Promise<RowsResult>;
   setFilterValues(colId: string): Promise<string[]>;
   /** Asks the server to switch the mock middleware load preset; resolves when the server has published it. */
@@ -139,11 +139,11 @@ export function createBlotterClient(worker: WorkerLike): BlotterClient {
       worker.postMessage({ kind: 'connect', url });
     },
 
-    hello(traderId: string, codec: CodecName): Promise<WelcomeMsg> {
+    hello(userId: string, traderId: string, codec: CodecName): Promise<WelcomeMsg> {
       return new Promise<WelcomeMsg>((resolve, reject) => {
         const id = nextId++;
         hellos.set(id, { resolve, reject });
-        worker.postMessage({ kind: 'hello', id, traderId, codec });
+        worker.postMessage({ kind: 'hello', id, userId, traderId, codec });
       });
     },
 

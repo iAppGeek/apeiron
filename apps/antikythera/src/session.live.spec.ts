@@ -7,6 +7,7 @@ import { ClientSession, type FlushContext, type LiveHooks } from './session.js';
 import { applyOrders, applyUpdates } from './testing/apply.js';
 import { makeOrders, makeStore } from './testing/orders.js';
 import type { Connection, Frame } from './transport.js';
+import { testEntitlements } from './testing/users.js';
 
 const req = (r: Partial<SsrmRequest> = {}): SsrmRequest => ({
   startRow: 0,
@@ -52,6 +53,7 @@ function world(overrides: Partial<LiveHooks> = {}, withLive = true, metrics?: Se
     setPreset: vi.fn(() => Promise.resolve()),
     command: vi.fn(),
     preset: vi.fn((): LoadPreset | null => null),
+    traderOf: vi.fn((): string | undefined => undefined),
     summary: vi.fn(() => ({ byStatus: { PENDING_START: 0, LIVE: 2, PAUSED: 0, FILLED: 1, CANCELLED: 0 }, liveNotionalUsd: 42 })),
     stats: vi.fn(() => ({ cpu: 12.5, rssMb: 300, elLagMs: 1.5 })),
     maxTrackedBlocks: 10,
@@ -60,13 +62,14 @@ function world(overrides: Partial<LiveHooks> = {}, withLive = true, metrics?: Se
     ...overrides,
   };
   const session = new ClientSession(connection as unknown as Connection, {
+    entitlements: testEntitlements,
     engine: () => engine,
     live: () => (withLive ? live : null),
     log: { warn: vi.fn(), error: vi.fn() },
     now: () => 1234,
     metrics,
   });
-  session.handleFrame(json({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'c1' }));
+  session.handleFrame(json({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'c1' }));
   sent.length = 0;
   const flush = (changes: ReturnType<typeof applyUpdates>, now: number): void => {
     const ctx: FlushContext = {
@@ -88,9 +91,32 @@ describe('ClientSession commands', () => {
     const w = world();
     w.session.handleFrame(json({ t: 'command', reqId: 4, orderId: 'T0000001', action: 'PAUSE' }));
     expect(w.live.command).toHaveBeenCalledWith(
-      { owner: w.session, clientId: 'c1', reqId: 4, orderId: 'T0000001', action: 'PAUSE' },
+      { owner: w.session, clientId: 'c1', userId: 'SUPERVISOR', reqId: 4, orderId: 'T0000001', action: 'PAUSE' },
       expect.any(Function),
     );
+  });
+
+  it('refuses a command on another trader`s order with FORBIDDEN before anything is sent, and lets the owner and a supervisor through', () => {
+    const w = world();
+    vi.mocked(w.live.traderOf).mockImplementation((id) => (id === 'T0000001' ? 'T2' : undefined));
+    w.session.handleFrame(json({ t: 'hello', userId: 'TRADER1', traderId: 'ALL', codec: 'json', clientId: 'c2' }));
+    w.sent.length = 0;
+    w.session.handleFrame(json({ t: 'command', reqId: 1, orderId: 'T0000001', action: 'CANCEL' }));
+    expect(w.sent).toEqual([{ t: 'error', reqId: 1, code: 'FORBIDDEN', message: 'Order T0000001 belongs to a trader you may not act for' }]);
+    expect(w.live.command).not.toHaveBeenCalled();
+
+    w.session.handleFrame(json({ t: 'hello', userId: 'TRADER2', traderId: 'ALL', codec: 'json', clientId: 'c3' }));
+    w.session.handleFrame(json({ t: 'command', reqId: 2, orderId: 'T0000001', action: 'CANCEL' }));
+    w.session.handleFrame(json({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'c4' }));
+    w.session.handleFrame(json({ t: 'command', reqId: 3, orderId: 'T0000001', action: 'CANCEL' }));
+    expect(vi.mocked(w.live.command).mock.calls.map(([req]) => req.userId)).toEqual(['TRADER2', 'SUPERVISOR']);
+  });
+
+  it('passes a command on an order the store does not hold to the order service, which answers UNKNOWN_ORDER', () => {
+    const w = world();
+    w.session.handleFrame(json({ t: 'hello', userId: 'TRADER1', traderId: 'ALL', codec: 'json', clientId: 'c2' }));
+    w.session.handleFrame(json({ t: 'command', reqId: 1, orderId: 'NOPE', action: 'CANCEL' }));
+    expect(w.live.command).toHaveBeenCalledOnce();
   });
 
   it('sends ack{reqId} when the command is applied', () => {
@@ -135,12 +161,13 @@ describe('ClientSession registration across a slow start', () => {
     const w = world();
     const current: { live: LiveHooks | null } = { live: null };
     const session = new ClientSession(w.connection as unknown as Connection, {
+      entitlements: testEntitlements,
       engine: () => w.engine,
       live: () => current.live,
       log: { warn: vi.fn(), error: vi.fn() },
       now: () => 1234,
     });
-    session.handleFrame(json({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'late' }));
+    session.handleFrame(json({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'late' }));
     expect(w.live.register).not.toHaveBeenCalledWith(session);
     // The store finishes loading and the live runtime starts; the client's next request registers it.
     current.live = w.live;
@@ -153,7 +180,7 @@ describe('ClientSession control and registration', () => {
   it('registers on hello and unregisters on dispose', () => {
     const w = world();
     vi.mocked(w.live.register).mockClear();
-    w.session.handleFrame(json({ t: 'hello', traderId: 'T1', codec: 'json', clientId: 'c1' }));
+    w.session.handleFrame(json({ t: 'hello', userId: 'SUPERVISOR', traderId: 'T1', codec: 'json', clientId: 'c1' }));
     expect(w.live.register).toHaveBeenCalledWith(w.session);
     w.session.dispose();
     expect(w.live.unregister).toHaveBeenCalledWith(w.session);
@@ -223,7 +250,7 @@ describe('ClientSession live deltas', () => {
     const w = world();
     getRows(w);
     expect(w.session.trackedView).not.toBeNull();
-    w.session.handleFrame(json({ t: 'hello', traderId: 'T1', codec: 'json', clientId: 'c1' }));
+    w.session.handleFrame(json({ t: 'hello', userId: 'SUPERVISOR', traderId: 'T1', codec: 'json', clientId: 'c1' }));
     expect(w.session.trackedView).toBeNull();
   });
 });
@@ -257,7 +284,7 @@ describe('ClientSession summary', () => {
     w.sent.length = 0;
     w.flush(idle(w), 10_000);
     expect(w.sent.find((m) => m.t === 'summary')).toMatchObject({ preset: 'stress' });
-    w.session.handleFrame(json({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'c1' }));
+    w.session.handleFrame(json({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'c1' }));
     expect(w.sent.find((m) => m.t === 'welcome')).toMatchObject({ preset: 'stress' });
   });
 

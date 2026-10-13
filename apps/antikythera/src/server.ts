@@ -1,5 +1,5 @@
 import websocket from '@fastify/websocket';
-import type { Bus } from '@apeiron/logos';
+import type { Bus, Entitlements } from '@apeiron/logos';
 import Fastify, { LogController, type FastifyInstance } from 'fastify';
 import { LiveRuntime, type Stage } from './live/runtime.js';
 import type { WarmEntry } from './warmup.js';
@@ -16,6 +16,8 @@ import { attachWebSocket, DEFAULT_HEARTBEAT, type HeartbeatOptions } from './ws-
 export type ServerOptions = {
   /** The message bus: the blotter's only source of data. */
   bus: Bus;
+  /** Who may sign in and which traders each may see and act on. */
+  entitlements: Entitlements;
   /** Flush tick length (default 50). */
   flushMs?: number;
   /** Most blocks tracked per client for live deltas (default 100). */
@@ -223,6 +225,7 @@ export async function buildServer(options: ServerOptions): Promise<BlotterServer
       (connection) =>
         new ClientSession(connection, {
           // No client is served rows before the blotter is ready: loaded, caught up and priced.
+          entitlements: options.entitlements,
           engine: () => (runtime?.stage === 'ready' || runtime?.stage === 'draining' ? engine : null),
           live: () => runtime,
           log: app.log,

@@ -80,10 +80,10 @@ describe('createBlotterClient', () => {
   it('resolves hello with the welcome and rejects on error', async () => {
     const w = makeWorker();
     const client = createBlotterClient(w);
-    const ok = client.hello('T1', 'msgpack');
+    const ok = client.hello('SUPERVISOR', 'T1', 'msgpack');
     const first = w.posted.at(-1);
     expect(first).toMatchObject({ kind: 'hello', traderId: 'T1', codec: 'msgpack' });
-    const bad = client.hello('NOPE', 'json');
+    const bad = client.hello('SUPERVISOR', 'NOPE', 'json');
     const second = w.posted.at(-1);
     if (first?.kind !== 'hello' || second?.kind !== 'hello') throw new Error('expected hellos');
     w.reply({ kind: 'hello-result', id: first.id, ok: true, welcome });
@@ -126,7 +126,7 @@ describe('createBlotterClient', () => {
     const client = createBlotterClient(w);
     expect(client.pending()).toBe(0);
     const p = client.getRows(req);
-    const h = client.hello('ALL', 'json');
+    const h = client.hello('SUPERVISOR', 'ALL', 'json');
     expect(client.pending()).toBe(2);
     const reqId = (w.posted[0] as { msg: { reqId: number } }).msg.reqId;
     w.reply({ kind: 'response', reqId, ok: false, code: 'DISCONNECTED', message: 'gone' });
@@ -142,7 +142,7 @@ describe('createBlotterClient', () => {
     const w = makeWorker();
     const client = createBlotterClient(w);
     const p = client.getRows(req);
-    const h = client.hello('ALL', 'json');
+    const h = client.hello('SUPERVISOR', 'ALL', 'json');
     client.dispose();
     expect(w.posted.at(-1)).toEqual({ kind: 'close' });
     expect(w.terminate).toHaveBeenCalled();

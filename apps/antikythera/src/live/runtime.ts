@@ -220,7 +220,7 @@ export class LiveRuntime implements LiveHooks {
       metrics?.command(outcome.ok ? 'ok' : outcome.code, (performance.now() - started) / 1000);
       settle(outcome);
     };
-    const body: OrderCommandRequest = { commandId, userId: request.userId ?? 'anonymous', orderId: request.orderId, kind: 'action', action: request.action };
+    const body: OrderCommandRequest = { commandId, userId: request.userId, orderId: request.orderId, kind: 'action', action: request.action };
     metrics?.ingest('command');
     this.options.bus.request(SUBJECTS.ordersCmd, body, this.options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS).then(
       (raw) => {
@@ -253,6 +253,11 @@ export class LiveRuntime implements LiveHooks {
 
   setPreset(preset: LoadPreset): Promise<void> {
     return this.options.bus.publish(SUBJECTS.controlLoad, { preset });
+  }
+
+  traderOf(orderId: string): string | undefined {
+    const row = this.options.store.rowIndexOf(orderId);
+    return row === undefined ? undefined : this.options.store.orderAt(row).traderId;
   }
 
   summary(traderId: string): StatusSummary {

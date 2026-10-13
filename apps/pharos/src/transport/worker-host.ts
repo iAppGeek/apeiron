@@ -32,7 +32,7 @@ export function attachWorkerHost(scope: WorkerScope, deps: HostDeps): void {
         core.connect(cmd.url);
         return;
       case 'hello':
-        core.hello(cmd.id, cmd.traderId, cmd.codec);
+        core.hello(cmd.id, cmd.userId, cmd.traderId, cmd.codec);
         return;
       case 'request':
         core.request(cmd.msg);

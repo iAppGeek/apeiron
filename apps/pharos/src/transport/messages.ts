@@ -14,7 +14,7 @@ export type Failure = { code: FailureCode; message: string };
 /** Main thread to worker. */
 export type MainToWorker =
   | { kind: 'connect'; url: string }
-  | { kind: 'hello'; id: number; traderId: string; codec: CodecName }
+  | { kind: 'hello'; id: number; userId: string; traderId: string; codec: CodecName }
   | { kind: 'request'; msg: RequestMsg }
   | { kind: 'close' };
 

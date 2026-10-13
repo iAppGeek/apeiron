@@ -1,6 +1,6 @@
 # PLAN1: Architecture split (view server, order service, separate pricing)
 
-Status: **in progress** (agreed 2026-10-11): phases 1.1 to 1.3a merged; 1.3b to 1.5c done on one branch, a commit per phase.
+Status: **in progress** (agreed 2026-10-11): phases 1.1 to 1.3a merged; 1.3b to 1.6 done on one branch, a commit per phase.
 merged. The working process (Sonnet implements one phase per branch and opens a PR; Opus reviews at checkpoints), the
 rules for the implementing agent and the coding conventions in `PLAN.md` apply unchanged. **The appendices here are
 authoritative for the new contracts.** Where they change a `PLAN.md` appendix (C: protocol, A: config), update that

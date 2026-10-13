@@ -1,12 +1,15 @@
 import { NatsBus } from '@apeiron/iris';
 import { loadConfig } from './config.js';
 import { buildServer } from './server.js';
+import { loadEntitlements } from './entitlements.js';
 import { loadWarmViews } from './warmup.js';
 
 const config = loadConfig(process.env);
+const entitlements = loadEntitlements(config.entitlementsFile);
 const bus = await NatsBus.connect({ url: config.natsUrl, name: 'antikythera' });
 const server = await buildServer({
   bus,
+  entitlements,
   flushMs: config.flushMs,
   maxTrackedBlocks: config.maxTrackedBlocks,
   logLevel: config.logLevel,

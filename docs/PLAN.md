@@ -103,7 +103,7 @@ apeiron/
 **Metrics (`prom-client`, `/metrics`):** process CPU, RSS/heap, event-loop lag, WS connections, messages and bytes in/out per second, flush duration, getRows latency histogram, ingest rate.
 
 ## Protocol (packages/logos/protocol)
-- **Client → server:** `hello{traderId, codec}`, `getRows{reqId, request: IServerSideGetRowsRequest}`, `setFilterValues{reqId, colId}`, `command{reqId, orderId, action}`.
+- **Client → server:** `hello{userId, traderId, codec}`, `getRows{reqId, request: IServerSideGetRowsRequest}`, `setFilterValues{reqId, colId}`, `command{reqId, orderId, action}`.
 - **Server → client:** `rows{reqId, rowData, rowCount}`, `delta{seq, serverTs, updates[], adds[], dirtyRoutes[], rowCounts[], newAbove}`, `summary{...}`, `ack`, `error`. Appendix C is authoritative.
 - **Codec interface:** `encode/decode`, with `json` and `msgpack` (`@msgpack/msgpack`) implementations, negotiated in `hello`.
 
@@ -381,12 +381,12 @@ Pivot is not supported; reject the request if `pivotMode` is set.
 
 **Set filter values.** `setFilterValues{colId}` returns the distinct dictionary values for the current trader scope, sorted. It's capped at 5,000 values; free-text-like columns (orderId, clientOrderId, parentOrderId) use a text filter instead.
 
-**Trader scope.** `hello.traderId` is either `'ALL'` or a trader ID. It's applied as an implicit filter on every query; a new `hello` resets the subscription.
+**Trader scope.** `hello.userId` names the signed-in user (PLAN1 phase 1.6; `infra/config/entitlements.json`). `hello.traderId` is either `'ALL'` or a trader ID the user is entitled to: `ALL` means all of the user's traders (everyone for the supervisor). The resolved scope is applied as an implicit filter on every query, summary and filter-values list; a new `hello` resets the subscription. An unknown user gets `UNKNOWN_USER`, a trader the user may not see `FORBIDDEN`.
 
 ## Appendix C: Protocol types (packages/logos/src/protocol.ts)
 ```ts
 type ClientMsg =
-  | { t: 'hello'; userId?: string; traderId: string; codec: 'json' | 'msgpack'; clientId: string }   // userId: PLAN1, optional until 1.6
+  | { t: 'hello'; userId: string; traderId: string; codec: 'json' | 'msgpack'; clientId: string }   // userId: required from PLAN1 phase 1.6
   | { t: 'getRows'; reqId: number; req: SsrmRequest }
   | { t: 'setFilterValues'; reqId: number; colId: string }
   | { t: 'command'; reqId: number; orderId: string; action: 'CANCEL' | 'PAUSE' | 'RESUME' }

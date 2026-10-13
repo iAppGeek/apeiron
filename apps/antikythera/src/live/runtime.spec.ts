@@ -8,6 +8,7 @@ import { makeOrders } from '../testing/orders.js';
 import type { Connection, Frame } from '../transport.js';
 import { defaultWarmViews, type WarmEntry } from '../warmup.js';
 import { LiveRuntime, type Stage, type WatchHandoff } from './runtime.js';
+import { testEntitlements } from '../testing/users.js';
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -91,8 +92,8 @@ const allPairs = (bus: MemoryBus, ts: number): Promise<void[]> =>
 function client(runtime: LiveRuntime, engine: QueryEngine): { sent: ServerMsg[]; session: ClientSession; ask: () => void } {
   const sent: ServerMsg[] = [];
   const connection = { send: (f: Frame): void => void sent.push(jsonCodec.decode(f) as ServerMsg), close: vi.fn(), bufferedAmount: 0 };
-  const session = new ClientSession(connection as unknown as Connection, { engine: () => engine, live: () => runtime, log });
-  session.handleFrame(JSON.stringify({ t: 'hello', traderId: 'ALL', codec: 'json', clientId: 'c' }));
+  const session = new ClientSession(connection as unknown as Connection, { entitlements: testEntitlements, engine: () => engine, live: () => runtime, log });
+  session.handleFrame(JSON.stringify({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'c' }));
   const ask = (): void =>
     session.handleFrame(
       JSON.stringify({
