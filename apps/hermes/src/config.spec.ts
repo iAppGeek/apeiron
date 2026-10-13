@@ -13,12 +13,13 @@ describe('loadConfig', () => {
       healthPort: 4100,
       stepMs: 100,
       priceWaitMs: 10_000,
+      venueTimeoutMs: 5_000,
     });
   });
 
   it('reads overrides', () => {
-    const cfg = loadConfig({ ...base, LOAD_PRESET: 'stress', HERMES_SEED: '7', HEALTH_PORT: '4200', STEP_MS: '50', LOG_LEVEL: 'debug' });
-    expect(cfg).toMatchObject({ loadPreset: 'stress', seed: 7, healthPort: 4200, stepMs: 50, logLevel: 'debug' });
+    const cfg = loadConfig({ ...base, LOAD_PRESET: 'stress', HERMES_SEED: '7', HEALTH_PORT: '4200', STEP_MS: '50', LOG_LEVEL: 'debug', VENUE_TIMEOUT_MS: '3000' });
+    expect(cfg).toMatchObject({ loadPreset: 'stress', seed: 7, healthPort: 4200, stepMs: 50, logLevel: 'debug', venueTimeoutMs: 3_000 });
   });
 
   it('rejects missing or invalid values', () => {

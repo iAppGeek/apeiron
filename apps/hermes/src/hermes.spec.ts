@@ -13,7 +13,7 @@ import {
   type VenueInstruction,
 } from '@apeiron/logos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { startHermes, type Hermes } from './hermes.js';
+import { DEFAULT_VENUE_TIMEOUT_MS, startHermes, type Hermes } from './hermes.js';
 import { createLogger } from './log.js';
 import { HermesMetrics } from './metrics.js';
 import { SEED_NOW, currentOrders, quotesFor } from './testing.js';
@@ -351,14 +351,29 @@ describe('venue instructions', () => {
     expect(replayed).toHaveLength(1);
   });
 
-  it('drops invalid and stale instructions without reporting', async () => {
+  it('drops invalid instructions, and any older than the order service waits for the venue, without reporting', async () => {
     vi.useFakeTimers({ now: SEED_NOW });
     const bus = new MemoryBus();
     const hermes = await startWithLive(bus);
     const before = hermes.status().commandsHandled;
     await bus.publish('exec.commands', { orderId: 'x', action: 'DELETE' });
-    await bus.publish('exec.commands', instruction(liveOrderId(), 'PAUSE', 6, SEED_NOW - 31_000));
+    // Just past the order service's 5 s: it has answered TIMEOUT already, so the order must not change.
+    await bus.publish('exec.commands', instruction(liveOrderId(), 'PAUSE', 6, SEED_NOW - DEFAULT_VENUE_TIMEOUT_MS - 1));
     expect(reportsFor(bus, 'c:6')).toEqual([]);
+    expect(hermes.simulator.order(liveOrderId())?.status).toBe('LIVE');
     expect(hermes.status().commandsHandled).toBe(before);
+    // Within the wait, it is carried out.
+    await bus.publish('exec.commands', instruction(liveOrderId(), 'PAUSE', 7, SEED_NOW - DEFAULT_VENUE_TIMEOUT_MS + 100));
+    expect(reportsFor(bus, 'c:7')).toMatchObject([{ type: 'PAUSED' }]);
+  });
+
+  it('follows the configured wait for the venue', async () => {
+    vi.useFakeTimers({ now: SEED_NOW });
+    const bus = new MemoryBus();
+    await publishQuotes(bus);
+    await orderService(bus, holdingLive());
+    running = await startHermes({ bus, log, preset: 'medium', seed: 1, stepMs: 100, priceWaitMs: 0, venueTimeoutMs: 1_000 });
+    await bus.publish('exec.commands', instruction(liveOrderId(), 'PAUSE', 8, SEED_NOW - 1_500));
+    expect(reportsFor(bus, 'c:8')).toEqual([]);
   });
 });

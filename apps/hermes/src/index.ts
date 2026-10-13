@@ -29,6 +29,7 @@ hermes = await startHermes({
   seed: config.seed ?? Date.now() % 2 ** 31,
   stepMs: config.stepMs,
   priceWaitMs: config.priceWaitMs,
+  venueTimeoutMs: config.venueTimeoutMs,
   metrics,
 });
 log.info({ preset: config.loadPreset }, 'hermes started');

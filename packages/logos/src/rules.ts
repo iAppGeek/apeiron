@@ -161,11 +161,18 @@ export function checkAmend(order: Order, changes: AmendChanges, now: number): Am
  * Validates and applies an amend of `limitPrice`, `orderQty`, `endTime` and `urgency`. Recomputes the
  * quantity-derived fields (`remainingQty`, `pctComplete`, `notionalUsd` at the same USD rate per unit,
  * `filledNotionalUsd`), `durationMins` and `distanceToLimitBps`.
+ *
+ * A PAUSED order's pause is measured from `lastUpdateTime`, which the amend moves to now. So that resuming still
+ * gives back the whole pause, the time paused so far is added to `endTime` here, unless the amend sets `endTime`
+ * itself (a time the user chose now; the rest of the pause extends it on resume).
  */
 export function applyAmend(record: OrderStateRecord, changes: AmendChanges, now: number): AmendResult {
-  const failure = checkAmend(record.order, changes, now);
+  const { order } = record;
+  const failure = checkAmend(order, changes, now);
   if (failure !== null) return { ok: false, ...failure };
-  return { ok: true, record: accept(record, record.execSeq, now, amendedFields(record.order, changes)) };
+  const fields = amendedFields(order, changes);
+  if (order.status === 'PAUSED' && changes.endTime === undefined) fields.endTime = order.endTime + Math.max(0, now - order.lastUpdateTime);
+  return { ok: true, record: accept(record, record.execSeq, now, fields) };
 }
 
 /**

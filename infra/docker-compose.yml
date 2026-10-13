@@ -102,6 +102,8 @@ services:
       GROUP_COMMIT_MS: ${GROUP_COMMIT_MS:-20}
       GROUP_COMMIT_MAX: ${GROUP_COMMIT_MAX:-500}
       REBUILD_PROJECTION: ${REBUILD_PROJECTION:-0}
+      # The same value goes to hermes, which drops instructions older than this (themis has answered them TIMEOUT).
+      VENUE_TIMEOUT_MS: ${VENUE_TIMEOUT_MS:-5000}
     mem_limit: 1g
     ports:
       - "127.0.0.1:4200:4200"
@@ -163,6 +165,7 @@ services:
       LOAD_PRESET: ${LOAD_PRESET:-medium}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       HEALTH_PORT: "4100"
+      VENUE_TIMEOUT_MS: ${VENUE_TIMEOUT_MS:-5000}
     depends_on:
       nats:
         condition: service_healthy

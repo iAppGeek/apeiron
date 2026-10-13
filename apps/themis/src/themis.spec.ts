@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from './log.js';
 import { historyOrders, openOrders } from './testing.js';
 import { ThemisMetrics } from './metrics.js';
-import { startThemis, type Themis } from './themis.js';
+import { SUBMISSION_MEMORY_MS, startThemis, type Themis } from './themis.js';
 
 const log = createLogger('error', () => undefined);
 const history = historyOrders(5);
@@ -16,7 +16,7 @@ async function seeded(rows: Order[] = [...history, ...open(3)]): Promise<InMemor
   return repo;
 }
 
-const options = (bus: MemoryBus, repo: OrderRepository, extra: { metrics?: ThemisMetrics; venueTimeoutMs?: number } = {}): Parameters<typeof startThemis>[0] => ({
+const options = (bus: MemoryBus, repo: OrderRepository, extra: { metrics?: ThemisMetrics; venueTimeoutMs?: number; now?: () => number } = {}): Parameters<typeof startThemis>[0] => ({
   bus,
   repo,
   log,
@@ -151,6 +151,20 @@ describe('startThemis: submissions', () => {
     expect(((await ask(bus, submission('same'))) as { orderId: string }).orderId).toBe(one.orderId);
     expect(await repo.count()).toBe(count);
     await second.stop();
+  });
+
+  it('forgets a clientOrderId after 24 hours, and still remembers a newer one', async () => {
+    const bus = new MemoryBus();
+    let t = Date.now();
+    const themis = await startThemis(options(bus, await seeded(), { now: () => t }));
+    const old = (await ask(bus, submission('old'))) as { orderId: string };
+    t += SUBMISSION_MEMORY_MS - 1_000;
+    const recent = (await ask(bus, submission('recent'))) as { orderId: string };
+    t += 2_000;
+    const renewed = (await ask(bus, submission('old'))) as { orderId: string };
+    expect(renewed.orderId).not.toBe(old.orderId);
+    expect(((await ask(bus, submission('recent'))) as { orderId: string }).orderId).toBe(recent.orderId);
+    await themis.stop();
   });
 
   it.each([

@@ -112,9 +112,21 @@ describe('ClientSession commands', () => {
     expect(vi.mocked(w.live.command).mock.calls.map(([req]) => req.userId)).toEqual(['TRADER2', 'SUPERVISOR']);
   });
 
-  it('passes a command on an order the store does not hold to the order service, which answers UNKNOWN_ORDER', () => {
+  it('answers UNKNOWN_ORDER for an order the store does not hold when the user is scoped, sending nothing on', () => {
     const w = world();
     w.session.handleFrame(json({ t: 'hello', userId: 'TRADER1', traderId: 'ALL', codec: 'json', clientId: 'c2' }));
+    w.sent.length = 0;
+    w.session.handleFrame(json({ t: 'command', reqId: 1, orderId: 'NOPE', action: 'CANCEL' }));
+    w.session.handleFrame(json({ t: 'amend', reqId: 2, orderId: 'NOPE', changes: { urgency: 'LOW' } }));
+    expect(w.sent).toEqual([
+      { t: 'error', reqId: 1, code: 'UNKNOWN_ORDER', message: 'Order NOPE does not exist' },
+      { t: 'error', reqId: 2, code: 'UNKNOWN_ORDER', message: 'Order NOPE does not exist' },
+    ]);
+    expect(w.live.command).not.toHaveBeenCalled();
+  });
+
+  it('passes a command on an order the store does not hold to the order service for a user entitled to everyone', () => {
+    const w = world();
     w.session.handleFrame(json({ t: 'command', reqId: 1, orderId: 'NOPE', action: 'CANCEL' }));
     expect(w.live.command).toHaveBeenCalledOnce();
   });

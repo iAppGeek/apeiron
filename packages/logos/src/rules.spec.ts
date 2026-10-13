@@ -224,6 +224,28 @@ describe('applyAmend', () => {
     expect(applyAmend(base, changes, NOW)).toMatchObject({ ok: false, code: 'INVALID_AMEND' });
   });
 
+  it('gives a PAUSED order the whole pause back on resume, even when it was amended while paused', () => {
+    const pausedAt = NOW - 60_000;
+    const base = record({ status: 'PAUSED', lastUpdateTime: pausedAt });
+    const amended = ok(applyAmend(base, { urgency: 'LOW' }, NOW));
+    expect(amended.order.endTime).toBe(base.order.endTime + 60_000);
+    const resumedAt = NOW + 30_000;
+    const resumed = applyExecReport(amended, { type: 'RESUMED', orderId: 'X', execSeq: 1, instrId: 'c:1', ts: resumedAt });
+    if (resumed.kind !== 'applied') throw new Error(resumed.kind);
+    expect(resumed.record.order.endTime).toBe(base.order.endTime + (resumedAt - pausedAt));
+  });
+
+  it('takes an end time set while paused as given, and extends it only by the pause after the amend', () => {
+    const base = record({ status: 'PAUSED', lastUpdateTime: NOW - 60_000 });
+    const endTime = NOW + 900_000;
+    expect(ok(applyAmend(base, { endTime }, NOW)).order.endTime).toBe(endTime);
+  });
+
+  it('leaves the end time of a LIVE order alone unless the amend sets it', () => {
+    const base = record();
+    expect(ok(applyAmend(base, { urgency: 'LOW' }, NOW)).order.endTime).toBe(base.order.endTime);
+  });
+
   it('does not mutate its input', () => {
     const base = record();
     const copy = structuredClone(base);

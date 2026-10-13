@@ -22,6 +22,8 @@ const envSchema = z.object({
   PRICE_WAIT_MS: posInt('10000'),
   /** Lifecycle simulator step length. */
   STEP_MS: posInt('100'),
+  /** The order service's wait for the venue (the same setting as themis): older instructions are dropped unanswered. */
+  VENUE_TIMEOUT_MS: posInt('5000'),
 });
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
@@ -34,6 +36,7 @@ export type HermesConfig = {
   healthPort: number;
   stepMs: number;
   priceWaitMs: number;
+  venueTimeoutMs: number;
 };
 
 export function loadConfig(env: Record<string, string | undefined>): HermesConfig {
@@ -54,5 +57,6 @@ export function loadConfig(env: Record<string, string | undefined>): HermesConfi
     healthPort: e.HEALTH_PORT,
     stepMs: e.STEP_MS,
     priceWaitMs: e.PRICE_WAIT_MS,
+    venueTimeoutMs: e.VENUE_TIMEOUT_MS,
   };
 }

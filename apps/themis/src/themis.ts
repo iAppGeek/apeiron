@@ -146,10 +146,16 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
   const clock = options.now ?? ((): number => Date.now());
   const venueTimeoutMs = options.venueTimeoutMs ?? DEFAULT_VENUE_TIMEOUT_MS;
   let seq = parseOrderSeq((await repo.maxOrderId()) ?? 'ALG00000000') ?? 0;
+  // Kept in time order (oldest first), so expiring old ids only ever looks at the front of the map.
   const submitted = new Map<string, { orderId: string; v: number; at: number }>();
-  for (const stored of book.values()) {
-    if (stored.order.clientOrderId !== '') submitted.set(stored.order.clientOrderId, { orderId: stored.order.orderId, v: stored.v, at: stored.order.createdAt });
-  }
+  const known = [...book.values()].filter((stored) => stored.order.clientOrderId !== '').sort((a, b) => a.order.createdAt - b.order.createdAt);
+  for (const stored of known) submitted.set(stored.order.clientOrderId, { orderId: stored.order.orderId, v: stored.v, at: stored.order.createdAt });
+  const forgetOldSubmissions = (now: number): void => {
+    for (const [id, entry] of submitted) {
+      if (now - entry.at <= SUBMISSION_MEMORY_MS) return;
+      submitted.delete(id);
+    }
+  };
 
   const submit = (payload: unknown): Promise<SubmitReply> =>
     new Promise<SubmitReply>((resolve) => {
@@ -160,6 +166,8 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
           resolve({ ok: false, code: 'INVALID_SUBMISSION', message: checked.message });
           return Promise.resolve();
         }
+        const now = clock();
+        forgetOldSubmissions(now);
         const key = checked.submission.clientOrderId;
         const seen = submitted.get(key);
         if (seen !== undefined) {
@@ -167,8 +175,6 @@ export async function startThemis(options: ThemisOptions): Promise<Themis> {
           committer.whenCommitted(() => resolve({ ok: true, orderId: seen.orderId, v: seen.v }));
           return Promise.resolve();
         }
-        const now = clock();
-        for (const [id, entry] of submitted) if (now - entry.at > SUBMISSION_MEMORY_MS) submitted.delete(id);
         const orderId = formatOrderId(++seq);
         const record = recordFromSubmission(checked.submission, orderId, now);
         const stored: StoredOrder = { order: record.order, v: record.v, execSeq: record.execSeq };

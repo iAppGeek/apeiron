@@ -30,6 +30,11 @@ export type HermesOptions = {
   stepMs: number;
   /** Most time to wait at startup for a quote for every pair (default 10 s); the rest use their reference level. */
   priceWaitMs?: number;
+  /**
+   * The order service's `VENUE_TIMEOUT_MS` (default 5 s). An instruction older than this has already been answered
+   * `TIMEOUT`, so carrying it out would change an order the user was told was left alone.
+   */
+  venueTimeoutMs?: number;
   now?: () => number;
   metrics?: HermesMetrics;
 };
@@ -48,8 +53,8 @@ export type HermesStatus = {
 /** How often hermes repeats `control.state`, so a server that starts later learns the preset within this long. */
 export const STATE_INTERVAL_MS = 5_000;
 
-/** An instruction older than this when hermes sees it is dropped: the order service has already timed the command out. */
-export const INSTRUCTION_MAX_AGE_MS = 30_000;
+/** The order service's default wait for the venue; instructions older than the configured wait are dropped. */
+export const DEFAULT_VENUE_TIMEOUT_MS = 5_000;
 
 /** Publishes beyond this many unacknowledged messages are held back until the backlog drains. */
 export const MAX_INFLIGHT = 20_000;
@@ -247,6 +252,7 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
   });
 
   let commandsHandled = 0;
+  const maxInstructionAgeMs = options.venueTimeoutMs ?? DEFAULT_VENUE_TIMEOUT_MS;
   const instructions = await bus.consume(
     { stream: STREAMS.venue, durable: CONSUMERS.hermesVenue, subject: SUBJECTS.execCommands },
     (payload, _subject, ack) => {
@@ -258,7 +264,7 @@ export async function startHermes(options: HermesOptions): Promise<Hermes> {
       }
       const instruction = parsed.value;
       const t = now();
-      if (t - instruction.ts > INSTRUCTION_MAX_AGE_MS) {
+      if (t - instruction.ts > maxInstructionAgeMs) {
         log.warn({ instrId: instruction.instrId, ageMs: t - instruction.ts }, 'dropped stale venue instruction');
         ack();
         return;

@@ -1,4 +1,5 @@
 import {
+  ALL_TRADERS,
   COLUMNS_VERSION,
   TRADERS,
   findUser,
@@ -347,8 +348,18 @@ export class ClientSession {
       this.sendError(reqId, 'NOT_IMPLEMENTED', 'commands are not available without a message bus');
       return;
     }
+    if (this.user === null) {
+      this.sendError(reqId, 'FORBIDDEN', 'Say hello before sending commands');
+      return;
+    }
     const owner = live.traderOf(orderId);
-    if (this.user === null || (owner !== undefined && !mayAct(this.user, owner))) {
+    // An order the store does not hold cannot be checked, so only a user entitled to everyone may send it on (the order
+    // service then answers for it); anyone else is told it is unknown, and nothing reaches the order service.
+    if (owner === undefined && !this.user.traders.includes(ALL_TRADERS)) {
+      this.sendError(reqId, 'UNKNOWN_ORDER', `Order ${orderId} does not exist`);
+      return;
+    }
+    if (owner !== undefined && !mayAct(this.user, owner)) {
       this.sendError(reqId, 'FORBIDDEN', `Order ${orderId} belongs to a trader you may not act for`);
       return;
     }
