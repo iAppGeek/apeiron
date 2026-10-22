@@ -24,7 +24,10 @@ resource "aws_security_group" "box" {
   }
 }
 
+# With a tunnel, cloudflared dials out to Cloudflare and nginx stays on loopback, so the web port is not opened.
 resource "aws_vpc_security_group_ingress_rule" "web" {
+  count = local.tunnel ? 0 : 1
+
   security_group_id = aws_security_group.box.id
   description       = "Blotter web (nginx)"
   cidr_ipv4         = var.allowed_cidr

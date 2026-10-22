@@ -56,3 +56,4 @@ fi
 terraform -chdir="$TF_DIR" init -input=false >/dev/null
 terraform -chdir="$TF_DIR" destroy -var "allowed_cidr=192.0.2.1/32"
 info "Destroyed."
+[ -z "$(cf_output hostname)" ] || info "The Cloudflare Tunnel, its DNS records and the Access login are kept (free); scripts/remote-tunnel.sh --destroy removes them."

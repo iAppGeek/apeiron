@@ -14,6 +14,9 @@ Starts the Apeiron test box (a Graviton t4g.xlarge) and runs the core + monitori
   Later uses  start the stopped instance (or do nothing if it is running), wait for SSM, then
               update the compose files, log in to the registry, pull the images, start the stack,
               and seed the data only if the database is empty.
+  Tunnel      once infra/cloudflare has been applied (scripts/remote-tunnel.sh, see docs/hosting.md), the blotter
+              is served on its host name over HTTPS through a Cloudflare Tunnel, behind an Access login, and the
+              box opens no inbound port.
 
 Options:
   --tag TAG           image tag to deploy (default: latest; for example sha-abc1234 or 1.2.3)
@@ -21,7 +24,8 @@ Options:
   --registry-kind K   ghcr (default) or ecr: where the box pulls images from on first use (Terraform variable
                       registry_kind). GHCR packages must be public; ECR needs REGISTRY_KIND=ecr in GitHub too
   --registry HOST     registry host and owner overriding Terraform's choice, for example ghcr.io/iappgeek
-  --allowed-cidr CIDR address range allowed to reach the web port (default: your public IP, /32)
+  --allowed-cidr CIDR address range allowed to reach the web port when there is no tunnel (default: your public
+                      IP, /32)
   --apply             run 'terraform apply' even when the box exists (use after your IP changes)
   --seed-rows N       rows the seeder loads when the database is empty (default 1000000)
   --yes               skip the cost confirmation
@@ -68,6 +72,12 @@ case "$REGISTRY_KIND" in "" | ghcr | ecr) ;; *) die "--registry-kind must be ghc
 if [ "$DRY_RUN" = "1" ]; then
   registry_note=""
   [ -z "$REGISTRY_OVERRIDE" ] || registry_note=", REGISTRY=$REGISTRY_OVERRIDE"
+  host="$(cf_output hostname)"
+  if [ -n "$host" ]; then
+    web_note="https://$host (Cloudflare Tunnel; the token is read from SSM on the box)"
+  else
+    web_note="http://<ip>:8080 (no tunnel: infra/cloudflare has not been applied)"
+  fi
   cat <<PLAN
 Dry run: nothing will be changed.
   1. Warn about the cost (about \$$HOURLY_USD/hour) and ask for confirmation.
@@ -76,7 +86,7 @@ Dry run: nothing will be changed.
   4. On the box, over SSM: checkout git ref '$REF', set TAG='$TAG'${registry_note},
      log in to the registry (ECR), 'docker compose --profile core --profile monitoring pull', start mongo and nats,
      run the seeder only if the database is empty${SEED_ROWS:+ (SEED_ROWS=$SEED_ROWS)}, then 'up -d --wait'.
-  5. Print the web URL and how to reach Grafana.
+  5. Print the web URL and how to reach Grafana. The blotter will be at $web_note.
 PLAN
   exit 0
 fi
@@ -98,10 +108,16 @@ terraform_apply() {
   local -a vars=(-var "allowed_cidr=$cidr" -var "image_tag=$TAG" -var "git_ref=$REF")
   [ -z "$REGISTRY_OVERRIDE" ] || vars+=(-var "registry=$REGISTRY_OVERRIDE")
   [ -z "$REGISTRY_KIND" ] || vars+=(-var "registry_kind=$REGISTRY_KIND")
+  [ -z "$PUBLIC_HOSTNAME" ] || vars+=(-var "public_hostname=$PUBLIC_HOSTNAME" -var "tunnel_token_parameter=$TOKEN_PARAM")
   terraform -chdir="$TF_DIR" apply "${vars[@]}"
 }
 
-if ! load_deployment || [ "$FORCE_APPLY" = "1" ]; then
+# The tunnel comes from the persistent Cloudflare stack; without it the box serves plain HTTP on its IP.
+PUBLIC_HOSTNAME="$(cf_output hostname)"
+TOKEN_PARAM="$(cf_output tunnel_token_parameter)"
+GRAFANA_HOSTNAME="$(cf_output grafana_hostname)"
+
+if ! load_deployment || [ "$FORCE_APPLY" = "1" ] || [ "$(tf_output public_hostname)" != "$PUBLIC_HOSTNAME" ]; then
   terraform_apply
   load_deployment || die "Terraform did not produce an instance (was the apply cancelled?)"
 fi
@@ -142,6 +158,20 @@ set_env TAG "$TAG"
 set_env REGISTRY "$REGISTRY"
 [ -z "$SEED_ROWS" ] || set_env SEED_ROWS "$SEED_ROWS"
 
+profiles=(--profile core --profile monitoring)
+if [ -n "$TOKEN_PARAM" ]; then
+  # cloudflared reaches pharos over the compose network, so nginx stays on loopback. The token is read with the
+  # instance role and only ever written to .env.remote (mode 600), never printed.
+  token="$(aws ssm get-parameter --region "$AWS_REGION" --name "$TOKEN_PARAM" --with-decryption \
+    --query Parameter.Value --output text)"
+  set_env TUNNEL_TOKEN "$token"
+  set_env WEB_BIND 127.0.0.1
+  profiles+=(--profile tunnel)
+else
+  sed -i '/^TUNNEL_TOKEN=/d' .env.remote
+  set_env WEB_BIND 0.0.0.0
+fi
+
 dc() { docker compose --env-file .env.remote "$@"; }
 
 case "$REGISTRY" in
@@ -149,7 +179,7 @@ case "$REGISTRY" in
     aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${REGISTRY%%/*}" ;;
 esac
 
-dc --profile core --profile monitoring pull --quiet
+dc "${profiles[@]}" pull --quiet
 dc --profile core up -d --wait --wait-timeout 300 mongo nats
 
 raw="$(dc exec -T mongo mongosh --quiet --eval 'db.getSiblingDB("blotter").orders.estimatedDocumentCount()')"
@@ -166,24 +196,33 @@ else
   echo "Database already holds $count orders: not seeding."
 fi
 
-dc --profile core --profile monitoring up -d --wait --wait-timeout 900
-dc --profile core --profile monitoring ps --format 'table {{.Service}}\t{{.Status}}'
+dc "${profiles[@]}" up -d --wait --wait-timeout 900
+dc "${profiles[@]}" ps --format 'table {{.Service}}\t{{.Status}}'
 REMOTE
 
 # Prefix the variable assignments so they are plain shell variables in the remote script.
-prelude="$(printf 'export BOX_DIR=%q REF=%q TAG=%q REGISTRY=%q SEED_ROWS=%q AWS_REGION=%q\n' \
-  "$BOX_DIR" "$REF" "$TAG" "$registry" "$SEED_ROWS" "$REGION")"
+prelude="$(printf 'export BOX_DIR=%q REF=%q TAG=%q REGISTRY=%q SEED_ROWS=%q AWS_REGION=%q TOKEN_PARAM=%q\n' \
+  "$BOX_DIR" "$REF" "$TAG" "$registry" "$SEED_ROWS" "$REGION" "$TOKEN_PARAM")"
 ssm_run 3600 "$prelude
 $REMOTE_SCRIPT"
 
-ip="$(instance_ip)"
+if [ -n "$PUBLIC_HOSTNAME" ]; then
+  web="https://$PUBLIC_HOSTNAME      (Cloudflare Access: sign in with an allowed email)"
+else
+  web="$(web_url)      (reachable only from the allowed address)"
+fi
+if [ -n "$TOKEN_PARAM" ] && [ -n "$GRAFANA_HOSTNAME" ]; then
+  grafana="https://$GRAFANA_HOSTNAME      (same Access login)"
+else
+  grafana="private: aws ssm start-session --region $REGION --target $INSTANCE_ID \\
+              --document-name AWS-StartPortForwardingSession --parameters portNumber=3001,localPortNumber=3001
+            then open http://localhost:3001   (needs the Session Manager plugin)"
+fi
 cat <<URLS
 
 The stack is up.
-  Blotter   http://$ip:8080      (reachable only from the allowed address)
-  Grafana   private: aws ssm start-session --region $REGION --target $INSTANCE_ID \\
-              --document-name AWS-StartPortForwardingSession --parameters portNumber=3001,localPortNumber=3001
-            then open http://localhost:3001   (needs the Session Manager plugin)
+  Blotter   $web
+  Grafana   $grafana
 
 Stop it when you are done:  scripts/remote-down.sh
 URLS

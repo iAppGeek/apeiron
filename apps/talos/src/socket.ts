@@ -43,10 +43,25 @@ export function adaptWebSocket(ws: WebSocket): SocketLike {
   };
 }
 
-/** Opens a real WebSocket (no compression, like the grid's own connection). */
-export const connectWebSocket: Connector = (url) =>
-  new Promise((resolve, reject) => {
-    const ws = new WebSocket(url, { perMessageDeflate: false });
-    ws.once('open', () => resolve(adaptWebSocket(ws)));
-    ws.once('error', reject);
-  });
+/**
+ * The Cloudflare Access service-token headers, when both halves are set: the remote box behind a Cloudflare Tunnel
+ * (scripts/remote-loadtest.sh --from-laptop sets them). Otherwise no headers.
+ */
+export function accessHeaders(env: Record<string, string | undefined>): Record<string, string> {
+  const id = env['CF_ACCESS_CLIENT_ID'];
+  const secret = env['CF_ACCESS_CLIENT_SECRET'];
+  if (!id || !secret) return {};
+  return { 'CF-Access-Client-Id': id, 'CF-Access-Client-Secret': secret };
+}
+
+/** Opens real WebSockets (no compression, like the grid's own connection), sending `headers` with each upgrade. */
+export function webSocketConnector(headers: Record<string, string> = {}): Connector {
+  return (url) =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(url, { perMessageDeflate: false, headers });
+      ws.once('open', () => resolve(adaptWebSocket(ws)));
+      ws.once('error', reject);
+    });
+}
+
+export const connectWebSocket: Connector = webSocketConnector();

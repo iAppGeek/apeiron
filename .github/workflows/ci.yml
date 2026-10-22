@@ -31,12 +31,16 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
-  terraform:
+  terraform-stack:
+    name: terraform (${{ matrix.stack }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      matrix:
+        stack: [infra/aws, infra/cloudflare]
     defaults:
       run:
-        working-directory: infra/aws
+        working-directory: ${{ matrix.stack }}
     steps:
       - uses: actions/checkout@v7
       - uses: hashicorp/setup-terraform@v4
@@ -45,6 +49,16 @@ jobs:
       - run: terraform fmt -check -recursive
       - run: terraform init -backend=false -input=false
       - run: terraform validate
+
+  # The ruleset on main requires a check named `terraform`; matrix jobs report one check per stack, so this job
+  # reports the single result. `always()` makes it fail, rather than be skipped, when a stack fails.
+  terraform:
+    needs: terraform-stack
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: test "${{ needs.terraform-stack.result }}" = success
 
   shellcheck:
     runs-on: ubuntu-latest

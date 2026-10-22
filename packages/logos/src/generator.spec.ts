@@ -13,6 +13,21 @@ const DAY = 86_400_000;
 /** Explicit budget for the tests that walk 100k generated orders with per-field assertions. */
 const HEAVY_MS = 30_000;
 
+/**
+ * Checks every order against named rules and lists the first few that break, as "<orderId>: <rule>". Plain checks
+ * with one assertion at the end: an expect() per field over 100k orders is millions of calls, which a busy CI runner
+ * could not finish within HEAVY_MS.
+ */
+function violations(list: Order[], rules: Record<string, (o: Order, i: number) => boolean>): string[] {
+  const out: string[] = [];
+  const checks = Object.entries(rules);
+  for (let i = 0; i < list.length && out.length < 20; i++) {
+    const o = list[i]!;
+    for (const [name, ok] of checks) if (!ok(o, i)) out.push(`${o.orderId}: ${name}`);
+  }
+  return out;
+}
+
 function first(n: number, total: number, seed = 42): Order[] {
   const out: Order[] = [];
   for (const batch of generateOrderBatches({ seed, n: total, now: NOW, batchSize: n })) {
@@ -73,15 +88,14 @@ describe('generated data shape', () => {
     const hist = orders.filter((o) => o.status === 'FILLED' || o.status === 'CANCELLED');
     const days = new Set(historicalDays(NOW));
     expect(days.size).toBeGreaterThan(120);
-    for (let i = 0; i < hist.length; i++) {
-      const o = hist[i]!;
-      if (i > 0) expect(o.createdAt).toBeGreaterThanOrEqual(hist[i - 1]!.createdAt);
-      expect(days.has(Math.floor(o.createdAt / DAY) * DAY)).toBe(true);
-      expect(o.createdAt).toBeLessThan(NOW);
-      expect(o.completedAt).not.toBeNull();
-      expect(o.completedAt!).toBeLessThan(NOW);
-      expect(o.endTime).toBeLessThanOrEqual(NOW);
-    }
+    const broken = violations(hist, {
+      ascending: (o, i) => i === 0 || o.createdAt >= hist[i - 1]!.createdAt,
+      'on a historical weekday': (o) => days.has(Math.floor(o.createdAt / DAY) * DAY),
+      'created before now': (o) => o.createdAt < NOW,
+      'completed before now': (o) => o.completedAt !== null && o.completedAt < NOW,
+      'ended by now': (o) => o.endTime <= NOW,
+    });
+    expect(broken).toEqual([]);
   }, HEAVY_MS);
 
   it('places LIVE orders in progress and PENDING_START orders 1-120 minutes ahead', () => {
@@ -103,44 +117,34 @@ describe('generated data shape', () => {
   });
 
   it('keeps every order internally consistent', () => {
-    for (const o of orders) {
-      expect(Object.keys(o)).toHaveLength(50);
-      expect(o.orderQty % 100_000).toBe(0);
-      expect(o.orderQty).toBeGreaterThanOrEqual(1_000_000);
-      expect(o.orderQty).toBeLessThanOrEqual(100_000_000);
-      expect(o.remainingQty).toBe(o.orderQty - o.filledQty);
-      expect(o.pctComplete).toBeCloseTo((o.filledQty / o.orderQty) * 100, 1);
-      expect(o.marketBid).toBeLessThan(o.marketAsk);
-      expect(o.marketMid).toBeGreaterThanOrEqual(o.marketBid);
-      expect(o.marketMid).toBeLessThanOrEqual(o.marketAsk);
-      expect(o.spreadBps).toBeGreaterThan(0);
-      expect(o.startTime).toBeGreaterThanOrEqual(o.createdAt);
-      expect(o.endTime).toBeGreaterThan(o.startTime);
-      expect(o.baseCcy + o.quoteCcy).toBe(o.currencyPair);
-      expect(o.traderId).toMatch(/^T[1-5]$/);
-      expect(o.account.startsWith(o.traderId)).toBe(true);
-      if (o.orderType === 'MARKET') {
-        expect(o.limitPrice).toBeNull();
-        expect(o.distanceToLimitBps).toBeNull();
-      } else {
-        expect(o.limitPrice).not.toBeNull();
-      }
-      if (o.status === 'FILLED') {
-        expect(o.filledQty).toBe(o.orderQty);
-        expect(o.remainingQty).toBe(0);
-      }
-      if (o.status === 'CANCELLED') {
-        expect(o.filledQty).toBeGreaterThan(0);
-        expect(o.filledQty).toBeLessThan(o.orderQty);
-      }
-      if (o.filledQty > 0) {
-        expect(o.avgFillPrice).not.toBeNull();
-        expect(o.numFills).toBeGreaterThanOrEqual(1);
-        expect(o.lastFillQty).toBeGreaterThan(0);
-        expect(o.lastFillQty).toBeLessThanOrEqual(o.filledQty);
-        expect(o.numChildOrders).toBeGreaterThanOrEqual(o.numFills);
-      }
-    }
+    const broken = violations(orders, {
+      '50 fields': (o) => Object.keys(o).length === 50,
+      'qty in 100k lots': (o) => o.orderQty % 100_000 === 0,
+      'qty within 1M-100M': (o) => o.orderQty >= 1_000_000 && o.orderQty <= 100_000_000,
+      'remaining = order - filled': (o) => o.remainingQty === o.orderQty - o.filledQty,
+      // The same tolerance as toBeCloseTo(x, 1).
+      'pctComplete matches': (o) => Math.abs(o.pctComplete - (o.filledQty / o.orderQty) * 100) < 0.05,
+      'bid < ask': (o) => o.marketBid < o.marketAsk,
+      'mid within bid/ask': (o) => o.marketMid >= o.marketBid && o.marketMid <= o.marketAsk,
+      'positive spread': (o) => o.spreadBps > 0,
+      'starts after creation': (o) => o.startTime >= o.createdAt,
+      'ends after start': (o) => o.endTime > o.startTime,
+      'pair = base + quote': (o) => o.baseCcy + o.quoteCcy === o.currencyPair,
+      'trader T1-T5': (o) => /^T[1-5]$/.test(o.traderId),
+      "account is the trader's": (o) => o.account.startsWith(o.traderId),
+      'limit price matches type': (o) =>
+        o.orderType === 'MARKET' ? o.limitPrice === null && o.distanceToLimitBps === null : o.limitPrice !== null,
+      'FILLED is fully filled': (o) => o.status !== 'FILLED' || (o.filledQty === o.orderQty && o.remainingQty === 0),
+      'CANCELLED is part filled': (o) => o.status !== 'CANCELLED' || (o.filledQty > 0 && o.filledQty < o.orderQty),
+      'fills are consistent': (o) =>
+        o.filledQty === 0 ||
+        (o.avgFillPrice !== null &&
+          o.numFills >= 1 &&
+          o.lastFillQty > 0 &&
+          o.lastFillQty <= o.filledQty &&
+          o.numChildOrders >= o.numFills),
+    });
+    expect(broken).toEqual([]);
   }, HEAVY_MS);
 
   it('computes slippage with a positive value meaning adverse', () => {
