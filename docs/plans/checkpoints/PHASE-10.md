@@ -1,7 +1,7 @@
 # Phase 10: fresh evidence for the demo pack (2026-10-09)
 
-Raw records of the runs made for [`TECHNICAL-OVERVIEW.md`](../TECHNICAL-OVERVIEW.md) §9.4, the
-[`USER-GUIDE.md`](../USER-GUIDE.md) and the deck. Every fresh number in those documents comes from this file.
+Raw records of the runs made for the technical overview §9.4 (now [`performance.md`](../../performance.md#a-slower-host-the-2026-10-09-reproduction)), the
+[`USER-GUIDE.md`](../../user-guide.md) and the deck. Every fresh number in those documents comes from this file.
 
 ## Environment (read this before comparing numbers)
 
@@ -26,7 +26,7 @@ How the stack was brought up here (no repo change):
 - **The resilience tier was not re-run.** Its Toxiproxy image (`ghcr.io/shopify/toxiproxy:2.12.0`) could not be
   downloaded: the session's network policy refused the GHCR blob host (403), and Docker Hub rate-limited the
   `pharos-e2e` base image lookup (429). The resilience results in the docs are the final ones recorded on the merged
-  code in [`CP-6.md`](CP-6.md) and [`TESTING.md`](../TESTING.md).
+  code in [`CP-6.md`](CP-6.md) and [`TESTING.md`](../../testing.md).
 
 ## 1. State before the runs
 
@@ -172,8 +172,8 @@ host's speed (section 4): server CPU median 65% of a core here against 22 to 24%
 against 36 to 44 ms. The laptop runs in [`CP-4.md`](CP-4.md) §12 remain the reference results; a talos run on the
 target host (AWS Graviton, paused) has not been made.
 
-Grafana during this run: [`grafana-talos-50-clients-medium.png`](../screenshots/demo/grafana-talos-50-clients-medium.png)
-(about 110 s in) and [`grafana-talos-50-clients-stress.png`](../screenshots/demo/grafana-talos-50-clients-stress.png)
+Grafana during this run: [`grafana-talos-50-clients-medium.png`](../../screenshots/demo/grafana-talos-50-clients-medium.png)
+(about 110 s in) and [`grafana-talos-50-clients-stress.png`](../../screenshots/demo/grafana-talos-50-clients-stress.png)
 (stress window, 3,220 LIVE orders, 2,060 order events/s).
 
 ## 4. Engine benchmark on this host
@@ -205,7 +205,7 @@ stopped). Columns: hz, min, max, mean, p75, p99, p995, p999, rme, samples (ms).
 
 ## 5. Browser pass (Playwright + CDP, 1600×900)
 
-Screenshots in [`docs/screenshots/demo/`](../screenshots/demo). Steps: flat view; scripted deep scroll (40 steps in about
+Screenshots in [`docs/screenshots/demo/`](../../screenshots/demo). Steps: flat view; scripted deep scroll (40 steps in about
 2 s to 30% of the table); anchoring for 15 s; grouping by pair with aggregates; set (pair = EURUSD), number
 (notional > 10M) and date (value date = first row's) filters; Pause/Resume on an isolated LIVE order (10 timed actions)
 and the Cancel confirmation; the Dev menu codec switch both ways; the Stress preset with the STRESS pill; console and heap.

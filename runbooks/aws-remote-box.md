@@ -2,7 +2,7 @@
 
 This is the single reference for running the Apeiron stack on AWS for a session and tearing it back down to a running
 cost of **$0**. It is written so an assistant (or a person) with no other context can follow it from the repo root.
-Background and design are in [docs/hosting.md](../docs/hosting.md); this file is the procedure.
+It holds the procedure only; the facts it relies on live in [docs/](../docs) and are linked where they are needed.
 
 ## Rules for an assistant
 
@@ -15,31 +15,21 @@ Background and design are in [docs/hosting.md](../docs/hosting.md); this file is
 - Never print or commit secrets: `infra/*/terraform.tfstate`, `infra/cloudflare/terraform.tfvars`, `.env.remote` on the
   box, the tunnel token, the Access service token secret.
 
-## What exists, and what costs money
+## Background
 
-| Part | Where | Lifetime | Cost |
-|---|---|---|---|
-| Cloudflare Tunnel, DNS (`blotter.`, `grafana.oramalabs.dev`), Access login, service token | `infra/cloudflare` | permanent | free |
-| SSM parameter `/apeiron/cloudflared/tunnel-token` (eu-west-2) | `infra/cloudflare` | permanent | free (standard tier) |
-| IAM roles, GitHub OIDC provider, security group, ECR repositories (empty: images come from GHCR) | `infra/aws`, `box = false` | permanent | free |
-| **EC2 `t4g.xlarge`, its 30 GB gp3 disk, its public IPv4** | `infra/aws`, `box = true` | **START to STOP only** | **about $0.16/hour** |
+What each part is, what it costs, and why: [docs/hosting.md](../docs/hosting.md) ("What Terraform creates", the
+Cloudflare Tunnel section, "Cost" and "Security notes"). In short, only the EC2 instance (with its disk and public IP)
+costs money, about $0.16/hour, and it exists only between START and STOP; everything else is free and permanent.
+Terraform state is **local and git-ignored** (`infra/aws/terraform.tfstate`, `infra/cloudflare/terraform.tfstate`), so
+run this on the machine that holds it. Region: **eu-west-2**.
 
-Terraform state is **local and git-ignored**: `infra/aws/terraform.tfstate` and `infra/cloudflare/terraform.tfstate`.
-Every script reads it, so run them on the machine that holds it. Region: **eu-west-2**.
+The commands used below (all have `--help` and `--dry-run`; reference in hosting.md):
 
-## Commands
-
-| Command | Does | Running cost after |
-|---|---|---|
-| `scripts/remote-tunnel.sh --apply` | once: the Cloudflare side (needs `CLOUDFLARE_API_TOKEN` and `infra/cloudflare/terraform.tfvars`) | $0 |
-| `scripts/remote-setup.sh` | once, optional: the free AWS parts (`box = false`) | $0 |
-| `scripts/remote-up.sh` | **START**: creates the box (`box = true`), deploys, seeds, waits until healthy | ~$0.16/hour |
-| `scripts/remote-down.sh` | **STOP**: deletes the box and its disk (`box = false`); keeps the free parts | **$0** |
-| `scripts/remote-destroy.sh` | removes the free AWS parts too (rarely needed; asks for `destroy apeiron`) | $0 |
-| `scripts/remote-loadtest.sh` | optional: talos load test on the box | — |
-| `scripts/remote-tunnel.sh --status` | checks both host names answer with the Access login | — |
-
-All have `--help` and `--dry-run`. The data does **not** survive STOP: every START seeds again.
+- `scripts/remote-up.sh`: **START**
+- `scripts/remote-down.sh`: **STOP**
+- `scripts/remote-tunnel.sh --status`: checks both host names answer with the Access login
+- `scripts/remote-setup.sh`, `scripts/remote-tunnel.sh --apply`: one-time free setup, already done if the preflight
+  below shows the free parts
 
 ## Preflight (read-only)
 
@@ -51,8 +41,8 @@ terraform -chdir=infra/aws state list 2>/dev/null | grep -c '^aws_'   # 0 = noth
 terraform -chdir=infra/aws state list 2>/dev/null | grep -c '^aws_instance'   # 1 = the box is up (billing)
 ```
 
-Images must be public on GHCR (`ghcr.io/iappgeek/apeiron/<service>:latest`, built by the **Images** workflow). The box
-takes its compose files from git (`main` by default), so changes must be merged first or deployed with `--ref`.
+Images must be public on GHCR and the box takes its compose files from git (`main` by default), so changes must be
+merged first or deployed with `--ref` ([hosting.md](../docs/hosting.md#choosing-a-registry-ghcr-or-ecr)).
 
 ## START
 
@@ -95,8 +85,9 @@ sleep 5; aws ssm get-command-invocation --region eu-west-2 --command-id "$cmd" -
   --query StandardOutputContent --output text
 ```
 
-Expected services: `mongo`, `nats`, `themis`, `helios`, `hermes`, `antikythera`, `pharos`, `prometheus`, `grafana`
-(all healthy) and `cloudflared` (Up). `/health` returns JSON with `"status":"ok"` and `"rows":1000000`.
+Expected: every service of the `core` and `monitoring` profiles healthy (the list is in
+[hosting.md](../docs/hosting.md#compose-profiles)) and `cloudflared` Up. `/health` returns JSON with `"status":"ok"` and
+`"rows":1000000` (its fields are described in [architecture.md](../docs/architecture.md#loading)).
 
 **3. Through Cloudflare** (the path a browser takes). Uses the Access service token, so no browser login is needed.
 Resolve with public DNS if the local resolver has not caught up (see Troubleshooting).
@@ -162,8 +153,7 @@ for r in $(aws ecr describe-repositories --region eu-west-2 --query 'repositorie
 done                                                                        # every count 0
 ```
 
-What remains is free: IAM roles and policies, the OIDC provider, the security group, empty ECR repositories, the
-standard SSM parameter, and the Cloudflare stack. AWS billing (Cost Explorer) lags by about a day, so the checks above,
+What remains is free ([hosting.md](../docs/hosting.md#cost)). AWS billing (Cost Explorer) lags by about a day, so the checks above,
 not the bill, are the proof on the day.
 
 ## Starting and stopping from an assistant

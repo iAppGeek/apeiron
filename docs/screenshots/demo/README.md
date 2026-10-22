@@ -2,7 +2,7 @@
 
 Captured for the phase 10 demo pack at 1600×900 against the local stack (1M rows, Medium preset unless noted), with
 Playwright and a CDP session (headless Chromium 141). Method, environment and the measurements taken alongside them:
-[`../../checkpoints/PHASE-10.md`](../../checkpoints/PHASE-10.md).
+[`../../checkpoints/PHASE-10.md`](../../plans/checkpoints/PHASE-10.md).
 
 | File | Shows |
 |---|---|

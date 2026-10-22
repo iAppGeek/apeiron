@@ -36,19 +36,20 @@ type OrderRepository = {
 
 | Method | Used by | Contract |
 |---|---|---|
-| `loadAll(batchSize = 10_000)` | the order service when it rebuilds the projection | **Stream** every order in ascending `orderId`, in batches of at most `batchSize` (the last may be shorter). Must not materialise the full set: the server loads 1M rows into a columnar store with a heap budget of under 800 MB. Early termination (`break`) must release the cursor. Ascending order matters: the store assumes ids ascend so radix sorts keep a free tiebreak |
+| `loadAll(batchSize = 10_000)` | the order service when it rebuilds the projection | **Stream** every order in ascending `orderId`, in batches of at most `batchSize` (the last may be shorter). Must not materialise the full set: a rebuild streams 1M rows into the `ORDER_STATE` bucket and must keep memory flat. Early termination (`break`) must release the cursor. Ascending order matters: the store assumes ids ascend so radix sorts keep a free tiebreak |
 | `upsertMany(records)` | gaia (seed), the order service | Insert or **fully replace** by `orderId`, with `v` and `execSeq`; idempotent; unordered batch writes are fine; an empty list is a no-op. Every one of the 50 fields is stored, nulls included |
 | `count()` | gaia, tests | exact number of stored orders |
 | `isSeeded()` | gaia | true when at least one order exists. Must be cheap (no full count) |
-| `loadOpen()` | the order service, hermes at startup | only `PENDING_START`, `LIVE` and `PAUSED` orders, ascending by `orderId`. This is a few hundred rows out of a million, so the adapter needs an index (or partition) on status |
+| `loadOpen()` | the order service (it answers hermes's startup query for the open orders) | only `PENDING_START`, `LIVE` and `PAUSED` orders, ascending by `orderId`. This is a few hundred rows out of a million, so the adapter needs an index (or partition) on status |
 | `loadUpdatedSince(ts, batchSize = 10_000)` | the order service at startup | **Stream** the orders whose `lastUpdateTime` is at or after `ts`, ascending by `orderId`, in batches. Needs an index on `lastUpdateTime` (Mongo: `{lastUpdateTime: -1}`) |
-| `latestMidsByPair()` | the pricing service's start levels | the `marketMid` of the most recently updated open order of each pair (ties: larger `orderId`), else the pair's reference level. All 20 pairs are present |
-| `maxOrderId()` | hermes, gaia | the highest `orderId`, or `null` when empty, so new ids can keep ascending (`ALG` + a zero-padded sequence, so string order equals numeric order) |
+| `latestMidsByPair()` | the order service's `ref.mids`, which the price feed (`helios`) starts from | the `marketMid` of the most recently updated open order of each pair (ties: larger `orderId`), else the pair's reference level. All 20 pairs are present |
+| `maxOrderId()` | the order service (it assigns new ids) | the highest `orderId`, or `null` when empty, so new ids can keep ascending (`ALG` + a zero-padded sequence, so string order equals numeric order) |
 | `clear()` | gaia (`SEED_RESET=true`), tests | remove every order; idempotent on an empty repository; the repository stays usable afterwards (recreate indexes if the drop removed them) |
 
 Write patterns to design for: a one-off bulk load of 1M rows (gaia, batches of 10,000), then a steady trickle of small
-batches (write-behind, every 500 ms, tens to hundreds of rows). Reads are one sequential scan at startup. Nothing reads
-by key at runtime, because the server serves queries from memory.
+batches (the order service's group commits: at most every 20 ms or 500 changes). Reads are sequential scans at the order
+service's startup (open orders, recent changes, and the whole table when it rebuilds the projection). Nothing reads by
+key at runtime, because the blotter serves queries from memory.
 
 ## Running the contract suite against a new adapter
 
@@ -90,7 +91,7 @@ Beyond the suite, also check a 1M-row load: `loadAll` should hold memory flat (w
 
 ## Wiring an adapter in
 
-The adapter is constructed in each app's `src/index.ts` (`themis`, `gaia`, and `hermes` until phase 1.5b), which today call
+The adapter is constructed in each app's `src/index.ts` (`themis` and `gaia`, the only two that use a database), which today call
 `MongoOrderRepository.connect` directly. The blotter (`antikythera`) no longer uses a repository at all: it reads the
 order service's `ORDER_STATE` bucket. To add an adapter, export it from `packages/mnemosyne/src/index.ts` and replace the
 direct call with a small factory `createRepository(config)` shared by those apps. The engine, the protocol and the web app
@@ -179,13 +180,13 @@ CREATE TABLE orders (
   CONSTRAINT orders_pk PRIMARY KEY (order_id)
 );
 
--- loadCurrent(): a few hundred rows out of a million, so an index on the three open statuses.
+-- loadOpen(): a few hundred rows out of a million, so an index on the three open statuses.
 CREATE INDEX orders_open_ix ON orders (CASE WHEN status IN ('PENDING_START','LIVE','PAUSED') THEN status END);
 ```
 
 `BINARY_DOUBLE` keeps IEEE doubles exactly (the contract requires an exact round trip of what JavaScript holds);
 `NUMBER` with a scale would round. Use it for every value the generator produces as a float. The function-based index
-above only indexes open orders (the `CASE` yields `NULL`, which a B-tree index skips), so `loadCurrent()` -
+above only indexes open orders (the `CASE` yields `NULL`, which a B-tree index skips), so `loadOpen()` -
 `WHERE CASE WHEN status IN ('PENDING_START','LIVE','PAUSED') THEN status END IS NOT NULL ORDER BY order_id` - reads a
 handful of index entries instead of scanning a million rows. The query must repeat the exact expression. The primary key is an index organised on `order_id`, which also serves `maxOrderId()`
 (`SELECT MAX(order_id)`) and the ordered scan.
@@ -215,7 +216,7 @@ stream in a `finally` block so an early `break` releases the cursor and the conn
 **`clear()`.** `TRUNCATE TABLE orders` (DDL, instant, idempotent); there is nothing to recreate.
 
 **Operational notes.** Use a connection pool (`oracledb.createPool`) sized small: the server needs one connection for the
-startup scan and one for write-behind. Oracle Free is limited to 2 CPUs, 2 GB of RAM and 12 GB of user data, which holds
+startup scan and one for the group commits. Oracle Free is limited to 2 CPUs, 2 GB of RAM and 12 GB of user data, which holds
 this dataset (a million 50-column rows is a few hundred MB).
 
 ## KDB sketch
@@ -258,8 +259,8 @@ list of strings. Write a day's rows with `.Q.dpft[`:/data;2026.10.06;`orderId;`o
 partition sorted by `orderId` (and puts the `p` attribute on that column, harmless on a unique key). Order ids ascend with
 `createdAt`, so reading the partitions in date order yields ascending `orderId` overall, which is what `loadAll`
 promises. A historical database has no update in place, so **open orders live in a small in-memory table** (with the `g`
-attribute on `status`) that write-behind updates by key (`upsert`), and a job flushes finished orders into the
-partitions. `loadCurrent()` then reads only the realtime table.
+attribute on `status`) that the group commits update by key (`upsert`), and a job flushes finished orders into the
+partitions. `loadOpen()` then reads only the realtime table.
 
 **IPC client.** Node has no first-party kdb+ client; options are the community `node-q` package, or speaking the IPC
 protocol over a small adapter. An adapter would: connect to `5010`, send `(`.api.loadAll;1000;offset)` style requests
@@ -271,8 +272,9 @@ back. `count[]` is `count orders` over the partitions, `maxOrderId[]` is `max` o
 `clear[]` unlinks the partition directories and empties the realtime table.
 
 **Tickerplant as an alternative to NATS.** In a kdb shop the order events and price ticks arrive through a tickerplant
-(`tick.q`) instead of NATS: hermes' publisher would write to the tickerplant (`.u.upd[`orderEvents; data]`), and
-antikythera would **subscribe** with `.u.sub[`orderEvents;`]`, receiving each update as a callback on its IPC handle,
+(`tick.q`) instead of NATS: helios and hermes would publish prices and execution reports to the tickerplant
+(`.u.upd[`execReports; data]`), and themis and antikythera would **subscribe** (`.u.sub[`execReports;`]`), receiving each
+update as a callback on their IPC handle,
 with the tickerplant's log file providing replay from a point (the equivalent of JetStream's durable consumer). The `Bus`
 port in `packages/logos/src/bus.ts` is the seam: a `TickerplantBus` implementing it replaces `NatsBus` (`@apeiron/iris`)
 and nothing above it changes. The `prices.*` and `exec.reports` subjects map to two tickerplant tables, and

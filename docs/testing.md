@@ -187,7 +187,15 @@ Each scenario below gives what it simulates, why, how sync is proven, the pass c
 
 ## Latest results
 
-Local, against the 1,000,000-row stack on one laptop (Docker VM with 6 GB), on the final code of PR #10 (`8820833`, after the CP-6 fixes). `reconnects` and `deltas` are the lowest and highest across the five pages; `orders compared` is the model check; `p95` is the median of the pages' once-a-second tick-to-screen p95 (lowest to highest page).
+**Current architecture** (PLAN1 phase 1.8, 2026-10-13, [`PHASE-1.8.md`](plans/checkpoints/PHASE-1.8.md)): the **full tier
+passed 12 of 12 in 30.4 minutes** (the canary, S1 to S8, and the new S10, S11 and S12, with the four checks), and S10,
+S11 and S12 passed three times each at full length. Run long suites under `caffeinate -i`: a laptop that sleeps stalls
+the run (and the Docker VM's clock falls behind; reset it with
+`docker run --rm --privileged alpine date -s @$(date +%s)`). S1 at smoke length failed twice with page V3 one reconnect
+short during sleep-disturbed runs and passes at full length; watch for it in CI's smoke step.
+
+The per-scenario figures below are from the final code of PR #10 (`8820833`, after the CP-6 fixes, before the split), on
+the 1,000,000-row stack on one laptop (Docker VM with 6 GB). `reconnects` and `deltas` are the lowest and highest across the five pages; `orders compared` is the model check; `p95` is the median of the pages' once-a-second tick-to-screen p95 (lowest to highest page).
 
 ### Full tier, final run (23.6 minutes, 9 of 9 passed, 1,417 s wall time including the canary)
 
@@ -202,7 +210,7 @@ Local, against the 1,000,000-row stack on one laptop (Docker VM with 6 GB), on t
 | S7 | pass | 2 | 526 to 912 | 4,230 | 120 s / 129 s | 62 to 64 ms |
 | S8 | pass | 4 | 293 to 352 | 1,017 | 75 s / 84 s | 56 to 62 ms |
 
-Earlier full runs on earlier code are in `docs/checkpoints/CP-6.md`; they failed on the bugs listed there.
+Earlier full runs on earlier code are in [`CP-6.md`](plans/checkpoints/CP-6.md); they failed on the bugs listed below.
 
 ### Quick tier, final run (11.9 minutes, 9 of 9 passed, 713 s wall time including the canary)
 
@@ -221,5 +229,27 @@ Stability of the gate for bug 9: S6, S4 and S5 each passed six times in a row on
 
 ### Smoke tier
 
-Passes in CI (`e2e` job, the `Resilience smoke` step) on the PR.
+Passes in CI (`e2e` job, the `Resilience smoke` step) on every PR.
+
+## Bugs the resilience suite found
+
+All nine were real product bugs in the live path, found against the 1M-row stack, each fixed with a reproducing unit
+test; none was caught by the unit, property or end-to-end layers ([`CP-6.md`](plans/checkpoints/CP-6.md) §2 and "CP-6
+fixes"). A tenth, in the PLAN1 work, was found on the way to S10 (a retired `ORDERS` stream captured `orders.cmd`;
+[`PHASE-1.8.md`](plans/checkpoints/PHASE-1.8.md)).
+
+| # | Bug | Found by | Fix |
+|---|---|---|---|
+| 1 | Tracker kept only 500 rows added to a top block; older rows still on screen stopped ticking | S4 | track up to 2,000; beyond that mark the route dirty |
+| 2 | A client that said hello while the store was loading was never registered for deltas after a restart | S7 | register the session on `getRows` once the runtime exists |
+| 3 | `lastUpdateTime` stepped backwards from producer/server clock skew | S5 | never lower an order's `lastUpdateTime` (since the split only `themis` writes it) |
+| 4 | A timed-out `getRows` failed the block and left the grid empty for good | S6 | `TIMEOUT` is retryable |
+| 5 | Root-refresh seam: rows added between block answers left displaced rows | S6 | refresh the root once more after a refresh that overlapped adds |
+| 6 | Same seam after a purge reload; adds the grid couldn't take yet were lost | S6 quick | arm the follow-up refresh on purge too |
+| 7 | Rows pushed past a reloaded block's end went untracked and stale | S2 (~1 run in 4) | carry the previous tail when re-recording a grown block |
+| 8 | A held delta could be overtaken by a later reply, so adds were applied twice | S6 | flush held deltas before any reply |
+| 9 | Rows below a slow reload went untracked; held-back adds arrived after a reply that already contained them | S4/S5/S6 | retain 1,000 rows; send pending adds before a reply |
+
+The common cause: tracked blocks mirror a client cache the server cannot see. The fixes make it self-healing (reload when
+unsure) rather than exact.
 

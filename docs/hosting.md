@@ -13,27 +13,23 @@ Graviton).
 ## Local
 
 Requirements: Docker with Compose v2, and about 6 GB of RAM given to the Docker VM. The repo root has a `compose.yaml`
-that includes `infra/docker-compose.yml`, so every command runs from the repo root.
+that includes `infra/docker-compose.yml`, so every command runs from the repo root. The commands to start, seed, reset
+and stop the stack are in [user-guide.md](user-guide.md#running-it); this section is the reference for what they use.
 
 ### Compose profiles
 
 | Profile | Services | Purpose |
 |---|---|---|
-| `core` | `mongo`, `nats`, `antikythera`, `hermes`, `pharos` | the blotter itself |
+| `core` | `mongo`, `nats`, `themis`, `helios`, `hermes`, `antikythera`, `pharos` | the blotter itself |
 | `seed` | `mongo`, `gaia` | load the orders into Mongo (one-shot) |
 | `monitoring` | `prometheus`, `grafana` | metrics and the server dashboard |
 | `loadtest` | `talos` | the load harness (needs `core`) |
+| `resilience` | `toxiproxy`, `pharos-e2e` | the resilience suite's fault proxy and test-hooks web app (needs `core`; [testing.md](testing.md)) |
 | `tunnel` | `cloudflared` | Cloudflare Tunnel from the remote box to its host name (needs `core` and `TUNNEL_TOKEN`) |
 
-```bash
-cp .env.example .env                                        # optional local overrides, never committed
-docker compose --profile core up -d --build                 # build and start the stack
-docker compose --profile core --profile seed run --rm gaia  # seed 1M orders (a second run is a no-op)
-docker compose --profile core --profile monitoring up -d    # add Prometheus and Grafana
-```
-
-Start the stack, seed, then restart `antikythera` (or start it after seeding): the server loads Mongo once at startup,
-so a server that started against an empty database has nothing to show until it is restarted.
+**Startup order matters once.** `themis` rebuilds the `ORDER_STATE` bucket from the database at startup when the two
+disagree, and the blotter loads from that bucket, so seed before starting the services (the order in the user guide). If
+you seed into a running stack, restart `themis` and then `antikythera`.
 
 ### Ports
 
@@ -42,19 +38,28 @@ Every published port binds to `127.0.0.1`, so nothing is reachable from the netw
 | Service | Port | Notes |
 |---|---|---|
 | pharos (nginx) | 8080 | the web app, and `/ws` proxied to the server |
-| antikythera | 4000 | `/health`, `/metrics`, `/debug/lag`, and the WebSocket at `/ws` |
+| antikythera | 4000 | `/health`, `/health/live`, `/health/ready`, `/metrics`, `/debug/lag`, and the WebSocket at `/ws` |
+| themis | 4200 | `/health`, `/metrics`, `/debug` |
+| helios | 4300 | `/health`, `/metrics` |
 | mongo | 27017 | |
 | nats | 4222, 8222 | client and monitoring |
 | prometheus | 9090 | |
 | grafana | 3001 | anonymous Viewer access; admin sign-in uses `GRAFANA_ADMIN_PASSWORD` (default `admin`) |
+| toxiproxy | 8474 | resilience profile: the fault proxy's API |
+| pharos-e2e | 8081 | resilience profile: the web app with test hooks |
+
+`hermes` publishes no port (its `:4100` health and metrics are reachable inside the compose network). The Vite dev server
+(`pnpm --filter @apeiron/pharos dev`) runs on 5173 and proxies `/ws` to localhost:4000.
 
 `WEB_BIND` and `GRAFANA_BIND` change the interface the web and Grafana ports bind to (default `127.0.0.1`). The remote
-box sets `WEB_BIND=0.0.0.0` and relies on its security group.
+box keeps the web port on loopback when it has the Cloudflare Tunnel, and sets `WEB_BIND=0.0.0.0` (behind its security
+group) when it does not.
 
 ### Memory: `MONGO_CACHE_GB`
 
-MongoDB's WiredTiger cache defaults to half of the Docker VM's RAM. Under the live write-behind load that starves the
-blotter server and the VM swaps, after which every container stalls. `MONGO_CACHE_GB` (default `1`) caps it; 1 GB holds
+MongoDB's WiredTiger cache defaults to half of the Docker VM's RAM. Under `themis`'s steady write load that starves the
+other containers and the VM swaps, after which every container stalls (the CP-4 incident in
+[performance.md](performance.md#the-death-spiral-cp-4)). `MONGO_CACHE_GB` (default `1`) caps it; 1 GB holds
 the working set of this dataset. Raise it on a bigger host (the AWS box uses 4). The server container is capped at
 `mem_limit: 3g` and needs about 0.9 GB at the load peak.
 
@@ -66,8 +71,8 @@ menu), `FLUSH_MS` and `LOG_LEVEL`.
 
 ### Resetting before a load test
 
-`scripts/loadtest-reset.sh` empties JetStream, re-seeds the orders (so the LIVE population is back to about 500) and
-brings everything up on the Medium preset.
+`scripts/loadtest-reset.sh` puts the stack back to a known state; what it does is in
+[user-guide.md](user-guide.md#seeding-and-reset).
 
 ## AWS, on demand, for short test sessions
 
@@ -75,15 +80,14 @@ Step-by-step procedure (START, verify, STOP, verify $0): [runbooks/aws-remote-bo
 
 One Graviton instance runs the whole stack for the length of a test session, and is deleted in between, so nothing is
 billed between sessions. The parts that cost nothing while idle (IAM, the security group, ECR, the Cloudflare Tunnel)
-are set up once and kept.
-There is no load balancer and no NAT gateway.
+are set up once and kept. There is no load balancer and no NAT gateway.
 
 ```
 laptop ──(AWS CLI + SSM)──▶ EC2 t4g.xlarge, Amazon Linux 2023 arm64, 30 GB encrypted gp3
-   │                          docker compose: mongo, nats, antikythera, hermes, pharos, prometheus, grafana
-   └──(HTTP :8080, your IP only)──▶ pharos
+   │                          docker compose: the core and monitoring profiles (every service but the test ones)
+   └──(HTTP :8080, your IP only)──▶ pharos        (without a tunnel)
 
-with a tunnel (optional, below):
+with a tunnel (below; the box then opens no inbound port):
 browser ──HTTPS──▶ Cloudflare (Access login) ◀──outbound tunnel── cloudflared on the box ──▶ pharos, grafana
 ```
 
@@ -108,7 +112,7 @@ only while `box = true`: START (`remote-up.sh`) applies with `box = true`, STOP 
 |---|---|---|
 | EC2 instance | **no**: START creates it, STOP deletes it | `t4g.xlarge` (4 vCPU, 16 GB), latest AL2023 arm64 AMI from the public SSM parameter, 30 GB encrypted gp3 (deleted with the instance), IMDSv2 only. The only resource that costs money |
 | Security group | yes, free | inbound **only** from `allowed_cidr`, on 8080 (none with a tunnel; 3001 if `expose_grafana`); **no SSH** |
-| ECR repositories | yes, free while empty | `apeiron/<service>` for the five services, scan on push, lifecycle policy keeps the last 10 images |
+| ECR repositories | yes, free while empty | `apeiron/<service>` for the seven services (`antikythera`, `themis`, `helios`, `hermes`, `gaia`, `talos`, `pharos`), scan on push, lifecycle policy keeps the last 10 images |
 | Instance role | yes, free | `AmazonSSMManagedInstanceCore` plus ECR pull scoped to those repositories |
 | GitHub OIDC provider and push role | yes, free | trusted only for jobs that declare the GitHub environment `release` (`repo:<github_repo>:environment:release`); ECR push scoped to those repositories |
 
@@ -265,7 +269,7 @@ removes it.
 
 ## Choosing a registry: GHCR or ECR
 
-The **Images** workflow (`.github/workflows/images.yml`) builds all five images on native runners (`ubuntu-latest` for
+The **Images** workflow (`.github/workflows/images.yml`) builds all seven images on native runners (`ubuntu-latest` for
 amd64, `ubuntu-24.04-arm` for arm64, no emulation), pushes each platform by digest, and merges them into one multi-arch
 manifest per service. It runs on `workflow_dispatch` and on `v*` tags, not on every push. Images are tagged with the
 git sha (`sha-abc1234`), `latest` (from `main` or a version tag) and, for version tags, the version.
@@ -310,21 +314,24 @@ a container everywhere.
 
 ## Security notes
 
-- **Network:** the only inbound rule is 8080 (with a domain: 80 and 443 instead), and optionally 3001, from `allowed_cidr`, a single address by default.
-  MongoDB (27017), NATS (4222, 8222), the server (4000) and Prometheus (9090) are never published beyond loopback on the
+- **Network:** with the Cloudflare Tunnel there is **no inbound rule at all** (cloudflared dials out); without it the only
+  inbound rule is 8080, and optionally 3001, from `allowed_cidr`, a single address by default. MongoDB (27017), NATS (4222, 8222), the server (4000) and Prometheus (9090) are never published beyond loopback on the
   box, and the security group would not admit them anyway. `/metrics` and `/health` are not proxied by nginx.
 - **No SSH:** there is no key pair and no port 22 rule. Shell access is AWS Systems Manager Session Manager, authorised by
   IAM and logged in CloudTrail.
 - **Instance:** IMDSv2 required with a hop limit of 1 (containers cannot reach the instance credentials); encrypted root
-  volume; the instance role can only talk to SSM and pull from this stack's ECR repositories.
+  volume; the instance role can only talk to SSM, pull from this stack's ECR repositories, and read the one tunnel token
+parameter.
 - **CI to AWS:** GitHub OIDC, no long-lived keys. The role trusts only this repository's `v*` tags and its `main` branch,
   and can only push to this stack's ECR repositories.
-- **TLS:** without a domain, traffic between your browser and the box is plain HTTP, restricted to your IP, carrying
-  synthetic data only. With a domain it is HTTPS with a Let's Encrypt certificate (see
-  [Your own domain over HTTPS](#your-own-domain-over-https)). The certificate's private key is kept in a private,
-  encrypted S3 bucket that only the box's role and your account's administrators can read.
-- **Grafana** allows anonymous Viewer access. That is acceptable on loopback; on the box Grafana stays on loopback unless
-  you set `expose_grafana`.
+- **TLS and access:** with the tunnel, browsers reach the box only over HTTPS through Cloudflare, behind an Access login
+  (one-time PIN to an allowed email) or the scripts' service token. Without it, traffic is plain HTTP restricted to your
+  IP, carrying synthetic data only.
+- **Secrets:** the tunnel token lives in a SecureString SSM parameter and is written on the box only to `.env.remote`
+  (mode 600). `infra/cloudflare/terraform.tfstate` holds the tunnel token and the service token secret in plain text: it
+  is git-ignored; treat it like a credentials file.
+- **Grafana** allows anonymous Viewer access. That is acceptable on loopback and behind the Access login; without the
+  tunnel, Grafana stays on loopback on the box unless you set `expose_grafana`.
 - **Public repo:** only `.env.example` is committed, `*.tfstate`, `*.tfvars` and `.terraform/` are git-ignored, and no
   secret or AG Grid licence key appears anywhere in the repository or the images. Terraform state contains resource IDs
   and is kept local; do not commit it.
