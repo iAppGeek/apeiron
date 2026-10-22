@@ -72,8 +72,9 @@ if [ "$FROM_LAPTOP" = "1" ]; then
     # talos sends these as the CF-Access-Client-Id and CF-Access-Client-Secret headers.
     CF_ACCESS_CLIENT_ID="$(cf_output access_client_id)"
     CF_ACCESS_CLIENT_SECRET="$(cf_output access_client_secret)"
-    [ -n "$CF_ACCESS_CLIENT_ID" ] && [ -n "$CF_ACCESS_CLIENT_SECRET" ] ||
+    if [ -z "$CF_ACCESS_CLIENT_ID" ] || [ -z "$CF_ACCESS_CLIENT_SECRET" ]; then
       die "no Access service token in infra/cloudflare; run scripts/remote-tunnel.sh --apply"
+    fi
     export CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET
   fi
   cd "$REPO_ROOT"
