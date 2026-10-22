@@ -49,7 +49,7 @@ if [ "$DRY_RUN" = "1" ]; then
   exit 0
 fi
 
-require terraform curl
+require terraform curl dig
 
 needs_credentials() {
   [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || die "CLOUDFLARE_API_TOKEN is not set (see docs/hosting.md for its permissions)"
@@ -58,19 +58,30 @@ needs_credentials() {
 }
 
 status() {
-  local host code
+  local host ip code
   host="$(cf_output hostname)"
   [ -n "$host" ] || die "no tunnel is set up; run scripts/remote-tunnel.sh --apply"
   for host in "$host" "$(cf_output grafana_hostname)"; do
     [ -n "$host" ] || continue
+    # Resolve through public DNS: a local resolver can keep a "no such name" from before the record existed for up
+    # to the zone's negative TTL (30 minutes), which says nothing about the tunnel.
+    ip="$(dig +short A "$host" @1.1.1.1 2>/dev/null | grep -E '^[0-9.]+$' | head -1 || true)"
+    if [ -z "$ip" ]; then
+      info "https://$host: not in public DNS yet (new records can take a few minutes)"
+      continue
+    fi
     # Access answers a request without a login with a redirect to the sign-in page, box running or not.
-    code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$host/" || true)"
+    code="$(curl -s -o /dev/null -m 10 --resolve "$host:443:$ip" -w '%{http_code}' "https://$host/" || true)"
     case "$code" in
       302 | 303) info "https://$host: behind Access (sign in with an allowed email)" ;;
-      000) info "https://$host: no answer yet (new DNS records can take a few minutes)" ;;
+      000) info "https://$host: in public DNS ($ip) but no HTTPS answer" ;;
       *) info "https://$host: HTTP $code (expected a redirect to the Access login)" ;;
     esac
   done
+  if [ -n "$ip" ] && ! dig +short A "$host" 2>/dev/null | grep -q .; then
+    info "Note: your local DNS resolver does not see these names yet (a cached negative answer); browsers on this"
+    info "machine will fail until it expires, or use a public resolver such as 1.1.1.1."
+  fi
 }
 
 case "$ACTION" in
