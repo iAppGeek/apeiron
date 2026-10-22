@@ -174,18 +174,21 @@ describe('GET /health', () => {
   it('answers NOT_READY until it has prices, then serves rows', async () => {
     const quiet = new MemoryBus();
     await seeded(quiet);
-    const s = await buildServer({ entitlements: testEntitlements, bus: quiet, logLevel: 'silent', storeCapacity: 2_000, ...FAST, priceWaitMs: 1_500 });
+    // The price wait outlasts the test, so the server stays in the prices stage until the test publishes them: no
+    // assumption about how fast the snapshot and catch-up stages run on a busy machine.
+    const s = await buildServer({ entitlements: testEntitlements, bus: quiet, logLevel: 'silent', storeCapacity: 2_000, ...FAST, priceWaitMs: 60_000 });
     await s.app.listen({ port: 0, host: '127.0.0.1' });
     const addr = s.app.server.address();
     const url = `ws://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : 0}/ws`;
     const loading = s.load();
-    await new Promise((r) => setTimeout(r, 700));
+    await expect.poll(() => s.health().stage, { timeout: 10_000 }).toBe('prices');
     expect(s.health()).toMatchObject({ stage: 'prices', status: 'loading' });
     const c = await connect(url);
     c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'early' });
     await c.next();
     c.send({ t: 'getRows', reqId: 1, req: req() });
     expect(await c.next()).toMatchObject({ t: 'error', code: 'NOT_READY' });
+    await publishAllPrices(quiet);
     await loading;
     c.send({ t: 'getRows', reqId: 2, req: req() });
     expect(await c.next()).toMatchObject({ t: 'rows', reqId: 2 });
