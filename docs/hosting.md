@@ -71,6 +71,8 @@ brings everything up on the Medium preset.
 
 ## AWS, on demand, for short test sessions
 
+Step-by-step procedure (START, verify, STOP, verify $0): [runbooks/aws-remote-box.md](../runbooks/aws-remote-box.md).
+
 One Graviton instance runs the whole stack for the length of a test session, and is deleted in between, so nothing is
 billed between sessions. The parts that cost nothing while idle (IAM, the security group, ECR, the Cloudflare Tunnel)
 are set up once and kept.
