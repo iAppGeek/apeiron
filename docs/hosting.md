@@ -23,6 +23,7 @@ that includes `infra/docker-compose.yml`, so every command runs from the repo ro
 | `seed` | `mongo`, `gaia` | load the orders into Mongo (one-shot) |
 | `monitoring` | `prometheus`, `grafana` | metrics and the server dashboard |
 | `loadtest` | `talos` | the load harness (needs `core`) |
+| `tunnel` | `cloudflared` | Cloudflare Tunnel from the remote box to its host name (needs `core` and `TUNNEL_TOKEN`) |
 
 ```bash
 cp .env.example .env                                        # optional local overrides, never committed
@@ -77,6 +78,9 @@ There is no load balancer and no NAT gateway.
 laptop ──(AWS CLI + SSM)──▶ EC2 t4g.xlarge, Amazon Linux 2023 arm64, 30 GB encrypted gp3
    │                          docker compose: mongo, nats, antikythera, hermes, pharos, prometheus, grafana
    └──(HTTP :8080, your IP only)──▶ pharos
+
+with a tunnel (optional, below):
+browser ──HTTPS──▶ Cloudflare (Access login) ◀──outbound tunnel── cloudflared on the box ──▶ pharos, grafana
 ```
 
 ### Prerequisites
@@ -146,10 +150,13 @@ aws ssm start-session --region eu-west-2 --target <instance-id> \
   --document-name AWS-StartPortForwardingSession --parameters portNumber=3001,localPortNumber=3001
 ```
 
-If your IP changes between sessions the box will not answer: run `scripts/remote-up.sh --apply` to update the security
-group.
+With a tunnel set up (next section) the URL is `https://blotter.oramalabs.dev` instead, it never changes, and Grafana
+is at `https://grafana.oramalabs.dev` behind the same login.
 
-All four scripts are idempotent, default to **stop rather than destroy**, and have `--help` and `--dry-run`.
+Without a tunnel, if your IP changes between sessions the box will not answer: run `scripts/remote-up.sh --apply` to
+update the security group. With a tunnel your IP does not matter.
+
+All the scripts are idempotent, default to **stop rather than destroy**, and have `--help` and `--dry-run`.
 
 | Script | Does |
 |---|---|
@@ -157,6 +164,64 @@ All four scripts are idempotent, default to **stop rather than destroy**, and ha
 | `remote-down.sh` | stops the instance and keeps the disk |
 | `remote-destroy.sh` | `terraform destroy` after you type `destroy apeiron`; removes the disk and all data |
 | `remote-loadtest.sh` | talos on the box over SSM (default), or from your machine with `--from-laptop` |
+| `remote-tunnel.sh` | one-time Cloudflare Tunnel setup (`--apply`), check (`--status`), removal (`--destroy`) |
+
+### A fixed host name over HTTPS (Cloudflare Tunnel)
+
+By default the blotter is at `http://<ip>:8080`, and the IP changes every start. With a tunnel it is at
+`https://blotter.oramalabs.dev`: `cloudflared` on the box dials out to Cloudflare, Cloudflare serves the host name with
+its own certificate, and [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) asks
+for an email login first. The box then opens **no inbound port at all**. Everything is in the `infra/cloudflare`
+Terraform stack, which `remote-destroy.sh` leaves alone, so it is set up once.
+
+| Resource | Notes |
+|---|---|
+| Tunnel `apeiron-box` | remotely managed: the ingress rules (`blotter` → `pharos:8080`, `grafana` → `grafana:3000`, anything else 404) live in Cloudflare, not on the box |
+| DNS records | proxied CNAMEs to `<tunnel id>.cfargotunnel.com` in the `oramalabs.dev` zone |
+| Access applications | one per host name: the emails in `allowed_emails` (one-time PIN by email), plus the `apeiron-scripts` service token |
+| Service token | lets scripts through Access with the `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers; valid for a year |
+| SSM parameter | `/apeiron/cloudflared/tunnel-token`, a standard SecureString (free); the box reads it with its instance role |
+
+All of it is free: Access is free for up to 50 users, and a standard SSM parameter costs nothing.
+
+**One-time setup in the Cloudflare dashboard** (Terraform cannot do these):
+
+1. Zero Trust: open it once, choose a team name and the **Free** plan.
+2. Create an API token (My Profile, API Tokens, Create Custom Token) with:
+   - Account: **Cloudflare Tunnel: Edit**, **Access: Apps and Policies: Edit**, **Access: Service Tokens: Edit**
+   - Zone `oramalabs.dev`: **DNS: Edit**, **Zone: Read**
+3. Note the account ID (on the zone's overview page).
+
+**Then:**
+
+```bash
+cp infra/cloudflare/terraform.tfvars.example infra/cloudflare/terraform.tfvars   # account_id, allowed_emails
+export CLOUDFLARE_API_TOKEN=...                     # the token above; never commit it
+scripts/remote-tunnel.sh --apply                    # once: terraform apply in infra/cloudflare (you approve the plan)
+scripts/remote-tunnel.sh --status                   # both host names should redirect to the Access login
+scripts/remote-up.sh                                # picks the tunnel up by itself (re-applies an existing box)
+```
+
+With a tunnel, `remote-up.sh`:
+
+1. applies `infra/aws` with the tunnel: the 8080 rule is dropped from the security group, and the instance role may
+   read the one SSM parameter;
+2. on the box: reads the token from SSM into `.env.remote` (mode 600, never printed), keeps nginx on loopback, and
+   starts the stack with the `tunnel` profile.
+
+`remote-loadtest.sh` on the box works as before. `--from-laptop` goes through Cloudflare to
+`wss://blotter.oramalabs.dev/ws`, with the service token from `terraform output` (talos sends
+`CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` as headers), so its latencies include Cloudflare's edge.
+
+Things to know:
+
+- `infra/cloudflare/terraform.tfstate` holds the tunnel token and the service token secret in plain text. It is
+  git-ignored; treat it like a credentials file.
+- The stack is not validated against a live Cloudflare account until the first `--apply`.
+- Cloudflare closes a proxied WebSocket that carries no data for about 100 seconds. The blotter ticks constantly, so
+  this only matters if a quiet mode is added later.
+- Grafana keeps its anonymous Viewer role behind Access; edits still need the admin password, which is on the box
+  (`GRAFANA_ADMIN_PASSWORD` in `.env.remote`). Set `grafana_hostname = ""` to keep Grafana private.
 
 ### Cost
 
@@ -169,7 +234,7 @@ whole saving.
 | A 4-hour session | about $0.65 |
 | Stopped | about **$2.80/month**: the 30 GB gp3 volume at $0.0928/GB-month. The public IP is released while stopped |
 | ECR | pennies: the lifecycle policy keeps the last 10 images per repository (a few hundred MB in all) |
-| Destroyed | nothing |
+| Destroyed | nothing (the Cloudflare Tunnel stack, if set up, is free) |
 
 Spot instances would cut the compute price by 60 to 70 percent but can be reclaimed mid-test, which defeats a latency
 measurement, so the stack does not use them. In us-east-1 the instance is about 11 percent cheaper.
@@ -179,7 +244,8 @@ measurement, so the stack does not use them. In us-east-1 the instance is about 
 `scripts/remote-down.sh` after every session. `scripts/remote-destroy.sh` when you are done with the experiment: it runs
 `terraform destroy` (instance, disk, security group, IAM roles, ECR repositories and their images). Check the AWS
 console afterwards if you want to be certain nothing is left. The ECR repositories are created with `force_delete`, so
-destroying them removes the images too.
+destroying them removes the images too. The Cloudflare Tunnel stack outlives it; `scripts/remote-tunnel.sh --destroy`
+removes it.
 
 ## Choosing a registry: GHCR or ECR
 
@@ -228,7 +294,7 @@ a container everywhere.
 
 ## Security notes
 
-- **Network:** the only inbound rule is 8080 (and optionally 3001) from `allowed_cidr`, a single address by default.
+- **Network:** the only inbound rule is 8080 (with a domain: 80 and 443 instead), and optionally 3001, from `allowed_cidr`, a single address by default.
   MongoDB (27017), NATS (4222, 8222), the server (4000) and Prometheus (9090) are never published beyond loopback on the
   box, and the security group would not admit them anyway. `/metrics` and `/health` are not proxied by nginx.
 - **No SSH:** there is no key pair and no port 22 rule. Shell access is AWS Systems Manager Session Manager, authorised by
@@ -237,8 +303,10 @@ a container everywhere.
   volume; the instance role can only talk to SSM and pull from this stack's ECR repositories.
 - **CI to AWS:** GitHub OIDC, no long-lived keys. The role trusts only this repository's `v*` tags and its `main` branch,
   and can only push to this stack's ECR repositories.
-- **Plain HTTP:** traffic between your browser and the box is unencrypted. It is restricted to your IP and carries
-  synthetic data only. If that is not acceptable, put TLS in front (the plan reserves an `edge` profile for Caddy).
+- **TLS:** without a domain, traffic between your browser and the box is plain HTTP, restricted to your IP, carrying
+  synthetic data only. With a domain it is HTTPS with a Let's Encrypt certificate (see
+  [Your own domain over HTTPS](#your-own-domain-over-https)). The certificate's private key is kept in a private,
+  encrypted S3 bucket that only the box's role and your account's administrators can read.
 - **Grafana** allows anonymous Viewer access. That is acceptable on loopback; on the box Grafana stays on loopback unless
   you set `expose_grafana`.
 - **Public repo:** only `.env.example` is committed, `*.tfstate`, `*.tfvars` and `.terraform/` are git-ignored, and no

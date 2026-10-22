@@ -203,6 +203,21 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # Cloudflare Tunnel from the remote box (docs/hosting.md): dials out to Cloudflare, which serves pharos (and Grafana)
+  # on their host names over HTTPS behind Access. The ingress rules live in infra/cloudflare, so no port is published.
+  # Needs the core profile too, and TUNNEL_TOKEN. The image is distroless (no shell or wget), so there is no
+  # healthcheck; the tunnel's health shows on the Zero Trust dashboard.
+  cloudflared:
+    profiles: [tunnel]
+    image: cloudflare/cloudflared:2026.10.0
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      pharos:
+        condition: service_healthy
+    restart: unless-stopped
+
   # Resilience suite (docs/TESTING.md): the browser reaches antikythera only through toxiproxy, so the tests can
   # break, stall, slow and throttle the WebSocket. Needs the core profile too.
   toxiproxy:

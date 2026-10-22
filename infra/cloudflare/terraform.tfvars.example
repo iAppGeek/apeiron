@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. scripts/remote-tunnel.sh --apply reads it.
+account_id     = "0123456789abcdef0123456789abcdef"
+allowed_emails = ["you@example.com"]
+
+# Defaults, shown for reference:
+# zone_name        = "oramalabs.dev"
+# hostname         = "blotter.oramalabs.dev"
+# grafana_hostname = "grafana.oramalabs.dev"   # "" keeps Grafana private
+# session_duration = "24h"
+# region           = "eu-west-2"

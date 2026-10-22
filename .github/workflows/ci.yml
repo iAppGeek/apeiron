@@ -34,9 +34,12 @@ jobs:
   terraform:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      matrix:
+        stack: [infra/aws, infra/cloudflare]
     defaults:
       run:
-        working-directory: infra/aws
+        working-directory: ${{ matrix.stack }}
     steps:
       - uses: actions/checkout@v7
       - uses: hashicorp/setup-terraform@v4

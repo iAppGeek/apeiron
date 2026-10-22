@@ -12,8 +12,9 @@ Runs the talos load test (WebSocket clients scrolling, sorting, filtering and gr
 
   default        runs the talos container on the box over SSM, so the network is not in the way and the
                  server's CPU, RSS and event-loop lag are scraped from /metrics. Needs the box running.
-  --from-laptop  runs talos from this machine against http://<box>:8080/ws. The server /metrics endpoint is
-                 not exposed publicly, so server-side figures are skipped.
+  --from-laptop  runs talos from this machine against wss://<host name>/ws through the Cloudflare Tunnel (with the
+                 Access service token from infra/cloudflare), or ws://<box>:8080/ws when there is no tunnel.
+                 The server /metrics endpoint is not exposed publicly, so server-side figures are skipped.
 
 Options:
   --clients N        concurrent clients (default 50)
@@ -52,7 +53,7 @@ case "$CODEC" in json | msgpack | both) ;; *) die "--codec must be json, msgpack
 
 if [ "$DRY_RUN" = "1" ]; then
   if [ "$FROM_LAPTOP" = "1" ]; then
-    echo "Dry run: would run 'pnpm --filter @apeiron/talos start -- --clients $CLIENTS --duration $DURATION --codec $CODEC --seed $SEED --url ws://<box-ip>:8080/ws --metrics off'."
+    echo "Dry run: would run 'pnpm --filter @apeiron/talos start -- --clients $CLIENTS --duration $DURATION --codec $CODEC --seed $SEED --url wss://<host name>/ws (or ws://<box-ip>:8080/ws) --metrics off'."
   else
     echo "Dry run: would run 'docker compose --profile core --profile loadtest run --rm -T talos' on the box over SSM (clients=$CLIENTS, duration=${DURATION}s, codec=$CODEC, seed=$SEED)."
   fi
@@ -65,10 +66,19 @@ load_deployment || die "nothing is deployed; run scripts/remote-up.sh first"
 
 if [ "$FROM_LAPTOP" = "1" ]; then
   require pnpm
-  ip="$(instance_ip)"
+  base="$(web_url)"
+  url="ws${base#http}/ws"
+  if [ -n "$(tf_output public_hostname)" ]; then
+    # talos sends these as the CF-Access-Client-Id and CF-Access-Client-Secret headers.
+    CF_ACCESS_CLIENT_ID="$(cf_output access_client_id)"
+    CF_ACCESS_CLIENT_SECRET="$(cf_output access_client_secret)"
+    [ -n "$CF_ACCESS_CLIENT_ID" ] && [ -n "$CF_ACCESS_CLIENT_SECRET" ] ||
+      die "no Access service token in infra/cloudflare; run scripts/remote-tunnel.sh --apply"
+    export CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET
+  fi
   cd "$REPO_ROOT"
   exec pnpm --filter @apeiron/talos start -- --clients "$CLIENTS" --duration "$DURATION" --codec "$CODEC" \
-    --seed "$SEED" --url "ws://$ip:8080/ws" --metrics off
+    --seed "$SEED" --url "$url" --metrics off
 fi
 
 require jq

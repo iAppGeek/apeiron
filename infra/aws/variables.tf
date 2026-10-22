@@ -90,3 +90,20 @@ variable "services" {
   type        = list(string)
   default     = ["antikythera", "themis", "helios", "hermes", "gaia", "talos", "pharos"]
 }
+
+variable "public_hostname" {
+  description = "Host name the tunnel serves the blotter on (the hostname output of infra/cloudflare). Only used for the web_url output."
+  type        = string
+  default     = ""
+}
+
+variable "tunnel_token_parameter" {
+  description = "SSM parameter holding the Cloudflare Tunnel token (the tunnel_token_parameter output of infra/cloudflare). Empty keeps plain HTTP on the public IP, port 8080."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.tunnel_token_parameter == "" || (startswith(var.tunnel_token_parameter, "/") && var.public_hostname != "")
+    error_message = "tunnel_token_parameter must be an absolute parameter name, and needs public_hostname too (both are outputs of infra/cloudflare)."
+  }
+}

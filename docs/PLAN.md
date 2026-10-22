@@ -53,7 +53,7 @@ apeiron/
     docker-compose.yml profiles: core | seed | monitoring | loadtest
     prometheus/, grafana/ (provisioned dashboard), caddy/, nginx/
     aws/               Terraform: ECR, EC2 t4g.xlarge, SG, IAM (SSM + ECR pull)
-  scripts/             remote-up.sh, remote-down.sh, remote-destroy.sh, remote-loadtest.sh
+  scripts/             remote-up.sh, remote-down.sh, remote-destroy.sh, remote-loadtest.sh, remote-tunnel.sh
   docs/                architecture.md, hosting.md, db-adapters.md (Oracle/KDB mapping)
   turbo.json, pnpm-workspace.yaml, .github/workflows/ci.yml
 ```
@@ -152,7 +152,7 @@ apeiron/
 - `seed`: seeder
 - `monitoring`: prometheus, grafana
 - `loadtest`: loadtest
-- `edge`: Caddy, for optional TLS on the remote box
+- `tunnel`: cloudflared, for the optional Cloudflare Tunnel from the remote box
 
 Mongo and NATS data live on named volumes.
 
@@ -170,7 +170,7 @@ Mongo and NATS data live on named volumes.
   - `remote-down`: **stop** the instance. The volume stays, so Mongo data persists and there's no re-seed next time.
   - `remote-destroy`: `terraform destroy`, which removes everything including the data.
   - `remote-loadtest`: run the loadtest container on the box, or from the laptop against it.
-- **Access:** HTTP over the instance's public IP, restricted to your IP. Optionally, the `edge` profile adds Caddy and a Let's Encrypt certificate on an `<ip>.sslip.io` hostname.
+- **Access:** HTTP over the instance's public IP, restricted to your IP. Optionally, the `tunnel` profile serves it on `https://blotter.oramalabs.dev` through a Cloudflare Tunnel behind Cloudflare Access, with no inbound port (`infra/cloudflare`, `scripts/remote-tunnel.sh`).
 - **Cost:** about **$0.13/hr while running** (a 4-hour test session costs about $0.55; Spot is about 60–70% cheaper). About **$2.40/month while stopped** (the volume), plus pennies for ECR. Nothing is billed for compute between sessions.
 
 **Alternatives** (`docs/hosting.md`; same images and compose file, different host):

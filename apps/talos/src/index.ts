@@ -3,7 +3,7 @@ import { USAGE, parseOptions } from './args.js';
 import { consoleReport } from './format.js';
 import { findRepoRoot, writeResults } from './output.js';
 import { runLoadTest } from './run.js';
-import { connectWebSocket } from './socket.js';
+import { accessHeaders, webSocketConnector } from './socket.js';
 
 let options;
 try {
@@ -24,7 +24,7 @@ process.on('SIGINT', () => {
 });
 
 const report = await runLoadTest(options, {
-  connect: connectWebSocket,
+  connect: webSocketConnector(accessHeaders(process.env)),
   stopped: () => interrupted,
   log: (line) => process.stderr.write(`${line}\n`),
 });

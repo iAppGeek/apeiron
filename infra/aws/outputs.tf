@@ -10,7 +10,17 @@ output "public_ip" {
 
 output "web_url" {
   description = "Blotter URL (reachable only from allowed_cidr)."
-  value       = "http://${aws_instance.box.public_ip}:8080"
+  value       = local.tunnel ? "https://${var.public_hostname}" : "http://${aws_instance.box.public_ip}:8080"
+}
+
+output "public_hostname" {
+  description = "Host name the tunnel serves the blotter on, or empty for plain HTTP on the IP (read by the remote-* scripts)."
+  value       = local.tunnel ? var.public_hostname : ""
+}
+
+output "tunnel_token_parameter" {
+  description = "SSM parameter the box reads the tunnel token from, or empty (read by scripts/remote-up.sh)."
+  value       = var.tunnel_token_parameter
 }
 
 output "region" {

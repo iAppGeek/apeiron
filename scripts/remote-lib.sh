@@ -4,6 +4,7 @@
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF_DIR="$REPO_ROOT/infra/aws"
+CF_TF_DIR="$REPO_ROOT/infra/cloudflare"
 export BOX_DIR=/opt/apeiron
 export HOURLY_USD="0.16"
 export STOPPED_USD_PER_MONTH="2.80"
@@ -24,6 +25,11 @@ require() {
 # Prints the value of a Terraform output, or nothing when there is no state (nothing deployed yet).
 tf_output() {
   terraform -chdir="$TF_DIR" output -raw "$1" 2>/dev/null || true
+}
+
+# The same for the persistent tunnel stack (infra/cloudflare): empty when no tunnel has been set up.
+cf_output() {
+  terraform -chdir="$CF_TF_DIR" output -raw "$1" 2>/dev/null || true
 }
 
 REGION=""
@@ -47,6 +53,13 @@ instance_state() {
 instance_ip() {
   aws_ec2 describe-instances --instance-ids "$INSTANCE_ID" \
     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
+}
+
+# Prints the blotter's base URL: https://<host name> when the box is behind the tunnel, otherwise http://<ip>:8080.
+web_url() {
+  local host
+  host="$(tf_output public_hostname)"
+  if [ -n "$host" ]; then printf 'https://%s\n' "$host"; else printf 'http://%s:8080\n' "$(instance_ip)"; fi
 }
 
 # Waits until the SSM agent on the instance reports Online (it takes a minute or two after a start).
