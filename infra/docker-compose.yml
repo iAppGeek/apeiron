@@ -218,7 +218,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # Resilience suite (docs/TESTING.md): the browser reaches antikythera only through toxiproxy, so the tests can
+  # Resilience suite (docs/testing.md): the browser reaches antikythera only through toxiproxy, so the tests can
   # break, stall, slow and throttle the WebSocket. Needs the core profile too.
   toxiproxy:
     profiles: [resilience]

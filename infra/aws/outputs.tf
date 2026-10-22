@@ -1,16 +1,16 @@
 output "instance_id" {
-  description = "EC2 instance ID (used by the remote-* scripts)."
-  value       = aws_instance.box.id
+  description = "EC2 instance ID, or empty when the box is down (used by the remote-* scripts)."
+  value       = var.box ? aws_instance.box[0].id : ""
 }
 
 output "public_ip" {
-  description = "Public IPv4 address. It changes each time the instance is stopped and started."
-  value       = aws_instance.box.public_ip
+  description = "Public IPv4 address, or empty when the box is down."
+  value       = var.box ? aws_instance.box[0].public_ip : ""
 }
 
 output "web_url" {
-  description = "Blotter URL (reachable only from allowed_cidr)."
-  value       = local.tunnel ? "https://${var.public_hostname}" : "http://${aws_instance.box.public_ip}:8080"
+  description = "Blotter URL, or empty when the box is down. Without a tunnel it is reachable only from allowed_cidr."
+  value       = !var.box ? "" : (local.tunnel ? "https://${var.public_hostname}" : "http://${aws_instance.box[0].public_ip}:8080")
 }
 
 output "public_hostname" {

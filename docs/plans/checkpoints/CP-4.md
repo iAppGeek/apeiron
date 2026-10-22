@@ -537,7 +537,7 @@ See the README "Benchmarks" table. msgpack carries 14% fewer bytes to each clien
 
 During the msgpack run, in the stress window (the gap in the middle of the time range is the stack reset between runs):
 
-![Grafana during the msgpack run](../screenshots/phase-7/grafana-blotter-server-msgpack-run-after-fix.png)
+![Grafana during the msgpack run](../../screenshots/phase-7/grafana-blotter-server-msgpack-run-after-fix.png)
 
 Earlier screenshots: `grafana-blotter-server-json-run.png` (the failing first run, 4.1) and `grafana-blotter-server-soak-stress-window.png` (a soak that stalled, 4.3).
 

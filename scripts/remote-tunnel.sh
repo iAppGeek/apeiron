@@ -24,7 +24,7 @@ Options:
   --apply      run 'terraform apply' in infra/cloudflare (you approve its plan)
   --status     print the host names and whether they answer through Cloudflare
   --destroy    remove the tunnel, the records, the Access application and the parameter
-               (run scripts/remote-destroy.sh first)
+               (STOP the box first: scripts/remote-down.sh)
   --dry-run    say what --apply would do and exit
   -h, --help   show this help
 USAGE
@@ -93,7 +93,7 @@ case "$ACTION" in
     ;;
   status) status ;;
   destroy)
-    [ -z "$(tf_output instance_id)" ] || die "the box still exists; run scripts/remote-destroy.sh first"
+    [ -z "$(tf_output instance_id)" ] || die "the box is up; STOP it first with scripts/remote-down.sh"
     [ -n "$(cf_output hostname)" ] || { info "Nothing to destroy."; exit 0; }
     needs_credentials
     terraform -chdir="$CF_TF_DIR" destroy

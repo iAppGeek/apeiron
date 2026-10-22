@@ -30,19 +30,32 @@ type Client = {
 function connect(url: string): Promise<Client> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
-    const queue: ServerMsg[] = [];
-    const waiters: ((m: ServerMsg) => void)[] = [];
+    const queue: (ServerMsg | Error)[] = [];
+    const waiters: { resolve: (m: ServerMsg) => void; reject: (e: Error) => void }[] = [];
+    const deliver = (item: ServerMsg | Error): void => {
+      const waiter = waiters.shift();
+      if (waiter === undefined) queue.push(item);
+      else if (item instanceof Error) waiter.reject(item);
+      else waiter.resolve(item);
+    };
     let current: CodecName = 'json';
+    // The codec a hello asked for, until its welcome arrives. Frames are self-describing, so in that window a frame
+    // the server sent before it read the hello (an unprompted summary or delta) may still be in the old codec.
+    let pending: CodecName | null = null;
     socket.on('message', (raw: RawData, isBinary: boolean) => {
-      const frame = isBinary ? (raw as Buffer) : raw.toString();
-      // msgpack connections get binary frames and JSON connections get text frames.
-      if (isBinary !== (current === 'msgpack')) throw new Error(`unexpected ${isBinary ? 'binary' : 'text'} frame`);
-      const msg = (isBinary ? getCodec('msgpack') : jsonCodec).decode(frame) as ServerMsg;
+      const kind: CodecName = isBinary ? 'msgpack' : 'json';
+      const msg = (isBinary ? getCodec('msgpack') : jsonCodec).decode(isBinary ? (raw as Buffer) : raw.toString()) as ServerMsg;
+      if (msg.t === 'welcome' && pending !== null) {
+        if (kind !== pending) return deliver(new Error(`welcome came as ${kind}, but the hello asked for ${pending}`));
+        current = pending;
+        pending = null;
+      } else if (pending === null && kind !== current) {
+        // Once the welcome has arrived, every frame must use the negotiated codec.
+        return deliver(new Error(`unexpected ${isBinary ? 'binary' : 'text'} ${msg.t} frame on a ${current} connection`));
+      }
       // The live runtime sends a summary every second, unprompted; these tests follow request and reply.
       if (msg.t === 'summary') return;
-      const waiter = waiters.shift();
-      if (waiter) waiter(msg);
-      else queue.push(msg);
+      deliver(msg);
     });
     socket.on('error', reject);
     socket.on('open', () => {
@@ -51,12 +64,13 @@ function connect(url: string): Promise<Client> {
         send: (msg, c = current): void => {
           const encoded = getCodec(c).encode(msg);
           socket.send(encoded, { binary: typeof encoded !== 'string' });
-          if (msg.t === 'hello') current = msg.codec;
+          if (msg.t === 'hello') pending = msg.codec;
         },
         sendRaw: (data): void => socket.send(data, { binary: typeof data !== 'string' }),
         next: (): Promise<ServerMsg> => {
           const m = queue.shift();
-          return m ? Promise.resolve(m) : new Promise((r) => waiters.push(r));
+          if (m instanceof Error) return Promise.reject(m);
+          return m !== undefined ? Promise.resolve(m) : new Promise((resolve, reject) => waiters.push({ resolve, reject }));
         },
         close: (): Promise<void> =>
           new Promise((r) => {
@@ -174,18 +188,21 @@ describe('GET /health', () => {
   it('answers NOT_READY until it has prices, then serves rows', async () => {
     const quiet = new MemoryBus();
     await seeded(quiet);
-    const s = await buildServer({ entitlements: testEntitlements, bus: quiet, logLevel: 'silent', storeCapacity: 2_000, ...FAST, priceWaitMs: 1_500 });
+    // The price wait outlasts the test, so the server stays in the prices stage until the test publishes them: no
+    // assumption about how fast the snapshot and catch-up stages run on a busy machine.
+    const s = await buildServer({ entitlements: testEntitlements, bus: quiet, logLevel: 'silent', storeCapacity: 2_000, ...FAST, priceWaitMs: 60_000 });
     await s.app.listen({ port: 0, host: '127.0.0.1' });
     const addr = s.app.server.address();
     const url = `ws://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : 0}/ws`;
     const loading = s.load();
-    await new Promise((r) => setTimeout(r, 700));
+    await expect.poll(() => s.health().stage, { timeout: 10_000 }).toBe('prices');
     expect(s.health()).toMatchObject({ stage: 'prices', status: 'loading' });
     const c = await connect(url);
     c.send({ t: 'hello', userId: 'SUPERVISOR', traderId: 'ALL', codec: 'json', clientId: 'early' });
     await c.next();
     c.send({ t: 'getRows', reqId: 1, req: req() });
     expect(await c.next()).toMatchObject({ t: 'error', code: 'NOT_READY' });
+    await publishAllPrices(quiet);
     await loading;
     c.send({ t: 'getRows', reqId: 2, req: req() });
     expect(await c.next()).toMatchObject({ t: 'rows', reqId: 2 });

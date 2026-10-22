@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Destroys everything Terraform created for the AWS test box, including the data on its disk.
+# Destroys everything Terraform created in infra/aws: the box if it is up, and the free parts.
 set -euo pipefail
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/remote-lib.sh"
@@ -8,9 +8,10 @@ usage() {
   cat <<USAGE
 Usage: scripts/remote-destroy.sh [options]
 
-Runs 'terraform destroy' in infra/aws: the instance and its disk (the seeded data), the security group,
-the IAM roles, the GitHub OIDC provider (if Terraform created it) and the ECR repositories with their images.
-This cannot be undone. To keep the data and stop paying for compute, use scripts/remote-down.sh instead.
+Runs 'terraform destroy' in infra/aws: the instance and its disk if the box is up, and the free parts too: the
+security group, the IAM roles, the GitHub OIDC provider (if Terraform created it) and the ECR repositories with
+their images. This cannot be undone. To get back to \$0 running cost and keep the free parts, use
+scripts/remote-down.sh (STOP) instead. The Cloudflare Tunnel stack (infra/cloudflare) is kept either way.
 
 You must type the confirmation phrase 'destroy apeiron' (or pass it with --confirm 'destroy apeiron').
 Running it when nothing is deployed does nothing.
@@ -40,12 +41,13 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 require terraform
-if [ ! -f "$TF_DIR/terraform.tfstate" ] || [ -z "$(tf_output instance_id)" ]; then
+terraform -chdir="$TF_DIR" init -input=false >/dev/null
+if [ -z "$(terraform -chdir="$TF_DIR" state list 2>/dev/null)" ]; then
   info "Nothing is deployed (no resources in the Terraform state). Nothing to destroy."
   exit 0
 fi
 
-info "About to DESTROY the Apeiron AWS stack, including the disk and the seeded data."
+info "About to DESTROY the whole Apeiron AWS stack: the box and its data if it is up, and the free parts."
 if [ -z "$CONFIRM" ]; then
   [ -t 0 ] || die "not a terminal; pass --confirm '$PHRASE'"
   read -r -p "Type '$PHRASE' to continue: " CONFIRM
@@ -53,7 +55,6 @@ fi
 [ "$CONFIRM" = "$PHRASE" ] || die "confirmation phrase did not match; nothing was destroyed"
 
 # Destroy ignores the variable values, but Terraform still wants a valid allowed_cidr.
-terraform -chdir="$TF_DIR" init -input=false >/dev/null
 terraform -chdir="$TF_DIR" destroy -var "allowed_cidr=192.0.2.1/32"
 info "Destroyed."
 [ -z "$(cf_output hostname)" ] || info "The Cloudflare Tunnel, its DNS records and the Access login are kept (free); scripts/remote-tunnel.sh --destroy removes them."

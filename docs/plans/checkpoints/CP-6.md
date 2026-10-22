@@ -1,7 +1,7 @@
 # CP-6: Resilience suite (Phase 9)
 
 - **Branch / PR:** `phase-9-resilience`, PR #10 "Phase 9: resilience suite" (not merged). Tag `cp-6` on the PR head.
-- **Spec:** `docs/PLAN.md` Appendix G. Run guide, scenario write-ups and the latest results: [`docs/TESTING.md`](../TESTING.md).
+- **Spec:** `docs/PLAN.md` Appendix G. Run guide, scenario write-ups and the latest results: [`docs/TESTING.md`](../../testing.md).
 - **CI:** green on the PR, including the `Resilience smoke` step (S1 shortened plus S3) in the `e2e` job.
 
 ## 1. What was built

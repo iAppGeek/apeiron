@@ -13,27 +13,23 @@ Graviton).
 ## Local
 
 Requirements: Docker with Compose v2, and about 6 GB of RAM given to the Docker VM. The repo root has a `compose.yaml`
-that includes `infra/docker-compose.yml`, so every command runs from the repo root.
+that includes `infra/docker-compose.yml`, so every command runs from the repo root. The commands to start, seed, reset
+and stop the stack are in [user-guide.md](user-guide.md#running-it); this section is the reference for what they use.
 
 ### Compose profiles
 
 | Profile | Services | Purpose |
 |---|---|---|
-| `core` | `mongo`, `nats`, `antikythera`, `hermes`, `pharos` | the blotter itself |
+| `core` | `mongo`, `nats`, `themis`, `helios`, `hermes`, `antikythera`, `pharos` | the blotter itself |
 | `seed` | `mongo`, `gaia` | load the orders into Mongo (one-shot) |
 | `monitoring` | `prometheus`, `grafana` | metrics and the server dashboard |
 | `loadtest` | `talos` | the load harness (needs `core`) |
+| `resilience` | `toxiproxy`, `pharos-e2e` | the resilience suite's fault proxy and test-hooks web app (needs `core`; [testing.md](testing.md)) |
 | `tunnel` | `cloudflared` | Cloudflare Tunnel from the remote box to its host name (needs `core` and `TUNNEL_TOKEN`) |
 
-```bash
-cp .env.example .env                                        # optional local overrides, never committed
-docker compose --profile core up -d --build                 # build and start the stack
-docker compose --profile core --profile seed run --rm gaia  # seed 1M orders (a second run is a no-op)
-docker compose --profile core --profile monitoring up -d    # add Prometheus and Grafana
-```
-
-Start the stack, seed, then restart `antikythera` (or start it after seeding): the server loads Mongo once at startup,
-so a server that started against an empty database has nothing to show until it is restarted.
+**Startup order matters once.** `themis` rebuilds the `ORDER_STATE` bucket from the database at startup when the two
+disagree, and the blotter loads from that bucket, so seed before starting the services (the order in the user guide). If
+you seed into a running stack, restart `themis` and then `antikythera`.
 
 ### Ports
 
@@ -42,19 +38,28 @@ Every published port binds to `127.0.0.1`, so nothing is reachable from the netw
 | Service | Port | Notes |
 |---|---|---|
 | pharos (nginx) | 8080 | the web app, and `/ws` proxied to the server |
-| antikythera | 4000 | `/health`, `/metrics`, `/debug/lag`, and the WebSocket at `/ws` |
+| antikythera | 4000 | `/health`, `/health/live`, `/health/ready`, `/metrics`, `/debug/lag`, and the WebSocket at `/ws` |
+| themis | 4200 | `/health`, `/metrics`, `/debug` |
+| helios | 4300 | `/health`, `/metrics` |
 | mongo | 27017 | |
 | nats | 4222, 8222 | client and monitoring |
 | prometheus | 9090 | |
 | grafana | 3001 | anonymous Viewer access; admin sign-in uses `GRAFANA_ADMIN_PASSWORD` (default `admin`) |
+| toxiproxy | 8474 | resilience profile: the fault proxy's API |
+| pharos-e2e | 8081 | resilience profile: the web app with test hooks |
+
+`hermes` publishes no port (its `:4100` health and metrics are reachable inside the compose network). The Vite dev server
+(`pnpm --filter @apeiron/pharos dev`) runs on 5173 and proxies `/ws` to localhost:4000.
 
 `WEB_BIND` and `GRAFANA_BIND` change the interface the web and Grafana ports bind to (default `127.0.0.1`). The remote
-box sets `WEB_BIND=0.0.0.0` and relies on its security group.
+box keeps the web port on loopback when it has the Cloudflare Tunnel, and sets `WEB_BIND=0.0.0.0` (behind its security
+group) when it does not.
 
 ### Memory: `MONGO_CACHE_GB`
 
-MongoDB's WiredTiger cache defaults to half of the Docker VM's RAM. Under the live write-behind load that starves the
-blotter server and the VM swaps, after which every container stalls. `MONGO_CACHE_GB` (default `1`) caps it; 1 GB holds
+MongoDB's WiredTiger cache defaults to half of the Docker VM's RAM. Under `themis`'s steady write load that starves the
+other containers and the VM swaps, after which every container stalls (the CP-4 incident in
+[performance.md](performance.md#the-death-spiral-cp-4)). `MONGO_CACHE_GB` (default `1`) caps it; 1 GB holds
 the working set of this dataset. Raise it on a bigger host (the AWS box uses 4). The server container is capped at
 `mem_limit: 3g` and needs about 0.9 GB at the load peak.
 
@@ -66,20 +71,23 @@ menu), `FLUSH_MS` and `LOG_LEVEL`.
 
 ### Resetting before a load test
 
-`scripts/loadtest-reset.sh` empties JetStream, re-seeds the orders (so the LIVE population is back to about 500) and
-brings everything up on the Medium preset.
+`scripts/loadtest-reset.sh` puts the stack back to a known state; what it does is in
+[user-guide.md](user-guide.md#seeding-and-reset).
 
 ## AWS, on demand, for short test sessions
 
-One Graviton instance runs the whole stack for the length of a test session, and is stopped (not destroyed) in between.
-There is no load balancer and no NAT gateway.
+Step-by-step procedure (START, verify, STOP, verify $0): [runbooks/aws-remote-box.md](../runbooks/aws-remote-box.md).
+
+One Graviton instance runs the whole stack for the length of a test session, and is deleted in between, so nothing is
+billed between sessions. The parts that cost nothing while idle (IAM, the security group, ECR, the Cloudflare Tunnel)
+are set up once and kept. There is no load balancer and no NAT gateway.
 
 ```
 laptop ──(AWS CLI + SSM)──▶ EC2 t4g.xlarge, Amazon Linux 2023 arm64, 30 GB encrypted gp3
-   │                          docker compose: mongo, nats, antikythera, hermes, pharos, prometheus, grafana
-   └──(HTTP :8080, your IP only)──▶ pharos
+   │                          docker compose: the core and monitoring profiles (every service but the test ones)
+   └──(HTTP :8080, your IP only)──▶ pharos        (without a tunnel)
 
-with a tunnel (optional, below):
+with a tunnel (below; the box then opens no inbound port):
 browser ──HTTPS──▶ Cloudflare (Access login) ◀──outbound tunnel── cloudflared on the box ──▶ pharos, grafana
 ```
 
@@ -97,13 +105,16 @@ browser ──HTTPS──▶ Cloudflare (Access login) ◀──outbound tunnel�
 
 ### What Terraform creates (`infra/aws`)
 
-| Resource | Notes |
-|---|---|
-| EC2 instance | `t4g.xlarge` (4 vCPU, 16 GB), latest AL2023 arm64 AMI from the public SSM parameter, 30 GB encrypted gp3, IMDSv2 only |
-| Security group | inbound **only** from `allowed_cidr`, on 8080 (and 3001 if `expose_grafana`); **no SSH** |
-| ECR repositories | `apeiron/<service>` for the five services, scan on push, lifecycle policy keeps the last 10 images |
-| Instance role | `AmazonSSMManagedInstanceCore` plus ECR pull scoped to those repositories |
-| GitHub OIDC provider and push role | trusted only for jobs that declare the GitHub environment `release` (`repo:<github_repo>:environment:release`); ECR push scoped to those repositories |
+The variable `box` splits the stack in two. Everything is created once and kept, except the instance, which exists
+only while `box = true`: START (`remote-up.sh`) applies with `box = true`, STOP (`remote-down.sh`) with `box = false`.
+
+| Resource | Kept between sessions | Notes |
+|---|---|---|
+| EC2 instance | **no**: START creates it, STOP deletes it | `t4g.xlarge` (4 vCPU, 16 GB), latest AL2023 arm64 AMI from the public SSM parameter, 30 GB encrypted gp3 (deleted with the instance), IMDSv2 only. The only resource that costs money |
+| Security group | yes, free | inbound **only** from `allowed_cidr`, on 8080 (none with a tunnel; 3001 if `expose_grafana`); **no SSH** |
+| ECR repositories | yes, free while empty | `apeiron/<service>` for the seven services (`antikythera`, `themis`, `helios`, `hermes`, `gaia`, `talos`, `pharos`), scan on push, lifecycle policy keeps the last 10 images |
+| Instance role | yes, free | `AmazonSSMManagedInstanceCore` plus ECR pull scoped to those repositories |
+| GitHub OIDC provider and push role | yes, free | trusted only for jobs that declare the GitHub environment `release` (`repo:<github_repo>:environment:release`); ECR push scoped to those repositories |
 
 The default VPC and one of its public subnets are used. State is **local** (`infra/aws/terraform.tfstate`, git-ignored).
 
@@ -111,37 +122,45 @@ On first boot cloud-init installs Docker, Git and a checksum-verified Compose pl
 `/opt/apeiron`, and writes `/opt/apeiron/.env.remote` (`REGISTRY`, `TAG`, `MONGO_CACHE_GB=4`, `WEB_BIND=0.0.0.0`, and a
 randomly generated Grafana admin password that never leaves the box).
 
-Variables (`infra/aws/variables.tf`): `region` (default `eu-west-2`), `allowed_cidr` (required, your public IP as
+Variables (`infra/aws/variables.tf`): `box` (default `false`; the scripts set it), `region` (default `eu-west-2`), `allowed_cidr` (required, your public IP as
 `x.x.x.x/32`; `0.0.0.0/0` is rejected), `instance_type` (`t4g.xlarge`), `github_repo` (`iAppGeek/apeiron`), and a few
 more (`volume_size_gb`, `expose_grafana`, `create_github_oidc_provider`, `registry_kind`, `ghcr_owner`, `registry`).
 `registry_kind` is `ghcr` by default, matching the Images workflow, so the box pulls `ghcr.io/<ghcr_owner>/apeiron/<service>`; set it to `ecr` (and `REGISTRY_KIND=ecr` in GitHub) to use the stack's own ECR repositories.
 
-### First `remote-up`
+### Setting up (free) and the first START
 
 ```bash
 aws sts get-caller-identity                 # confirm which account you are about to spend money in
-scripts/remote-up.sh --dry-run              # shows the steps without touching AWS
-scripts/remote-up.sh                        # cost warning, then 'terraform apply' (you approve its plan), then deploy
+scripts/remote-tunnel.sh --apply            # optional, free: the Cloudflare Tunnel (next section)
+scripts/remote-setup.sh                     # optional, free: the AWS parts that cost nothing (box = false)
+scripts/remote-up.sh --dry-run              # shows the START steps without touching AWS
 ```
 
-On first use the script detects your public IP, runs `terraform init` and `terraform apply -var allowed_cidr=<ip>/32` in
-`infra/aws` (Terraform shows the plan and asks you to type `yes`), waits for the SSM agent, then runs the deploy over SSM:
-update the compose files from git, log in to the registry (ECR), `docker compose pull`, start MongoDB and NATS, **seed
-only if the database is empty** (about 3 minutes for a million rows on this box), and start everything else. It prints
-the web URL when the stack is healthy.
+`remote-setup.sh` runs `terraform apply -var box=false` in `infra/aws`: IAM, the OIDC provider, the security group and
+the ECR repositories, and no instance. It is optional, because START creates whatever is missing, but it leaves
+everything ready at no cost, so START only has to create the instance.
 
-Nothing is created until you answer Terraform's prompt; the scripts never apply by themselves. Useful options:
-`--tag sha-abc1234` (deploy one specific build), `--ref <git ref>` (compose files from a branch or tag),
-`--registry-kind ecr`, `--registry ghcr.io/iappgeek`, `--seed-rows 200000`, `--allowed-cidr`, `--apply` (re-run Terraform after your IP changes).
+Nothing is created until you answer Terraform's prompt; the scripts never apply by themselves.
 
-### A normal session
+### A session: START, use, STOP
 
 ```bash
-scripts/remote-up.sh --yes          # starts the stopped box (about 2 minutes), pulls newer images, no re-seed
-open http://<ip>:8080               # the URL is printed; the IP changes at every start
+scripts/remote-up.sh                # START: cost warning, terraform apply box=true (you approve), deploy, seed
+open https://blotter.oramalabs.dev  # with the tunnel; otherwise the printed http://<ip>:8080
 scripts/remote-loadtest.sh --clients 50 --duration 300     # talos on the box, over SSM
-scripts/remote-down.sh              # stop the instance: compute billing ends, the data stays
+scripts/remote-down.sh              # STOP: terraform apply box=false (you approve): the box and its disk are deleted
 ```
+
+START detects your public IP, runs `terraform apply -var box=true` in `infra/aws` (Terraform shows the plan and asks you
+to type `yes`), waits for the SSM agent, then runs the deploy over SSM: update the compose files from git, log in to
+the registry (ECR), `docker compose pull`, start MongoDB and NATS, **seed if the database is empty** (always, on a new
+box: about 3 minutes for a million rows), and start everything else. It prints the URLs when the stack is healthy.
+Run it again on a box that is up and it changes nothing in Terraform and only redeploys.
+
+STOP deletes the instance and its disk, so **the seeded data does not survive a session**: every START seeds again.
+Useful START options: `--tag sha-abc1234` (deploy one specific build), `--ref <git ref>` (compose files from a branch or
+tag), `--registry-kind ecr`, `--registry ghcr.io/iappgeek`, `--seed-rows 200000` (seeds and loads about 5x faster),
+`--allowed-cidr`.
 
 Grafana is not exposed by default. Forward it over SSM and open <http://localhost:3001>:
 
@@ -153,16 +172,17 @@ aws ssm start-session --region eu-west-2 --target <instance-id> \
 With a tunnel set up (next section) the URL is `https://blotter.oramalabs.dev` instead, it never changes, and Grafana
 is at `https://grafana.oramalabs.dev` behind the same login.
 
-Without a tunnel, if your IP changes between sessions the box will not answer: run `scripts/remote-up.sh --apply` to
-update the security group. With a tunnel your IP does not matter.
+Without a tunnel, if your IP changes while the box is up it will not answer: run `scripts/remote-up.sh` again to update
+the security group. With a tunnel your IP does not matter.
 
-All the scripts are idempotent, default to **stop rather than destroy**, and have `--help` and `--dry-run`.
+All the scripts are idempotent, show Terraform's plan before changing anything, and have `--help` and `--dry-run`.
 
 | Script | Does |
 |---|---|
-| `remote-up.sh` | first use: `terraform apply`; otherwise starts the instance. Deploys and seeds if needed. Safe to re-run |
-| `remote-down.sh` | stops the instance and keeps the disk |
-| `remote-destroy.sh` | `terraform destroy` after you type `destroy apeiron`; removes the disk and all data |
+| `remote-setup.sh` | optional, once: the free AWS parts (`box = false`) |
+| `remote-up.sh` | **START**: creates the box (`box = true`), deploys, seeds a new box. Safe to re-run |
+| `remote-down.sh` | **STOP**: deletes the box and its disk (`box = false`); back to $0 running cost |
+| `remote-destroy.sh` | `terraform destroy` after you type `destroy apeiron`; removes the free AWS parts too |
 | `remote-loadtest.sh` | talos on the box over SSM (default), or from your machine with `--from-laptop` |
 | `remote-tunnel.sh` | one-time Cloudflare Tunnel setup (`--apply`), check (`--status`), removal (`--destroy`) |
 
@@ -199,7 +219,7 @@ cp infra/cloudflare/terraform.tfvars.example infra/cloudflare/terraform.tfvars  
 export CLOUDFLARE_API_TOKEN=...                     # the token above; never commit it
 scripts/remote-tunnel.sh --apply                    # once: terraform apply in infra/cloudflare (you approve the plan)
 scripts/remote-tunnel.sh --status                   # both host names should redirect to the Access login
-scripts/remote-up.sh                                # picks the tunnel up by itself (re-applies an existing box)
+scripts/remote-up.sh                                # START picks the tunnel up by itself
 ```
 
 With a tunnel, `remote-up.sh`:
@@ -225,31 +245,31 @@ Things to know:
 
 ### Cost
 
-Prices are for eu-west-2 (London), on demand, checked against the AWS Price List API; the stop/start pattern is the
-whole saving.
+Prices are for eu-west-2 (London), on demand, checked against the AWS Price List API; creating the box only for a
+session is the whole saving.
 
 | State | Cost |
 |---|---|
-| Running | about **$0.16/hour**: $0.1504 for the `t4g.xlarge`, $0.005 for the public IPv4 address, plus a little for the volume |
+| Up (after START) | about **$0.16/hour**: $0.1504 for the `t4g.xlarge`, $0.005 for the public IPv4 address, plus a little for the 30 GB volume ($0.0928/GB-month, billed only while it exists) |
 | A 4-hour session | about $0.65 |
-| Stopped | about **$2.80/month**: the 30 GB gp3 volume at $0.0928/GB-month. The public IP is released while stopped |
-| ECR | pennies: the lifecycle policy keeps the last 10 images per repository (a few hundred MB in all) |
-| Destroyed | nothing (the Cloudflare Tunnel stack, if set up, is free) |
+| Down (after STOP, or after setup) | **$0**: no instance, no disk, no IP. IAM, the security group, empty ECR repositories, the SSM parameter and the Cloudflare stack are free |
+| ECR, only with `registry_kind = ecr` | pennies: the lifecycle policy keeps the last 10 images per repository (a few hundred MB in all). The default, GHCR, stores nothing in AWS |
 
 Spot instances would cut the compute price by 60 to 70 percent but can be reclaimed mid-test, which defeats a latency
 measurement, so the stack does not use them. In us-east-1 the instance is about 11 percent cheaper.
 
 ### Cleaning up
 
-`scripts/remote-down.sh` after every session. `scripts/remote-destroy.sh` when you are done with the experiment: it runs
-`terraform destroy` (instance, disk, security group, IAM roles, ECR repositories and their images). Check the AWS
+`scripts/remote-down.sh` (STOP) after every session: that is enough to get back to $0. `scripts/remote-destroy.sh` when
+you are done with the experiment altogether: it runs `terraform destroy` (the instance if it is up, the security group,
+IAM roles, ECR repositories and their images). Check the AWS
 console afterwards if you want to be certain nothing is left. The ECR repositories are created with `force_delete`, so
 destroying them removes the images too. The Cloudflare Tunnel stack outlives it; `scripts/remote-tunnel.sh --destroy`
 removes it.
 
 ## Choosing a registry: GHCR or ECR
 
-The **Images** workflow (`.github/workflows/images.yml`) builds all five images on native runners (`ubuntu-latest` for
+The **Images** workflow (`.github/workflows/images.yml`) builds all seven images on native runners (`ubuntu-latest` for
 amd64, `ubuntu-24.04-arm` for arm64, no emulation), pushes each platform by digest, and merges them into one multi-arch
 manifest per service. It runs on `workflow_dispatch` and on `v*` tags, not on every push. Images are tagged with the
 git sha (`sha-abc1234`), `latest` (from `main` or a version tag) and, for version tags, the version.
@@ -294,21 +314,24 @@ a container everywhere.
 
 ## Security notes
 
-- **Network:** the only inbound rule is 8080 (with a domain: 80 and 443 instead), and optionally 3001, from `allowed_cidr`, a single address by default.
-  MongoDB (27017), NATS (4222, 8222), the server (4000) and Prometheus (9090) are never published beyond loopback on the
+- **Network:** with the Cloudflare Tunnel there is **no inbound rule at all** (cloudflared dials out); without it the only
+  inbound rule is 8080, and optionally 3001, from `allowed_cidr`, a single address by default. MongoDB (27017), NATS (4222, 8222), the server (4000) and Prometheus (9090) are never published beyond loopback on the
   box, and the security group would not admit them anyway. `/metrics` and `/health` are not proxied by nginx.
 - **No SSH:** there is no key pair and no port 22 rule. Shell access is AWS Systems Manager Session Manager, authorised by
   IAM and logged in CloudTrail.
 - **Instance:** IMDSv2 required with a hop limit of 1 (containers cannot reach the instance credentials); encrypted root
-  volume; the instance role can only talk to SSM and pull from this stack's ECR repositories.
+  volume; the instance role can only talk to SSM, pull from this stack's ECR repositories, and read the one tunnel token
+parameter.
 - **CI to AWS:** GitHub OIDC, no long-lived keys. The role trusts only this repository's `v*` tags and its `main` branch,
   and can only push to this stack's ECR repositories.
-- **TLS:** without a domain, traffic between your browser and the box is plain HTTP, restricted to your IP, carrying
-  synthetic data only. With a domain it is HTTPS with a Let's Encrypt certificate (see
-  [Your own domain over HTTPS](#your-own-domain-over-https)). The certificate's private key is kept in a private,
-  encrypted S3 bucket that only the box's role and your account's administrators can read.
-- **Grafana** allows anonymous Viewer access. That is acceptable on loopback; on the box Grafana stays on loopback unless
-  you set `expose_grafana`.
+- **TLS and access:** with the tunnel, browsers reach the box only over HTTPS through Cloudflare, behind an Access login
+  (one-time PIN to an allowed email) or the scripts' service token. Without it, traffic is plain HTTP restricted to your
+  IP, carrying synthetic data only.
+- **Secrets:** the tunnel token lives in a SecureString SSM parameter and is written on the box only to `.env.remote`
+  (mode 600). `infra/cloudflare/terraform.tfstate` holds the tunnel token and the service token secret in plain text: it
+  is git-ignored; treat it like a credentials file.
+- **Grafana** allows anonymous Viewer access. That is acceptable on loopback and behind the Access login; without the
+  tunnel, Grafana stays on loopback on the box unless you set `expose_grafana`.
 - **Public repo:** only `.env.example` is committed, `*.tfstate`, `*.tfvars` and `.terraform/` are git-ignored, and no
   secret or AG Grid licence key appears anywhere in the repository or the images. Terraform state contains resource IDs
   and is kept local; do not commit it.

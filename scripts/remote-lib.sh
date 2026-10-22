@@ -7,7 +7,6 @@ TF_DIR="$REPO_ROOT/infra/aws"
 CF_TF_DIR="$REPO_ROOT/infra/cloudflare"
 export BOX_DIR=/opt/apeiron
 export HOURLY_USD="0.16"
-export STOPPED_USD_PER_MONTH="2.80"
 
 info() { printf '%s\n' "$*" >&2; }
 die() {
@@ -30,6 +29,25 @@ tf_output() {
 # The same for the persistent tunnel stack (infra/cloudflare): empty when no tunnel has been set up.
 cf_output() {
   terraform -chdir="$CF_TF_DIR" output -raw "$1" 2>/dev/null || true
+}
+
+# Applies infra/aws with box=true (the instance, its disk and public IP: the only paid resources) or box=false (only
+# the free parts). Every caller passes the same settings, so the free parts never drift between START and STOP: the
+# allowed CIDR (the one given, or this machine's public IP when it is empty) and, once infra/cloudflare exists, the
+# tunnel. Further arguments go to terraform apply. Terraform shows the plan and asks you to approve it.
+# Usage: tf_apply_box true|false <allowed CIDR, or ""> [terraform apply arguments...]
+tf_apply_box() {
+  local box="$1" cidr="$2" host
+  shift 2
+  if [ -z "$cidr" ]; then
+    cidr="$(curl -fsS -m 10 https://checkip.amazonaws.com | tr -d '[:space:]')/32" ||
+      die "could not detect your public IP; pass --allowed-cidr"
+  fi
+  local -a vars=(-var "box=$box" -var "allowed_cidr=$cidr")
+  host="$(cf_output hostname)"
+  [ -z "$host" ] || vars+=(-var "public_hostname=$host" -var "tunnel_token_parameter=$(cf_output tunnel_token_parameter)")
+  terraform -chdir="$TF_DIR" init -input=false >/dev/null
+  terraform -chdir="$TF_DIR" apply "${vars[@]}" "$@"
 }
 
 REGION=""
