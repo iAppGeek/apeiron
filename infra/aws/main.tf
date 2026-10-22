@@ -7,7 +7,11 @@ locals {
   registry = var.registry != "" ? var.registry : (var.registry_kind == "ecr" ? local.ecr_registry : "ghcr.io/${var.ghcr_owner}")
 }
 
+# The only part of the stack that costs money: the instance, its disk and its public IPv4 address. scripts/remote-up.sh
+# applies with box = true and scripts/remote-down.sh with box = false; everything else stays and costs nothing.
 resource "aws_instance" "box" {
+  count = var.box ? 1 : 0
+
   ami                         = data.aws_ssm_parameter.al2023_arm64.value
   instance_type               = var.instance_type
   subnet_id                   = data.aws_subnets.default.ids[0]

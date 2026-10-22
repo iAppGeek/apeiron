@@ -14,6 +14,12 @@ variable "allowed_cidr" {
   }
 }
 
+variable "box" {
+  description = "Create the instance (and its disk and public IP), the only resources that cost money. false keeps just the free parts: IAM, the OIDC provider, the security group and the ECR repositories."
+  type        = bool
+  default     = false
+}
+
 variable "instance_type" {
   description = "Graviton instance type. t4g.xlarge is 4 vCPU and 16 GB."
   type        = string

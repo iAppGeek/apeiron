@@ -53,7 +53,7 @@ apeiron/
     docker-compose.yml profiles: core | seed | monitoring | loadtest
     prometheus/, grafana/ (provisioned dashboard), caddy/, nginx/
     aws/               Terraform: ECR, EC2 t4g.xlarge, SG, IAM (SSM + ECR pull)
-  scripts/             remote-up.sh, remote-down.sh, remote-destroy.sh, remote-loadtest.sh, remote-tunnel.sh
+  scripts/             remote-setup.sh, remote-up.sh, remote-down.sh, remote-destroy.sh, remote-loadtest.sh, remote-tunnel.sh
   docs/                architecture.md, hosting.md, db-adapters.md (Oracle/KDB mapping)
   turbo.json, pnpm-workspace.yaml, .github/workflows/ci.yml
 ```
@@ -166,8 +166,8 @@ Mongo and NATS data live on named volumes.
   - The instance is created with `cloud-init`, which installs Docker and the compose plugin.
   - **No ALB or NAT gateway**, to keep costs down.
 - **Scripts** (`scripts/remote-*.sh`, using the AWS CLI and SSM, so no SSH keys):
-  - `remote-up`: start the instance (or `terraform apply` on first run), log in to ECR, `compose pull && compose --profile core --profile monitoring up -d`, run the seeder only if no data has been seeded, and print the URLs.
-  - `remote-down`: **stop** the instance. The volume stays, so Mongo data persists and there's no re-seed next time.
+  - `remote-up` (START): `terraform apply -var box=true` creates the instance, then log in to ECR, `compose pull && compose --profile core --profile monitoring up -d`, run the seeder if the database is empty (always on a new box), and print the URLs.
+  - `remote-down` (STOP): `terraform apply -var box=false` deletes the instance and its volume, so the running cost is $0; the free parts (IAM, security group, ECR, the Cloudflare Tunnel) stay. `remote-setup` creates those free parts up front.
   - `remote-destroy`: `terraform destroy`, which removes everything including the data.
   - `remote-loadtest`: run the loadtest container on the box, or from the laptop against it.
 - **Access:** HTTP over the instance's public IP, restricted to your IP. Optionally, the `tunnel` profile serves it on `https://blotter.oramalabs.dev` through a Cloudflare Tunnel behind Cloudflare Access, with no inbound port (`infra/cloudflare`, `scripts/remote-tunnel.sh`).
