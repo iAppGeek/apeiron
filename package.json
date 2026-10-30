@@ -4,7 +4,7 @@
   "private": true,
   "description": "Infinity Blotter POC: 1M FX algo orders x 50 columns in a React + AG Grid blotter.",
   "license": "MIT",
-  "packageManager": "pnpm@10.33.0",
+  "packageManager": "pnpm@10.34.9",
   "engines": {
     "node": ">=24"
   },
@@ -22,6 +22,6 @@
     "e2e:resilience:quick": "pnpm --filter @apeiron/e2e e2e:resilience:quick"
   },
   "devDependencies": {
-    "turbo": "^2.11.7"
+    "turbo": "^2.11.10"
   }
 }

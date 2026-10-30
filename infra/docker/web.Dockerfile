@@ -2,8 +2,8 @@
 # Web image for pharos: turbo prune, Vite build, then the static build behind unprivileged nginx.
 # Build:  docker build -f infra/docker/web.Dockerfile -t apeiron/pharos .
 ARG NODE_VERSION=24
-ARG PNPM_VERSION=10.33.0
-ARG TURBO_VERSION=2.11.7
+ARG PNPM_VERSION=10.34.9
+ARG TURBO_VERSION=2.11.10
 # Latest stable (even-numbered) nginx minor. 1.31 is the mainline branch.
 ARG NGINX_VERSION=1.30
 
