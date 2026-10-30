@@ -209,7 +209,7 @@ services:
   # healthcheck; the tunnel's health shows on the Zero Trust dashboard.
   cloudflared:
     profiles: [tunnel]
-    image: cloudflare/cloudflared:2026.10.0
+    image: cloudflare/cloudflared:2026.10.7
     command: ["tunnel", "--no-autoupdate", "run"]
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
