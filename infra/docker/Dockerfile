@@ -3,8 +3,8 @@
 # Build:  docker build -f infra/docker/Dockerfile --build-arg APP=gaia -t apeiron/gaia .
 # APP is the folder name under apps/ (package @apeiron/<APP>).
 ARG NODE_VERSION=24
-ARG PNPM_VERSION=10.33.0
-ARG TURBO_VERSION=2.11.7
+ARG PNPM_VERSION=10.34.9
+ARG TURBO_VERSION=2.11.10
 
 FROM node:${NODE_VERSION}-slim AS base
 ARG PNPM_VERSION

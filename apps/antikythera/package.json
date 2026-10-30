@@ -17,20 +17,20 @@
   "dependencies": {
     "@apeiron/iris": "workspace:*",
     "@apeiron/logos": "workspace:*",
-    "@fastify/websocket": "^11.3.3",
-    "fastify": "^5.12.5",
+    "@fastify/websocket": "^11.3.4",
+    "fastify": "^5.12.7",
     "prom-client": "^15.1.3",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@apeiron/eslint-config": "workspace:*",
     "@apeiron/tsconfig": "workspace:*",
-    "@types/node": "^24.0.0",
+    "@types/node": "^24.19.2",
     "@types/ws": "^8.18.2",
-    "eslint": "^10.12.0",
+    "eslint": "^10.14.0",
     "tsx": "^4.23.15",
     "typescript": "~6.0.3",
-    "vitest": "^5.0.3",
+    "vitest": "^5.0.5",
     "ws": "^8.22.0"
   }
 }

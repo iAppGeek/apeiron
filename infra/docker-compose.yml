@@ -209,7 +209,7 @@ services:
   # healthcheck; the tunnel's health shows on the Zero Trust dashboard.
   cloudflared:
     profiles: [tunnel]
-    image: cloudflare/cloudflared:2026.10.0
+    image: cloudflare/cloudflared:2026.10.7
     command: ["tunnel", "--no-autoupdate", "run"]
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
@@ -223,7 +223,7 @@ services:
   toxiproxy:
     profiles: [resilience]
     # Latest release (v2.12.0); the image has no floating minor tag, so the patch is pinned.
-    image: ghcr.io/shopify/toxiproxy:2.12.0
+    image: ghcr.io/shopify/toxiproxy:2.13.0
     command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
     volumes:
       - ./infra/toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
@@ -260,7 +260,7 @@ services:
   prometheus:
     profiles: [monitoring]
     # Newest stable release (the image has no floating minor tag, so the patch is pinned).
-    image: prom/prometheus:v3.15.0
+    image: prom/prometheus:v3.15.1
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -280,7 +280,7 @@ services:
 
   grafana:
     profiles: [monitoring]
-    image: grafana/grafana:13.2
+    image: grafana/grafana:13.3
     environment:
       # Anonymous visitors get the Viewer role so the dashboard opens without a login. Local use only:
       # the port is bound to 127.0.0.1. Admin sign-in (admin / GRAFANA_ADMIN_PASSWORD) is still needed to edit.
